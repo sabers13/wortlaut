@@ -217,13 +217,75 @@ filled.
 
 ---
 
-## 7. ADR two-pass rule (this variant's ceiling compensation)
+## 7. ADR cold-review convergence rule
 
-Without a super-model, architecture errors have no upstream catcher. Compensate
-structurally: any decision that creates or modifies an ADR is drafted in one
-orchestrator session, then reviewed by a **fresh, cold** orchestrator session that
-reads only the repo (see PROMPTS.md §ADR review). Cold review catches
-context-contamination errors, which is most of them.
+Architecture errors need an independent catcher. Any decision that creates or
+substantively modifies an ADR is reviewed by a **fresh, cold** orchestrator
+session that reads only the repository (see PROMPTS.md §ADR cold review). Cold
+review exists to detect concrete architecture defects, not to optimize an ADR
+until no better design can be imagined.
+
+A single ADR **lineage** may receive at most **three cold-review sessions**. A
+lineage is the same underlying architectural decision/problem scope through its
+draft and revision history. Renumbering an ADR, rewriting wording, moving the
+same unresolved design to another file, or otherwise cosmetically repackaging it
+does not reset the count. A materially new architectural decision introduced
+after an earlier ADR has been accepted may start a new lineage; this exception
+must not be used to bypass the cap.
+
+The three reviews have different scopes:
+
+1. **Cold review #1 — broad architecture challenge.** Review internal
+   contradictions, conflicts with accepted ADRs/AGENTS/WORKFLOW, unsafe data or
+   API semantics, non-executable sequencing, materially understated costs,
+   inadequately supported alternatives, and missing failure-state or ownership
+   contracts. Genuine blockers return to revision.
+2. **Cold review #2 — focused remedy verification.** Verify review-1 objections
+   are actually resolved, inspect direct knock-on contradictions caused by those
+   remedies, and catch a serious material correctness/executability/integrity
+   defect genuinely missed by review #1. It is not another unrestricted redesign
+   pass. Optional refinements do not qualify as blockers.
+3. **Cold review #3 — FINAL CONVERGENCE REVIEW.** This is the last cold review
+   permitted for the lineage. Its default outcome is approval/freeze when the
+   architecture is coherent enough to implement. It may block only for a severe
+   defect involving data corruption/data loss, security or integrity failure,
+   architecture impossible or non-executable as specified, direct contradiction
+   with a binding invariant/accepted ADR/required external contract, or a
+   failure-state/atomicity defect capable of materially incorrect persistent
+   state.
+
+Review #3 must not block for wording/style, naming preferences, implementation
+details safely owned by a slice, optimizations, additional test ideas,
+speculative future requirements, merely preferable alternatives, rare
+non-destructive cases that already fail closed safely, or opportunities to make
+an executable contract more elegant.
+
+**There is no fourth ordinary cold review for the same ADR lineage.** If review
+#3 finds no severe blocker, approve the ADR, remove `NEEDS COLD REVIEW`, freeze
+the architecture, and resume implementation.
+
+If review #3 still finds a severe blocker, the reviewer records terminal
+**final-convergence blockers** (`F1`, `F2`, ...) under the ADR's existing
+`## Cold review` section. Each record states the concrete severe defect, why it
+meets the review-3 severity threshold, and the required
+simplify/split/descope direction. These are terminal evidence, not ordinary
+objections that lead to another same-lineage revision. Replace
+`NEEDS COLD REVIEW` with **`NON-CONVERGENT / BLOCKED`** and permanently close
+that lineage.
+
+A NON-CONVERGENT / BLOCKED lineage is not substantively revised and sent through
+review #4. Recovery requires either abandoning/descoping the affected product
+scope or creating a genuinely new **successor ADR lineage** whose architecture
+is materially simpler, narrower, split, or otherwise materially different. The
+successor must explicitly identify and supersede the blocked lineage. Cosmetic
+renaming, file movement, wording cleanup, or preservation of substantially the
+same unresolved architecture does not create a new lineage. A legitimate
+successor starts at cold review #1 and receives its own three-review cap; this is
+not review #4 because the prior lineage remains terminally closed.
+
+**Cold review is defect detection, not architecture optimization.** The existence
+of a better imaginable design is not itself a blocker. Non-blocking improvements
+belong to the owning implementation slice, `docs/backlog.md`, or no action.
 
 ---
 

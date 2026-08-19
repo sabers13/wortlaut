@@ -274,27 +274,94 @@ verbatim. On success this chat prints the NEW SLICE OPEN prompt and ends.
 
 ## ADR cold review (WORKFLOW.md §7)
 
-Open a **fresh** orchestrator session (other model of the ORCH pair if available):
+Open a **fresh** orchestrator session (other model of the ORCH pair if available).
+The dispatch MUST fill the review ordinal:
+
+`Cold review: <1 | 2 | 3 FINAL>`
 
 ```
+
 Read WORKFLOW.md, AGENTS.md, STATE.md, and docs/adr/<ID> from the private GitHub
 repository (or local repository on disk). You have no other context, deliberately.
 
-Review this ADR against the repo as it exists on disk: internal contradictions,
-conflicts with prior ADRs or AGENTS.md, costs understated, alternatives
-dismissed without evidence. You are the only catcher above this decision — do
-not defer.
+Cold review: <1 | 2 | 3 FINAL>
 
-Output: either "APPROVED — remove NEEDS COLD REVIEW" or a numbered objection
-list written into the ADR under ## Cold review. Then close per Orchestrator
-CLOSE (non-slice).
+Apply WORKFLOW.md §7 / AGENTS G7 according to that exact ordinal.
+
+For review #1, perform the broad architecture challenge: internal
+contradictions, conflicts with accepted ADRs or AGENTS/WORKFLOW, unsafe data or
+API semantics, non-executable sequencing, materially understated costs,
+alternatives dismissed without adequate rationale, and missing failure-state or
+ownership contracts.
+
+For review #2, do NOT perform another unrestricted redesign pass. Verify the
+prior objections and their resolution records, inspect direct knock-on
+contradictions introduced by those remedies, and catch only a serious material
+correctness/executability/integrity blocker genuinely missed previously.
+Optional refinements, preferable alternatives, implementation details,
+optimizations, and speculative future improvements are not blockers.
+
+For review #3 FINAL:
+
+THIS IS THE FINAL COLD REVIEW PER ADR LINEAGE. NO FOURTH REVIEW IS PERMITTED.
+
+Review #3 may block only for a severe defect involving:
+
+* data corruption or data-loss risk;
+* security or integrity failure;
+* architecture impossible or non-executable as specified;
+* direct contradiction with a binding invariant, accepted ADR, or required
+  external contract; or
+* a failure-state/atomicity defect capable of producing materially incorrect
+  persistent state.
+
+Do not block review #3 for wording/style, naming preferences, implementation
+details safely owned by a slice, optimizations, extra test ideas, speculative
+future requirements, merely preferable alternatives, rare non-destructive edge
+cases that already fail closed safely, or opportunities to make an executable
+contract more elegant.
+
+Cold review asks whether a concrete blocking defect exists. It is not an
+architecture-optimization exercise.
+
+Valid output:
+
+* review #1 or #2: either `APPROVED — remove NEEDS COLD REVIEW` or qualifying
+  numbered objections written under `## Cold review`;
+* review #3 FINAL: ONLY one of:
+
+  1. `APPROVED — remove NEEDS COLD REVIEW`
+  2. `NON-CONVERGENT / BLOCKED — successor lineage or product descope required`
+
+If review #3 returns NON-CONVERGENT / BLOCKED, before close:
+
+- record each severe defect under the existing ADR `## Cold review` section as
+  `F1`, `F2`, ... final-convergence blockers;
+- for each F-record state the concrete defect, why it satisfies the review-3
+  severity threshold, and the required simplify/split/descope direction;
+- do NOT create ordinary `O<n>` objections that imply another revision cycle;
+- replace `NEEDS COLD REVIEW` with `NON-CONVERGENT / BLOCKED`;
+- permanently close that ADR lineage;
+- do NOT substantively revise it and do NOT schedule review #4;
+- the next governance action is either product descope or creation of a genuinely
+  new successor ADR lineage that materially simplifies, narrows, splits, or
+  otherwise materially changes the architecture and explicitly supersedes the
+  blocked lineage;
+- cosmetic renaming, moving files, wording cleanup, or preserving substantially
+  the same unresolved architecture does not qualify as a new lineage;
+- a legitimate successor lineage begins at cold review #1 with its own
+  three-review cap.
+
+Then close per Orchestrator CLOSE (non-slice).
+
 ```
 
 ## Next step
 
-Open a fresh chat with the **other** ORCH model, paste the prompt, no file
-attachments needed beyond GitHub/repo access. Return here: APPROVED or the
-objection list.
+Open a fresh chat with the **other** ORCH model, fill the exact cold-review
+ordinal, paste the prompt, and provide GitHub/repository access. No manual diff
+or ZIP is required when committed state is available remotely. Return the
+review outcome. Review #3 FINAL has no review-#4 continuation.
 
 ---
 
@@ -391,13 +458,22 @@ Session close, per WORKFLOW.md §8. Do these in order, then stop.
      architectural choice     -> docs/adr/  (mark: NEEDS COLD REVIEW)
      parked item              -> docs/backlog.md (BLOCKED + what unblocks it)
 
-3. If any ADR was created or substantively modified this session, the
-       next-session block below MUST target an ADR cold review (see §ADR review),
-       before any dispatch. An approving cold review's own review-status record and
-       the immediate administrative removal of `NEEDS COLD REVIEW` do not by
-       themselves trigger another cold review. Any other substantive ADR content
-       change still does. An objecting review follows AGENTS G7: revision next, then
-       a fresh cold review.
+3. If any ADR was created or substantively modified this session, apply
+       WORKFLOW §7 / AGENTS G7 using that ADR lineage's current cold-review
+       ordinal. Before any implementation dispatch:
+       - a new/substantively changed lineage targets review #1;
+       - review-#1 qualifying objections target revision, whose close targets
+         fresh review #2;
+       - review-#2 qualifying objections target revision, whose close targets
+         fresh review #3 FINAL;
+       - review #3 FINAL either approves/freezes the ADR or terminally closes the
+         lineage as NON-CONVERGENT / BLOCKED after recording final-convergence
+         blockers. The next action is product descope or a genuinely new successor
+         ADR lineage that materially changes/narrows the architecture and starts at
+         review #1. It MUST NOT modify the blocked lineage toward review #4.
+       An approving cold review's review-status record and immediate
+       administrative removal of `NEEDS COLD REVIEW` do not themselves trigger
+       another cold review.
 
 4. Push synchronization: if docs or governance commits were made, ensure updated
    main is pushed to the private remote mirror (`git push origin main`).

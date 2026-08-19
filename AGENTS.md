@@ -173,18 +173,31 @@ backlog work.
   *Defect prevented:* reference-reading silently mutating two repos and
   smuggling scope changes past the brief (WORKFLOW §12).
 
-- **G7 — ADR cold review has explicit objecting and approving terminal rules.**
-  When PROMPTS.md §ADR cold review returns objections, the ADR keeps
-  `NEEDS COLD REVIEW`, and PROMPTS.md §Orchestrator CLOSE step 3 is satisfied by
-  targeting an ADR **revision** session whose own close then targets a fresh cold
-  review. Re-reviewing an unchanged draft is a no-op. When a cold review approves
-  an ADR, recording that approval and immediately removing `NEEDS COLD REVIEW` is
-  an administrative review-status change and does **not** itself require another
-  cold review. Any substantive ADR modification still requires the normal fresh
-  cold review before dispatch.
-  *Defect prevented:* a literal reading of CLOSE step 3 loops either an objected
-  unchanged draft or an already-approved ADR through cold review forever
-  (WORKFLOW §7).
+- **G7 — ADR cold review converges within a three-review lineage cap.**
+  Every ADR lineage tracks its cold-review ordinal. Review #1 is the broad
+  architecture challenge. If it objects, revise the objections and proceed to
+  fresh review #2. Review #2 is focused on those remedies, their direct knock-on
+  contradictions, and serious materially missed correctness/executability/
+  integrity defects; optional improvements and implementation details are not
+  blockers. If qualifying blockers remain, revise them and proceed to fresh
+  review #3, explicitly the **FINAL CONVERGENCE REVIEW**. Review #3 may block only
+  for severe data-corruption/data-loss, security/integrity, impossible or
+  non-executable architecture, direct binding-contract contradiction, or
+  persistent-state failure/atomicity defects. There is **no review #4** for the
+  same lineage. Review #3 either approves/removes `NEEDS COLD REVIEW`/freezes the
+  architecture, or records terminal final-convergence blockers (`F1`, `F2`, ...)
+  and replaces `NEEDS COLD REVIEW` with **`NON-CONVERGENT / BLOCKED`**, permanently
+  closing that lineage. A blocked lineage is never substantively revised into a
+  review #4. Recovery requires product descope or a genuinely new successor ADR
+  lineage whose architecture is materially simpler, narrower, split, or otherwise
+  materially different and explicitly supersedes the blocked lineage. Cosmetic
+  renaming, file movement, wording cleanup, or substantially preserving the same
+  unresolved architecture does not reset the count. A legitimate successor starts
+  at review #1 with its own three-review cap. Every permitted review still uses a
+  fresh, cold orchestrator session. Approval and immediate administrative removal
+  of `NEEDS COLD REVIEW` do not themselves trigger another review.
+  *Defect prevented:* governance becoming an unbounded review/revision loop that
+  continually expands architecture and delays implementation (WORKFLOW §7).
 
 - **G8 — Two authorities: local execution vs. private GitHub mirror.** `[reviewed]`
   The local Git repository / terminal environment is authoritative for: `git status`

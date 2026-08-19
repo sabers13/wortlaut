@@ -62,13 +62,27 @@ memory of a conversation.
 * **ADR-0001, ADR-0002 and ADR-0003 remain accepted.** ADR-0004 is the only
   active `NEEDS COLD REVIEW` ADR. The pre-existing ADR-0002/ADR-0003 D27 ID
   collision remains parked and is not reopened by this revision.
+* **ADR cold-review convergence is capped at three reviews per lineage.**
+  Review #1 is broad, review #2 is focused remedy/knock-on verification, and
+  review #3 is the **FINAL CONVERGENCE REVIEW** with a severe-blocker threshold.
+  No fourth ordinary cold review is permitted for the same lineage. A review-3
+  severe blocker is recorded as terminal final-convergence evidence and changes
+  the lineage to NON-CONVERGENT / BLOCKED permanently. Recovery requires product
+  descope or a genuinely new successor ADR lineage that materially simplifies,
+  narrows, splits, or otherwise changes the architecture and explicitly
+  supersedes the blocked lineage; the successor starts at review #1. Cold review
+  detects concrete blockers; it is not architecture optimization.
+* **ADR-0004 has completed cold reviews #1 and #2.** Review #1 produced O1–O3;
+  review #2 verified those remedies and produced O4–O5. The next ADR-0004 review
+  is therefore **#3 — FINAL CONVERGENCE REVIEW**. There will be no ADR-0004
+  review #4.
 * **Two Authorities / supervised-worker fallback remains active.** Local
   Git/terminal is authoritative for working-tree/runtime/gate facts; private
   `origin` is the persistent authoritative mirror for committed/pushed state.
 
 ## Gate
 
-* Fresh governance-revision gate on 2026-08-19 — **PASS**:
+* Fresh ADR cold-review convergence-governance gate on 2026-08-20 — **PASS**:
   `.venv/bin/ruff check .` — all checks passed;
   `.venv/bin/mypy --strict .` — success, no issues in **10 source files**;
   `.venv/bin/pytest -q` — **80 passed**;
@@ -94,11 +108,15 @@ memory of a conversation.
 
 ## Blocked
 
-* **ADR-0004 approval is the immediate blocker.** No implementation dispatch is
-  allowed until a fresh cold orchestrator reviews the O4/O5 revision. If it
-  approves, the review may administratively remove `NEEDS COLD REVIEW`; if it
-  files new objections, AGENTS G7 requires another revision followed by another
-  fresh cold review.
+* **ADR-0004 cold review #3 — FINAL CONVERGENCE REVIEW is the immediate
+  blocker.** No implementation dispatch is allowed before it. If review #3
+  approves, remove `NEEDS COLD REVIEW`, freeze ADR-0004, and return to slice-3
+  alignment. If review #3 finds a qualifying severe blocker, record terminal
+  final-convergence blocker(s), change ADR-0004 to
+  **NON-CONVERGENT / BLOCKED**, and permanently close that lineage. Recovery then
+  requires product descope or a genuinely new successor ADR lineage that
+  materially changes/narrows the architecture and explicitly supersedes
+  ADR-0004. There is no ADR-0004 review #4.
 * **slice-3 closure remains PAUSED.** `slice/3` must not be merged, rebased or
   rewritten before ADR-0004 approval. After approval, the existing slice-3
   orchestrator must issue the implementation-alignment brief against the accepted
@@ -119,12 +137,15 @@ memory of a conversation.
 
 ## Next three actions
 
-1. **Fresh ADR-0004 cold review** (WORKFLOW §7 / AGENTS G7) against committed
-   repository-only context, specifically verifying D46/D47 and every cross-file
-   pending amendment. No implementation dispatch.
-2. **If approved:** remove `NEEDS COLD REVIEW` as the cold-review administrative
-   close and return to the existing slice-3 orchestrator for the Stage-01
-   implementation-alignment brief. **If objected:** revise the new numbered
-   objections, then run another fresh cold review.
+1. **ADR-0004 cold review #3 — FINAL CONVERGENCE REVIEW** (WORKFLOW §7 /
+   AGENTS G7) against committed repository-only context, verifying D46/D47 and
+   their cross-file amendments under the review-3 severe-blocker threshold. No
+   implementation dispatch.
+2. **If review #3 approves:** remove `NEEDS COLD REVIEW`, freeze ADR-0004, and
+   return to the existing slice-3 orchestrator for the Stage-01
+   implementation-alignment brief. **If review #3 finds a severe blocker:** record
+   the terminal blocker(s), close ADR-0004 as NON-CONVERGENT / BLOCKED, and move
+   only to product descope or a genuinely new materially narrower/different
+   successor ADR lineage; do not revise ADR-0004 or schedule review #4.
 3. **After ADR-0004 approval and slice-3 alignment:** obtain a fresh gate/report
    acceptance for the aligned slice-3 work, then perform normal slice-3 closure.
