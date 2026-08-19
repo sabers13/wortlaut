@@ -5,37 +5,16 @@ them. REJECTED items are listed so they do not resurface.
 
 ## Blocked
 
-- **slice-3 closure — PAUSED by the ADR-0004 governance amendment (2026-08-19).**
-  The slice-3 implementation passed Attempt 1 and was accepted report-only under
-  `Risk: none` at `7ceea14e39a7c831edfc803632d3c868ea0f3091`; that acceptance
-  stands. It is **not merged and not closed**, and `slice/3` must not be merged,
-  rebased, or rewritten while this item is open. Cold review through review #3 is
-  complete (ADR-0004 APPROVED / FROZEN). Unblocks strictly in this order:
-
-  ```
-  ADR-0004 APPROVED / FROZEN
-  -> slice-3 Stage-01 / PART-A implementation alignment
-  -> fresh gate/report acceptance + required migration-risk review
-  -> normal slice-3 closure
-  ```
-
-  This is an owner-driven architecture change, **not** a WORKFLOW §5
-  implementation failure: no attempt is added to the ladder and the audit counter
-  is unchanged. The alignment brief is `tasks/slice-3-alignment.md`.
-- **`reference/schema.sql` is intentionally stale with respect to ADR-0004.** It
-  still shows `sense.gloss_en NOT NULL`, scalar `note.gloss_user`, and
-  `note.status` without the new resolver/meaning-state separation documented in
-  ADR-0004; it has no `sense_meaning`, no `sense_meaning_derivation`, no
-  `note_meaning_lang`, no `note_user_meaning`, no `lemma.plural_none` marker,
-  no lemma/sense semantic refs (`lemma.semantic_ref`, `sense.semantic_ref`),
-  no `sense.source_ref`, no durable `note_dictionary_binding` representation,
-  no active dictionary version+SHA metadata, and numeric note `lemma_id` /
-  `sense_id` still appear as if durable. The governance session that drafted
-  ADR-0004 was forbidden from implementation changes, so the mismatch is
-  recorded rather than repaired. It is resolved by the owning slice-3 alignment
-  (PART A) and slice-7 runtime (PART B) work, not by this governance session;
-  until then, read the mismatch as blocked-and-documented, not as an undetected
-  contradiction.
+- **`reference/schema.sql` remains intentionally stale only for ADR-0004
+  PART-B/runtime state.** The accepted and T3-reviewed slice-3 alignment resolves
+  the PART-A dictionary shape: stable lemma/sense semantic refs,
+  `sense.source_ref` / `source_namespace`, `sense_meaning`,
+  `sense_meaning_derivation`, `lemma.plural_none`, and removal of normative
+  `sense.gloss_en`. The remaining mismatch is owned by slice-7: scalar
+  `note.gloss_user`, resolver/meaning-state separation, `note_meaning_lang`,
+  `note_user_meaning`, durable `note_dictionary_binding`, active dictionary
+  version+SHA metadata, and runtime enforcement that numeric dictionary IDs are
+  caches rather than durable semantic identity.
 - **ADR-0002 D27 and ADR-0003 D27 are two different decisions sharing one ID.**
   ADR-0002 D27 is the two-stage highlight capture contract; ADR-0003 D27 is the
   five-button confidence UI. Both ADRs are accepted and cold-review-approved, so
@@ -108,8 +87,6 @@ them. REJECTED items are listed so they do not resurface.
   work).
 - `render.back()` with `examples=[]`: tolerated but untested — reachable via
   manual entry (ADR-0001 §6). Add a test in the render slice.
-- Confirm build stage 01 populates multi-word separable surface forms
-  (`rief an`, `ruft an`) — inflected manual entry depends on it (ADR-0001 §15).
 - **slice-3 T3 N1 test-fixture repair:** `tests/conftest.py:create_test_db` currently has an off-by-one lemma INSERT binding in its synthetic test DB: the 24-element tuples feed a 23-column INSERT, so `genitive_sg` receives constant `0` and intended values such as `Sees` / `Hauses` are dropped. The independent T3 reviewer verified the real Stage-01 builder persists `genitive_sg` correctly, so this is non-blocking test-fixture debt, not a Stage-01 data defect. Repair before a future test relies on that fixture field.
 - **slice-3 T3 N2 fallback-identity hardening:** the A4 fallback fingerprint canonicalizer intentionally accepts scalar numbers found in included raw Wiktextract distinction structures. Current asset-local SQLite IDs provably cannot enter because fingerprinting happens on the raw upstream sense before local IDs exist, so the accepted contract is satisfied. If future real upstream shapes place volatile numeric bookkeeping inside included nested fields (`form_of`, `alt_of`, `compound_of`, etc.), explicitly exclude those upstream bookkeeping keys before relying on cross-version continuity.
 
