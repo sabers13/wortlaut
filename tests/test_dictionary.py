@@ -1,4 +1,4 @@
-"""Tests for app/dictionary.py read-only dictionary asset reader."""
+"""Tests for app/dictionary.py read-only dictionary asset reader (ADR-0004 PART A alignment)."""
 
 from __future__ import annotations
 
@@ -24,7 +24,9 @@ def test_read_only_enforcement(create_test_db: Callable[[], Path]) -> None:
     db_path = create_test_db()
     with Dictionary(db_path) as d:
         with pytest.raises(sqlite3.OperationalError):
-            d._conn.execute("INSERT INTO lemma (lemma, pos) VALUES ('Test', 'NOUN')")
+            d._conn.execute(
+                "INSERT INTO lemma (lemma, pos, semantic_ref) VALUES ('Test', 'NOUN', 'test_ref')"
+            )
 
 
 def test_dictionary_implements_lookup_protocol(create_test_db: Callable[[], Path]) -> None:
@@ -33,6 +35,7 @@ def test_dictionary_implements_lookup_protocol(create_test_db: Callable[[], Path
     with Dictionary(db_path) as d:
         assert hasattr(d, "lookup_exact")
         assert hasattr(d, "lookup_surface_form")
+        assert hasattr(d, "lookup_senses")
 
 
 # --- Step 1: Exact Matches and Gender Disambiguation ---
@@ -55,6 +58,7 @@ def test_exact_lookup_and_gender_disambiguation(create_test_db: Callable[[], Pat
         assert der_see[0].gender == "der"
         assert der_see[0].ipa == "zeː"
         assert der_see[0].ipa_source == "wiktionary"
+        assert der_see[0].semantic_ref is not None
 
         # Exact feminine match
         die_see = d.lookup_exact("See", pos="NOUN", gender="die")
@@ -118,20 +122,35 @@ def test_resolution_ladder_surface_form(create_test_db: Callable[[], Path]) -> N
 
 
 def test_resolution_ladder_compound_split(create_test_db: Callable[[], Path]) -> None:
-    """Ladder Step 3 through Dictionary: compound splitter reproduces ADR case."""
+    """Ladder Step 3 through Dictionary: compound splitter with D46 bindings."""
     db_path = create_test_db()
     with Dictionary(db_path) as d:
         refs = d.resolve("Krankenversicherungskarte")
         assert len(refs) == 1
-        assert refs[0] == Ref(
-            lemma="Krankenversicherungskarte",
-            pos="NOUN",
-            gender="die",
-            status="derived_compound",
-            lemma_id=None,
-            components=["kranken", "versicherung", "karte"],
-            head_lemma="Karte",
-        )
+        ref = refs[0]
+        assert ref.lemma == "Krankenversicherungskarte"
+        assert ref.pos == "NOUN"
+        assert ref.gender == "die"
+        assert ref.status == "derived_compound"
+        assert ref.lemma_id is None
+        assert ref.components == ["kranken", "versicherung", "karte"]
+        assert ref.head_lemma == "Karte"
+        assert ref.component_bindings is not None
+        assert len(ref.component_bindings) == 3
+
+        b0, b1, b2 = ref.component_bindings
+        assert b0.lemma == "kranken"
+        assert b0.lemma_id == 4
+        assert b0.lemma_ref.startswith("lemma:v1:")
+        assert b0.sense_ref.startswith("sense:v1:")
+
+        assert b1.lemma == "Versicherung"
+        assert b1.lemma_id == 5
+        assert b1.lemma_ref.startswith("lemma:v1:")
+
+        assert b2.lemma == "Karte"
+        assert b2.lemma_id == 6
+        assert b2.lemma_ref.startswith("lemma:v1:")
 
 
 def test_resolution_ladder_stub_fallthrough(create_test_db: Callable[[], Path]) -> None:
@@ -148,25 +167,39 @@ def test_resolution_ladder_stub_fallthrough(create_test_db: Callable[[], Path]) 
             lemma_id=None,
             components=None,
             head_lemma=None,
+            component_bindings=None,
         )
 
 
-# --- Senses, Examples, and Composite Entries ---
+# --- Senses, Meanings, Examples, and Composite Entries ---
 
 
-def test_get_senses_and_examples(create_test_db: Callable[[], Path]) -> None:
-    """Dictionary retrieves senses and ranked examples for a lemma."""
+def test_get_senses_and_meanings(create_test_db: Callable[[], Path]) -> None:
+    """Dictionary retrieves senses and deterministic localized meanings for a lemma."""
     db_path = create_test_db()
     with Dictionary(db_path) as d:
         # Senses for der See (id=1)
         senses_1 = d.get_senses_for_lemma(1)
         assert len(senses_1) == 1
-        assert senses_1[0].gloss_en == "lake"
+        assert senses_1[0].id is not None
+        assert senses_1[0].semantic_ref == "sense:v1:see_der_0"
+        assert senses_1[0].source_namespace == "wiktextract:enwiktionary"
+        assert senses_1[0].source_ref == "senseid:en-see-1"
+
+        meanings_1 = d.get_meanings_for_sense(senses_1[0].id)
+        assert len(meanings_1) == 1
+        assert meanings_1[0].text == "lake"
+        assert meanings_1[0].language == "en"
 
         # Senses for die See (id=2)
         senses_2 = d.get_senses_for_lemma(2)
         assert len(senses_2) == 1
-        assert senses_2[0].gloss_en == "sea, ocean"
+        assert senses_2[0].id is not None
+        assert senses_2[0].semantic_ref == "sense:v1:see_die_0"
+
+        meanings_2 = d.get_meanings_for_sense(senses_2[0].id)
+        assert len(meanings_2) == 1
+        assert meanings_2[0].text == "sea, ocean"
 
         # Examples for anrufen (id=11)
         examples = d.get_examples_for_lemma(11)
@@ -184,8 +217,10 @@ def test_get_entry_composite(create_test_db: Callable[[], Path]) -> None:
         assert isinstance(entry, DictionaryEntry)
         assert entry.lemma.lemma == "Haus"
         assert entry.lemma.gender == "das"
+        assert entry.lemma.semantic_ref is not None
         assert len(entry.senses) == 1
-        assert entry.senses[0].gloss_en == "house, building"
+        assert len(entry.meanings) == 1
+        assert entry.meanings[0].text == "house, building"
         assert "Häuser" in entry.surface_forms or "häuser" in entry.surface_forms
 
 
