@@ -1,0 +1,34 @@
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Testing and coverage caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Type checker and linter caches
+.mypy_cache/
+.ruff_cache/
+
+# Build and distribution artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Process and workflow handoff artifacts (see PROMPTS.md / ADRs)
+handoff/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
