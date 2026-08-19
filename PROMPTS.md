@@ -13,7 +13,7 @@ evidence/output to return to the orchestrator. The `## Next step` stays
 **outside** the prompt block so owner instructions never become worker instructions.
 A reusable prompt without it is an **incomplete dispatch**. This applies to every
 prompt type: repository bootstrap, implementation, retry, governance/repair,
-escalation, review/risk, closure, audit, and `NEW SLICE OPEN`.
+escalation, review/risk, closure, audit, `NEW SLICE OPEN`, and supervised worker dispatches.
 
 ---
 
@@ -426,3 +426,169 @@ Session close, per WORKFLOW.md §8. Do these in order, then stop.
 In this variant the ladder ceiling resolves by **respecification** (§5.3), then
 re-dispatch from attempt 1 of the new brief(s). All of it inside the same
 slice chat (§10) — escalation never opens a fresh orchestrator.
+
+---
+
+## Supervised local worker — generic brief template (WORKFLOW.md §14)
+
+Used by the primary orchestrator (ChatGPT) to dispatch implementation or verification tasks to a
+supervised local worker in the authoritative local checkout. The owner relays the prompt to the worker
+and returns the worker's machine-verifiable evidence back to the orchestrator.
+
+```
+Read AGENTS.md, WORKFLOW.md §14, and tasks/<ID>.md (or the task specification below).
+
+You are the supervised local worker executing in the authoritative local checkout:
+  <AUTHORITATIVE_REPO_PATH>
+
+This is an execution assignment under the supervised worker fallback. You are
+authoritative for local execution facts and gate evidence, but hold ZERO project
+decision authority. You may not alter architecture, expand allowlists, waive
+failures, or self-accept your implementation.
+
+--------------------------------------------------
+1. PREFLIGHT VERIFICATION
+--------------------------------------------------
+Target branch:     <EXPECTED_BRANCH>
+Starting HEAD SHA: <EXPECTED_HEAD>
+
+Run the exact checks below. Any failure or mismatch means STOP and report:
+  test "$(git rev-parse --is-inside-work-tree)" = "true" || { echo "STOP: not in Git work tree"; exit 1; }
+  test "$(git branch --show-current)" = "<EXPECTED_BRANCH>" || { echo "STOP: wrong branch"; exit 1; }
+  test "$(git rev-parse HEAD)" = "<EXPECTED_HEAD>" || { echo "STOP: starting HEAD mismatch"; exit 1; }
+  test -z "$(git status --porcelain)" || { echo "STOP: working tree not clean"; exit 1; }
+
+--------------------------------------------------
+2. SCOPE AND ALLOWLIST
+--------------------------------------------------
+Allowlist:
+<ALLOWED_FILES>
+
+Forbidden actions:
+<FORBIDDEN_ACTIONS>
+
+--------------------------------------------------
+3. TASK EXECUTION
+--------------------------------------------------
+<TASK>
+
+--------------------------------------------------
+4. VERIFICATION AND GATE
+--------------------------------------------------
+Run the required verification:
+  <REQUIRED_GATE>
+
+--------------------------------------------------
+5. COMMIT AND PUSH AUTHORIZATION
+--------------------------------------------------
+<COMMIT_PUSH_AUTHORIZATION>
+
+--------------------------------------------------
+6. REQUIRED FINAL EVIDENCE
+--------------------------------------------------
+Print the exact evidence block below and stop:
+<REQUIRED_FINAL_EVIDENCE>
+```
+
+## Next step
+
+Send the prompt above to `<worker model / tier / effort>` in a fresh local worker
+session with terminal access to `<AUTHORITATIVE_REPO_PATH>`. Return the worker's
+machine-verifiable evidence verbatim to this orchestration chat. Do not perform manual
+terminal operations or interpret git/gate output yourself.
+
+---
+
+## Supervised local worker — read-only verification / gate check (WORKFLOW.md §14.7)
+
+Used by the primary orchestrator for startup verification, gate re-runs, and ref
+inspection without making mutations.
+
+```
+Read AGENTS.md, WORKFLOW.md §14, and STATE.md. You are a read-only supervised worker for <startup verification | gate re-run | ref inspection>.
+
+You perform NO edits, NO commits, NO merges, NO branch creation, and NO pushes.
+
+Perform ONLY the procedure below in order. Any failed check or nonzero exit means
+STOP immediately and report the step and exact output:
+
+1. Target checkout: <AUTHORITATIVE_REPO_PATH>
+2. Run:
+   git branch --show-current
+   git rev-parse HEAD
+   git rev-parse <EXPECTED_BRANCH>
+   git status --porcelain
+   if git remote get-url origin >/dev/null 2>&1; then
+     git fetch origin
+     git rev-parse origin/<EXPECTED_BRANCH>
+   fi
+3. Run fresh gate on <EXPECTED_BRANCH>:
+   <gate command>
+
+4. Print and stop:
+   printf 'BRANCH: ';           git branch --show-current
+   printf 'HEAD: ';             git rev-parse HEAD
+   printf 'ORIGIN HEAD: ';      git rev-parse origin/<EXPECTED_BRANCH> 2>/dev/null || echo "(none)"
+   printf 'CLEAN TREE: ';       test -z "$(git status --porcelain)" && echo yes || echo NO
+   printf 'GATE EXIT: ';        echo "$?"
+   echo '--- GATE OUTPUT ---'
+   <gate command output>
+```
+
+## Next step
+
+Send to a T1 local worker (`gemini-flash / T1 / low`, fallback `codex-low / T1 / low`)
+with terminal access to the repo. Return the verbatim evidence block here.
+
+---
+
+## Supervised local worker — governance execution (WORKFLOW.md §14.5)
+
+Used by the primary orchestrator when applying orchestrator-designed governance / ADR
+revisions to the local repository.
+
+```
+Read AGENTS.md and WORKFLOW.md §14. You are a supervised governance worker.
+The orchestrator has specified exact governance/ADR edits. You author nothing
+independently.
+
+Perform ONLY the steps below, in order. Any failure or unexpected state means STOP:
+
+1. Verify starting state:
+   test "$(git branch --show-current)" = "main" || { echo "STOP: not on main"; exit 1; }
+   test "$(git rev-parse HEAD)" = "<EXPECTED_MAIN_HEAD>" || { echo "STOP: main moved"; exit 1; }
+   test -z "$(git status --porcelain)" || { echo "STOP: working tree not clean"; exit 1; }
+
+2. Apply the exact edits specified:
+   <EXACT_FILE_EDITS_OR_INSTRUCTIONS>
+
+3. Verify scope is strictly allowlisted:
+   actual="$({ git status --porcelain | cut -c4-; } | LC_ALL=C sort)"
+   expected="$(LC_ALL=C sort <<'EOF'
+<ALLOWED_FILES>
+EOF
+)"
+   test "$actual" = "$expected" || { echo "STOP: changed files differ from allowlist"; exit 1; }
+
+4. Run validation & gate:
+   git diff --check || { echo "STOP: whitespace errors"; exit 1; }
+   make gate || { echo "STOP: gate failed"; exit 1; }
+
+5. Commit & push (if authorized):
+   git add <ALLOWED_FILES>
+   git commit -m "<COMMIT_MESSAGE>"
+   git push origin main || { echo "STOP: failed to push main"; exit 1; }
+   test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" || { echo "STOP: origin divergence"; exit 1; }
+
+6. Print final evidence and stop:
+   printf 'MAIN HEAD: ';        git rev-parse HEAD
+   printf 'ORIGIN MAIN: ';      git rev-parse origin/main
+   printf 'PORCELAIN: [';       git status --porcelain | tr '\n' ';'; echo ']'
+   git log --oneline -1
+   make gate 2>&1 | tail -n 12
+```
+
+## Next step
+
+Send to a T1 local worker (`gemini-flash / T1 / low`, fallback `codex-low / T1 / low`)
+with terminal access to the repo. Return the final evidence block to the orchestrator.

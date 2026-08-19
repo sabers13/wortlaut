@@ -43,6 +43,15 @@ memory of a conversation.
   O1 (needs_gloss overloaded between resolution and meaning availability),
   O2 (missing user-authored meaning schema/API/validation), and O3 (missing
   derivation carrier for generated-row CC BY-SA provenance).
+* **Supervised Worker Fallback governance workflow adopted 2026-08-19**
+  (`WORKFLOW.md` §0/§1/§14, `AGENTS.md` G3/G8/G11, `PROMPTS.md`). Distinguishes
+  project decision authority (retained by primary ChatGPT orchestrator),
+  execution authority (supervised local worker in authoritative local checkout),
+  evidence authority (authoritative checkout for local execution/gate facts,
+  private GitHub mirror for persistent committed state), and transport relay
+  (owner ferrying prompts/evidence). Enables the primary ChatGPT chat to orchestrate
+  governance and slice workflows cold without direct local terminal access by
+  dispatching machine-verifiable briefs to a local worker.
 * **`reference/schema.sql`, `app/`, `tools/` and the `slice/3` branch are
   deliberately unchanged** by governance sessions and are implementation-stale
   against ADR-0004. The staleness is recorded in `docs/backlog.md`, not silently
@@ -56,11 +65,11 @@ memory of a conversation.
 
 ## Gate
 
-* `make gate` — **PASS**. Measured fresh on `main` by this cold-review session
+* `make gate` — **PASS**. Measured fresh on `main` by this governance session
   on 2026-08-19:
   `.venv/bin/ruff check .` — all checks passed;
   `.venv/bin/mypy --strict .` — success, no issues in **10 source files**;
-  `.venv/bin/pytest -q` — **80 passed** in 6.07s;
+  `.venv/bin/pytest -q` — **80 passed** in 6.13s;
   `.venv/bin/python tools/check_agents.py` — R1 (runtime LLM), R3 (resolver cache
   key), R7 (lecture coupling) pass. R6 and R12 remain deliberately unscaffolded
   until their owning later slices.
@@ -115,7 +124,10 @@ memory of a conversation.
    redefinition and resolution/meaning-availability state decoupling; O2
    localized user-authored meanings schema, API, validation and contribution
    boundary; O3 generated-row provenance and source derivation carrier under
-   AGENTS R11). The revision targets a fresh cold review on close.
+   AGENTS R11). Under Supervised Worker Fallback (WORKFLOW §14), the ChatGPT
+   orchestrator can design the revision and dispatch a supervised local worker to
+   apply and commit the governance edits. The revision targets a fresh cold
+   review on close.
 2. **Fresh ADR-0004 cold review** (WORKFLOW §7 / AGENTS G7): a fresh orchestrator
    session reading only the repository to verify the revised ADR-0004.
 3. **On cold-review approval, return to the existing slice-3 orchestrator** for a

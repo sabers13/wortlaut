@@ -52,7 +52,9 @@ The split between local execution and remote committed context is strict and bin
 - committed diff/range inspection when WORKFLOW permits such inspection (§6).
 
 **Critical rule:** GitHub presence does **not** prove a clean local working tree, local
-runtime state, or a fresh passing gate.
+runtime state, or a fresh passing gate. Under supervised-worker fallback (§14), fresh
+local execution facts (git status, gate output, ref comparisons) are established by a
+supervised local worker in the authoritative local checkout and returned to the orchestrator.
 
 ### Model table — edit when your subscriptions/tokens change
 
@@ -71,17 +73,25 @@ one become the memory.
 
 ## 1. Roles
 
-**Orchestrator (chat).** Plans, writes briefs, reviews reports (never diffs),
-maintains docs. When GitHub access is available, reads committed repository state
-directly from the private GitHub repository without requiring the owner to upload
-handoff ZIPs, markdown reports, or briefs. Read-only with respect to code. Every
-brief it emits MUST carry a `Model:` line (§3). It never assesses "how hard" a task
-feels — it applies §4 and §5 mechanically.
+**Orchestrator (chat).** Plans, writes briefs, reviews reports and machine-verifiable
+evidence (never diffs unless risk-labeled, §6), maintains docs. The primary orchestrator
+(ChatGPT) remains authoritative for all project decisions: interpreting governance,
+determining session progression, drafting briefs, architecture reasoning, evaluating
+worker outputs, requesting retries, and approving closure. It does **not** require direct
+local shell access when operating under the supervised-worker fallback (§14). Read-only
+with respect to code. Every brief it emits MUST carry a `Model:` line (§3). It never
+assesses "how hard" a task feels — it applies §4 and §5 mechanically.
 
 **Workers (fungible).** Codex, Claude Code, Gemini Flash — all start **cold** from
 a brief. The brief is the whole context. No worker is ever the memory. A task that
 cannot be executed cold is a task that is not yet specified — return it to the
 orchestrator.
+
+**Supervised local worker (delegated executor).** A worker session with terminal access
+to the authoritative local checkout, executing explicit shell commands and edits
+delegated by the orchestrator. It is authoritative for local runtime/gate/git facts,
+but possesses **zero project decision authority**: it cannot alter architecture, expand
+scope, waive failures, or accept its own work (§14).
 
 **Closure worker (mechanical).** A separate T1 worker that performs
 already-authorized slice closure: merge, STATE.md write (verbatim content
@@ -90,19 +100,27 @@ in `handoff/`, and remote push synchronization (`git push origin main` and slice
 branch). It makes **zero decisions** — any ambiguity, mismatch, or nonzero exit
 (including push failure) is a STOP-and-report, never a judgment call. See §11.
 
-**You.** The courier — and **not the routine terminal operator**. You paste
-printed prompts between surfaces. Zero composition: if you are writing a prompt
-by hand, a CLOSE step was skipped somewhere. The owner does not routinely upload
-handoff ZIPs, `.diff` files, or `.md` reports when pushed to the private GitHub
-mirror. Normal git/shell/gate/diff/merge work is placed in worker prompts as
-**complete terminal procedures** — actual commands with fail conditions, never
-"check the branch" or "run the gate". Critical checks must be executable, not prose
+**You.** The courier — and **not the routine terminal operator**. In supervised-worker
+fallback (§14), you paste printed prompts from the orchestrator to the local worker, and
+paste returned machine-verifiable evidence from the worker back to the orchestrator. This
+is a first-class supported project workflow, not an exception. Zero composition: if you
+are writing a prompt or interpreting git output by hand, a step was skipped somewhere.
+The owner does not routinely upload handoff ZIPs, `.diff` files, or `.md` reports when
+pushed to the private GitHub mirror. Normal git/shell/gate/diff/merge work is placed in
+worker prompts as **complete terminal procedures** — actual commands with fail conditions,
+never "check the branch" or "run the gate". Critical checks must be executable, not prose
 (clean working tree, expected `main` HEAD, expected slice HEAD, nonzero gate exit →
 STOP).
 
 **Concurrency: strict one-writer invariant.** Only one agent/process may mutate
 the repository working tree at a time. The orchestrator does not edit docs while
 a worker is modifying the repo. Close a writer before opening the next.
+
+**Session ownership.** A logical orchestration session consists of one primary
+orchestrator chat, one or more cold/local execution workers, and relayed evidence. The
+primary orchestration chat owns the task lifecycle from startup through acceptance and
+closure. Workers are fungible and replaceable: if a worker fails or loses context, the
+orchestrator dispatches a fresh worker against verified repository state.
 
 ---
 
@@ -413,3 +431,177 @@ app` (design-session artifacts, already superseded by `docs/adr/`).
 - **Remote sanity checking:** startup and closure sanity checks use configured
   remotes (`git remote get-url origin`, `git fetch --dry-run origin`) without
   hardcoding owner-specific URLs or printing/storing credentials.
+
+---
+
+## 14. Supervised worker fallback
+
+The supervised worker fallback is a first-class, supported project execution strategy
+allowing the primary ChatGPT conversation to remain the project orchestrator even when it
+lacks direct access to the local filesystem and terminal.
+
+```
++-------------------------------------------------------------------------------+
+| PRIMARY ORCHESTRATOR (ChatGPT chat)                                           |
+| Decision Authority: architecture, governance, briefs, evaluation, acceptance  |
++------------------------------------+------------------------------------------+
+                                     |
+               (Dispatches brief)    |    (Returns machine-verifiable evidence)
+                                     v    |
++------------------------------------+----+-------------------------------------+
+| OWNER (Courier / Transport Relay)                                             |
+| Relays: orchestrator prompt -> local worker; local evidence -> orchestrator   |
++------------------------------------+------------------------------------------+
+                                     |
+                                     v
++-------------------------------------------------------------------------------+
+| SUPERVISED LOCAL WORKER (Terminal / IDE session in local repo checkout)       |
+| Execution Authority: runs commands, edits within allowlist, runs make gate   |
++------------------------------------+------------------------------------------+
+                                     |
+                                     v
++-------------------------------------------------------------------------------+
+| AUTHORITATIVE LOCAL CHECKOUT               PRIVATE GITHUB MIRROR              |
+| Local git/gate/runtime/filesystem facts    Persistent committed/pushed state  |
++-------------------------------------------------------------------------------+
+```
+
+### 14.1 The authority and responsibility model
+
+The repository distinguishes three distinct authorities plus the transport relay:
+
+1. **Decision Authority (Primary Orchestrator):**
+   The primary ChatGPT orchestration chat retains sole authority for:
+   - interpreting `WORKFLOW.md`, `AGENTS.md`, and project contracts;
+   - deciding what task or session comes next;
+   - composing worker briefs and defining exhaustive allowlists;
+   - architectural and governance reasoning;
+   - evaluating returned worker evidence and reports;
+   - requesting retries or escalating along the §5 ladder;
+   - accepting or rejecting worker deliverables;
+   - deciding when a slice or governance session may proceed to closure;
+   - authoring next-session prompts and STATE.md content.
+   The orchestrator does **not** need direct local terminal access to exercise this authority.
+
+2. **Execution Authority (Supervised Local Worker):**
+   A worker with terminal/filesystem access to the authoritative local checkout is
+   authoritative for facts that can only be established locally:
+   - `git status` and working tree cleanliness;
+   - actual checked-out branch and `git rev-parse` ref values;
+   - local vs. remote comparisons after `git fetch`;
+   - installed dependencies, models, and machine environment;
+   - runtime execution and `make gate` results;
+   - filesystem mutations, commits, merges, and pushes.
+   **Prohibition on self-authorization:** The worker performs *only* work expressly
+   delegated by the orchestrator. It does not gain project decision authority merely
+   because it has local terminal access. It may not silently redesign architecture,
+   alter workflow rules, expand allowlists, accept its own implementation, waive
+   failing checks, or invent next steps.
+
+3. **Evidence Authority:**
+   - The **authoritative local checkout** is the sole source of local execution facts,
+     working tree state, and fresh gate evidence.
+   - The **private GitHub mirror** is the persistent authoritative mirror for
+     committed and pushed state (`STATE.md`, ADRs, briefs, history, pushed refs).
+   - Under no circumstances is GitHub redefined as authoritative for runtime/gate execution.
+
+4. **Transport Layer (Owner):**
+   When no direct tool integration connects the orchestrator to the local environment,
+   the owner acts strictly as a transport relay:
+   ```
+   orchestrator prompt -> local worker
+   local worker result -> orchestrator
+   ```
+   The owner is the transport courier, not the verifier or terminal operator. The owner
+   is never asked to manually interpret git or gate outputs, analyze diffs, decide
+   retries, or make architectural choices.
+
+### 14.2 Evidence relay protocol
+
+When operating across the transport relay:
+- The worker's exact command outputs, exit statuses, ref SHAs, and gate numbers are
+  returned verbatim to the orchestrator.
+- The orchestrator accepts returned output as local execution evidence only when the
+  worker explicitly identifies the authoritative checkout and supplies the required
+  commands, outputs, exit codes, and relevant SHAs.
+- Pasted worker summaries without machine-verifiable evidence are not trusted. The
+  orchestrator must demand missing evidence or issue a retry brief if evidence is
+  incomplete.
+- The worker must never ask the owner to interpret Git/gate results when the worker can
+  evaluate and format that evidence itself.
+
+### 14.3 Supervised worker brief requirements
+
+Every brief dispatched to a supervised worker must be explicit, self-contained, and
+follow the canonical brief schema (PROMPTS.md §Supervised local worker):
+
+- **Authoritative repository path:** Target checkout location.
+- **Expected branch & starting ref:** Expected branch and exact starting HEAD SHA.
+- **Clean tree requirement:** Executable assertion that `git status --porcelain` is empty.
+- **Allowed files (Allowlist):** Exhaustive file list — anything changed outside is a
+  scope violation.
+- **Forbidden files/actions:** Explicit prohibitions (e.g. no application edits in
+  governance sessions, no rebase/delete of accepted branches).
+- **Exact task:** Concrete, unambiguous implementation or verification steps.
+- **Required checks & gate:** Exact gate commands and pass criteria.
+- **Commit/push authorization:** Explicit declaration of whether the worker is authorized
+  to commit and push, with the required commit messages.
+- **Required final evidence:** Exact formatted output required in the worker's report.
+- **STOP conditions:** Explicit conditions causing immediate halt and report.
+
+### 14.4 Commit and push protocol
+
+When a task explicitly authorizes a supervised worker to commit and push:
+1. **Scope verification:** Worker verifies `git status --porcelain` matches exactly the
+   authorized allowlist.
+2. **Pre-commit validation:** Worker runs required checks (`git diff --check`, `make gate`).
+3. **Commit:** Worker commits with the exact message specified by the orchestrator.
+4. **Post-commit gate:** Worker verifies gate passes on the committed tree.
+5. **Push:** Worker pushes the authorized ref (`git push origin <branch>`).
+6. **Push verification:** Worker fetches and verifies local HEAD equals remote ref.
+7. **Evidence return:** Worker reports full commit SHA, gate numbers, and ref equality
+   evidence back to the orchestrator.
+
+The orchestrator reviews the returned evidence before declaring the operation complete.
+
+### 14.5 Separation of duties and no self-review
+
+Separation of duties is an absolute invariant across all workflows:
+- **No implementation self-review:** An implementation worker that creates or modifies
+  code may not declare a slice accepted merely because `make gate` passes. The primary
+  orchestrator reviews the report and evidence to decide acceptance or retry.
+- **Governance and ADR work:** The primary orchestrator designs and decides ADR and
+  governance revisions. A supervised local worker may apply those exact edits to the local
+  checkout and commit them, but does not become the decision maker.
+- **Cold review remains separate:** When repository policy (WORKFLOW §7 / AGENTS G7)
+  requires a fresh cold review, that review must be conducted in a separate fresh
+  orchestrator session that reads only the repository. Supervised execution does not
+  waive or merge the cold-review requirement.
+
+### 14.6 Fail-closed conditions
+
+The supervised fallback must fail closed (STOP and report) rather than inferring success
+when any required local condition or evidence is unmet. At minimum, a worker must halt
+immediately on:
+- unexpected starting HEAD SHA;
+- dirty working tree where a clean start is required;
+- checked-out branch differing from expected;
+- remote ref mismatch or unexpected local/remote divergence;
+- moved accepted slice ref;
+- any nonzero exit from `make gate` or test suite;
+- commit or push failure;
+- any file modified outside the brief's allowlist;
+- evidence inconsistent with the claimed execution outcome.
+
+The orchestrator reviews the failure evidence and issues a narrowly scoped retry.
+
+### 14.7 Read-only supervised workers
+
+The orchestrator may dispatch read-only supervised workers for:
+- startup verification and preflight checks;
+- gate re-runs and benchmark measurements;
+- Git ref, log, and remote status inspection;
+- donor repository inspection (§12);
+- closure verification;
+
+without transferring decision authority to the worker.
