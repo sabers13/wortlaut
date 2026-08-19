@@ -110,6 +110,8 @@ them. REJECTED items are listed so they do not resurface.
   manual entry (ADR-0001 §6). Add a test in the render slice.
 - Confirm build stage 01 populates multi-word separable surface forms
   (`rief an`, `ruft an`) — inflected manual entry depends on it (ADR-0001 §15).
+- **slice-3 T3 N1 test-fixture repair:** `tests/conftest.py:create_test_db` currently has an off-by-one lemma INSERT binding in its synthetic test DB: the 24-element tuples feed a 23-column INSERT, so `genitive_sg` receives constant `0` and intended values such as `Sees` / `Hauses` are dropped. The independent T3 reviewer verified the real Stage-01 builder persists `genitive_sg` correctly, so this is non-blocking test-fixture debt, not a Stage-01 data defect. Repair before a future test relies on that fixture field.
+- **slice-3 T3 N2 fallback-identity hardening:** the A4 fallback fingerprint canonicalizer intentionally accepts scalar numbers found in included raw Wiktextract distinction structures. Current asset-local SQLite IDs provably cannot enter because fingerprinting happens on the raw upstream sense before local IDs exist, so the accepted contract is satisfied. If future real upstream shapes place volatile numeric bookkeeping inside included nested fields (`form_of`, `alt_of`, `compound_of`, etc.), explicitly exclude those upstream bookkeeping keys before relying on cross-version continuity.
 
 ## Rejected (do not resurface)
 
