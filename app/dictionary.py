@@ -1,9 +1,11 @@
 """Read-only dictionary asset reader for German flashcards.
 
-Implements PART A of reference/schema.sql:
+Implements PART A of reference/schema.sql (ADR-0004 D36/D45/D46/D47):
 - lemma
 - surface_form
 - sense
+- sense_meaning
+- sense_meaning_derivation
 - example
 - example_lemma
 
@@ -13,7 +15,7 @@ Never accesses, writes, or references PART B user tables (AGENTS R9 / C2).
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
 
@@ -21,6 +23,7 @@ from app.resolve import (
     LemmaRecord,
     LookupProtocol,
     Ref,
+    SenseRecord,
     TokenLike,
     resolve_token,
     resolve_word,
@@ -38,7 +41,10 @@ class LemmaEntry(LemmaRecord):
     lemma: str
     pos: str
     gender: str | None = None
+    semantic_ref: str | None = None
+    freq_rank: int | None = None
     plural: str | None = None
+    plural_none: int = 0
     genitive_sg: str | None = None
     aux: str | None = None
     separable: int = 0
@@ -52,22 +58,33 @@ class LemmaEntry(LemmaRecord):
     superlative: str | None = None
     ipa: str | None = None
     ipa_source: str | None = None
-    freq_rank: int | None = None
     source: str | None = None
     license: str | None = None
 
 
 @dataclass(frozen=True)
-class SenseEntry:
-    """Gloss sense row matching PART A sense table."""
+class SenseEntry(SenseRecord):
+    """Sense row matching PART A sense table."""
 
-    id: int
-    lemma_id: int
-    ord: int
-    gloss_en: str
+    source_namespace: str = ""
+    source_ref: str = ""
     register: str | None = None
     source: str | None = None
     license: str | None = None
+
+
+@dataclass(frozen=True)
+class MeaningEntry:
+    """Localized meaning row matching PART A sense_meaning table (A7)."""
+
+    id: int
+    sense_id: int
+    language: str
+    kind: str
+    ord: int
+    text: str
+    source: str
+    license: str
 
 
 @dataclass(frozen=True)
@@ -86,12 +103,13 @@ class ExampleEntry:
 
 @dataclass(frozen=True)
 class DictionaryEntry:
-    """Composite entry containing lemma, senses, examples, and surface forms."""
+    """Composite entry containing lemma, senses, examples, surface forms, and meanings."""
 
     lemma: LemmaEntry
     senses: list[SenseEntry]
     examples: list[ExampleEntry]
     surface_forms: list[str]
+    meanings: list[MeaningEntry] = field(default_factory=list)
 
 
 def _row_to_lemma(row: sqlite3.Row) -> LemmaEntry:
@@ -101,7 +119,16 @@ def _row_to_lemma(row: sqlite3.Row) -> LemmaEntry:
         lemma=str(row["lemma"]),
         pos=str(row["pos"]),
         gender=str(row["gender"]) if row["gender"] is not None else None,
+        semantic_ref=(
+            str(row["semantic_ref"]) if row["semantic_ref"] is not None else None
+        ),
+        freq_rank=int(row["freq_rank"]) if row["freq_rank"] is not None else None,
         plural=str(row["plural"]) if row["plural"] is not None else None,
+        plural_none=(
+            int(row["plural_none"])
+            if "plural_none" in row.keys() and row["plural_none"] is not None
+            else 0
+        ),
         genitive_sg=str(row["genitive_sg"]) if row["genitive_sg"] is not None else None,
         aux=str(row["aux"]) if row["aux"] is not None else None,
         separable=int(row["separable"]) if row["separable"] is not None else 0,
@@ -121,7 +148,6 @@ def _row_to_lemma(row: sqlite3.Row) -> LemmaEntry:
         superlative=str(row["superlative"]) if row["superlative"] is not None else None,
         ipa=str(row["ipa"]) if row["ipa"] is not None else None,
         ipa_source=str(row["ipa_source"]) if row["ipa_source"] is not None else None,
-        freq_rank=int(row["freq_rank"]) if row["freq_rank"] is not None else None,
         source=str(row["source"]) if row["source"] is not None else None,
         license=str(row["license"]) if row["license"] is not None else None,
     )
@@ -133,10 +159,26 @@ def _row_to_sense(row: sqlite3.Row) -> SenseEntry:
         id=int(row["id"]),
         lemma_id=int(row["lemma_id"]),
         ord=int(row["ord"]),
-        gloss_en=str(row["gloss_en"]),
+        semantic_ref=str(row["semantic_ref"]),
+        source_namespace=str(row["source_namespace"]),
+        source_ref=str(row["source_ref"]),
         register=str(row["register"]) if row["register"] is not None else None,
         source=str(row["source"]) if row["source"] is not None else None,
         license=str(row["license"]) if row["license"] is not None else None,
+    )
+
+
+def _row_to_meaning(row: sqlite3.Row) -> MeaningEntry:
+    """Map a sqlite3.Row to MeaningEntry."""
+    return MeaningEntry(
+        id=int(row["id"]),
+        sense_id=int(row["sense_id"]),
+        language=str(row["language"]),
+        kind=str(row["kind"]),
+        ord=int(row["ord"]),
+        text=str(row["text"]),
+        source=str(row["source"]),
+        license=str(row["license"]),
     )
 
 
@@ -198,9 +240,9 @@ class Dictionary(LookupProtocol):
     ) -> Sequence[LemmaEntry]:
         """Look up lemma by exact text, optionally filtered by POS and/or gender."""
         query = [
-            "SELECT id, lemma, pos, gender, plural, genitive_sg, aux, separable, particle,",
-            "       reflexive, praesens_3sg, praeteritum_3sg, partizip_ii, governs,",
-            "       comparative, superlative, ipa, ipa_source, freq_rank, source, license",
+            "SELECT id, semantic_ref, lemma, pos, gender, plural, plural_none, genitive_sg, aux,",
+            "       separable, particle, reflexive, praesens_3sg, praeteritum_3sg, partizip_ii,",
+            "       governs, comparative, superlative, ipa, ipa_source, freq_rank, source, license",
             "FROM lemma",
             "WHERE (lemma = ? OR lower(lemma) = ?)",
         ]
@@ -214,21 +256,24 @@ class Dictionary(LookupProtocol):
             query.append("AND gender = ?")
             params.append(gender)
 
-        query.append("ORDER BY freq_rank ASC NULLS LAST, id ASC")
+        query.append(
+            "ORDER BY freq_rank ASC NULLS LAST, pos ASC, gender ASC NULLS LAST, semantic_ref ASC"
+        )
         cur = self._conn.execute(" ".join(query), params)
         return [_row_to_lemma(row) for row in cur.fetchall()]
 
     def lookup_surface_form(self, form: str) -> Sequence[LemmaEntry]:
         """Look up lemmas associated with an inflected surface form."""
         query = (
-            "SELECT l.id, l.lemma, l.pos, l.gender, l.plural, l.genitive_sg, l.aux, "
-            "       l.separable, l.particle, l.reflexive, l.praesens_3sg, "
+            "SELECT l.id, l.semantic_ref, l.lemma, l.pos, l.gender, l.plural, l.plural_none, "
+            "       l.genitive_sg, l.aux, l.separable, l.particle, l.reflexive, l.praesens_3sg, "
             "       l.praeteritum_3sg, l.partizip_ii, l.governs, l.comparative, "
             "       l.superlative, l.ipa, l.ipa_source, l.freq_rank, l.source, l.license "
             "FROM surface_form sf "
             "JOIN lemma l ON sf.lemma_id = l.id "
             "WHERE (sf.form = ? OR lower(sf.form) = ?) "
-            "ORDER BY l.freq_rank ASC NULLS LAST, l.id ASC"
+            "ORDER BY l.freq_rank ASC NULLS LAST, l.pos ASC, l.gender ASC NULLS LAST, "
+            "         l.semantic_ref ASC"
         )
         cur = self._conn.execute(query, [form, form.lower()])
         seen: set[int] = set()
@@ -240,12 +285,16 @@ class Dictionary(LookupProtocol):
                 results.append(lemma_entry)
         return results
 
+    def lookup_senses(self, lemma_id: int) -> Sequence[SenseEntry]:
+        """Look up source senses for a lemma (satisfies LookupProtocol / A11)."""
+        return self.get_senses_for_lemma(lemma_id)
+
     def get_lemma_by_id(self, lemma_id: int) -> LemmaEntry | None:
         """Fetch a single lemma row by primary key."""
         query = (
-            "SELECT id, lemma, pos, gender, plural, genitive_sg, aux, separable, particle, "
-            "       reflexive, praesens_3sg, praeteritum_3sg, partizip_ii, governs, "
-            "       comparative, superlative, ipa, ipa_source, freq_rank, source, license "
+            "SELECT id, semantic_ref, lemma, pos, gender, plural, plural_none, genitive_sg, aux, "
+            "       separable, particle, reflexive, praesens_3sg, praeteritum_3sg, partizip_ii, "
+            "       governs, comparative, superlative, ipa, ipa_source, freq_rank, source, license "
             "FROM lemma WHERE id = ?"
         )
         cur = self._conn.execute(query, [lemma_id])
@@ -255,14 +304,38 @@ class Dictionary(LookupProtocol):
         return _row_to_lemma(row)
 
     def get_senses_for_lemma(self, lemma_id: int) -> list[SenseEntry]:
-        """Fetch all English gloss senses for a lemma, ordered by ord."""
+        """Fetch all senses for a lemma, ordered by ord, then semantic_ref (A13)."""
         query = (
-            "SELECT id, lemma_id, ord, gloss_en, register, source, license "
+            "SELECT id, lemma_id, semantic_ref, source_namespace, source_ref, ord, "
+            "       register, source, license "
             "FROM sense WHERE lemma_id = ? "
-            "ORDER BY ord ASC, id ASC"
+            "ORDER BY ord ASC, semantic_ref ASC, id ASC"
         )
         cur = self._conn.execute(query, [lemma_id])
         return [_row_to_sense(row) for row in cur.fetchall()]
+
+    def get_meanings_for_sense(self, sense_id: int) -> list[MeaningEntry]:
+        """Fetch all localized meanings for a sense, ordered deterministically (A13)."""
+        query = (
+            "SELECT id, sense_id, language, kind, ord, text, source, license "
+            "FROM sense_meaning WHERE sense_id = ? "
+            "ORDER BY language ASC, kind ASC, ord ASC, id ASC"
+        )
+        cur = self._conn.execute(query, [sense_id])
+        return [_row_to_meaning(row) for row in cur.fetchall()]
+
+    def get_meanings_for_lemma(self, lemma_id: int) -> list[MeaningEntry]:
+        """Fetch all localized meanings for a lemma via its senses (A13)."""
+        query = (
+            "SELECT sm.id, sm.sense_id, sm.language, sm.kind, sm.ord, sm.text, "
+            "       sm.source, sm.license "
+            "FROM sense_meaning sm "
+            "JOIN sense s ON sm.sense_id = s.id "
+            "WHERE s.lemma_id = ? "
+            "ORDER BY sm.language ASC, sm.kind ASC, sm.ord ASC, sm.id ASC"
+        )
+        cur = self._conn.execute(query, [lemma_id])
+        return [_row_to_meaning(row) for row in cur.fetchall()]
 
     def get_examples_for_lemma(self, lemma_id: int) -> list[ExampleEntry]:
         """Fetch example sentences indexed for a lemma via example_lemma."""
@@ -284,11 +357,12 @@ class Dictionary(LookupProtocol):
         return [str(row["form"]) for row in cur.fetchall()]
 
     def get_entry(self, lemma_id: int) -> DictionaryEntry | None:
-        """Fetch composite entry (lemma + senses + examples + surface forms)."""
+        """Fetch composite entry (lemma + senses + meanings + examples + surface forms)."""
         lemma = self.get_lemma_by_id(lemma_id)
         if lemma is None:
             return None
         senses = self.get_senses_for_lemma(lemma_id)
+        meanings = self.get_meanings_for_lemma(lemma_id)
         examples = self.get_examples_for_lemma(lemma_id)
         surface_forms = self.get_surface_forms_for_lemma(lemma_id)
         return DictionaryEntry(
@@ -296,14 +370,15 @@ class Dictionary(LookupProtocol):
             senses=senses,
             examples=examples,
             surface_forms=surface_forms,
+            meanings=meanings,
         )
 
     def suggest_lemmas(self, prefix: str, limit: int = 10) -> list[LemmaEntry]:
         """Prefix lookup for autocomplete suggestions (ADR-0001 §10)."""
         query = (
-            "SELECT id, lemma, pos, gender, plural, genitive_sg, aux, separable, particle, "
-            "       reflexive, praesens_3sg, praeteritum_3sg, partizip_ii, governs, "
-            "       comparative, superlative, ipa, ipa_source, freq_rank, source, license "
+            "SELECT id, semantic_ref, lemma, pos, gender, plural, plural_none, genitive_sg, aux, "
+            "       separable, particle, reflexive, praesens_3sg, praeteritum_3sg, partizip_ii, "
+            "       governs, comparative, superlative, ipa, ipa_source, freq_rank, source, license "
             "FROM lemma "
             "WHERE lemma LIKE ? || '%' "
             "ORDER BY freq_rank ASC NULLS LAST, lemma ASC "

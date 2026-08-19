@@ -1,14 +1,18 @@
 -- ============================================================
 -- PART A — shared, derived, ships as a read-only asset.
 -- Built offline by tools/build_dict.py. No user data here.
+-- Numeric IDs (lemma.id, sense.id, etc.) are local per-asset keys only.
+-- Durable cross-version identity is defined by semantic_ref.
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS lemma (
   id            INTEGER PRIMARY KEY,
+  semantic_ref  TEXT NOT NULL UNIQUE,
   lemma         TEXT NOT NULL,
   pos           TEXT NOT NULL,          -- NOUN | VERB | ADJ | ADV | PREP ...
   gender        TEXT,                   -- der | die | das
   plural        TEXT,
+  plural_none   INTEGER NOT NULL DEFAULT 0 CHECK (plural_none IN (0,1)),
   genitive_sg   TEXT,
   aux           TEXT,                   -- haben | sein
   separable     INTEGER DEFAULT 0,
@@ -25,6 +29,7 @@ CREATE TABLE IF NOT EXISTS lemma (
   freq_rank     INTEGER,
   source        TEXT,                   -- wiktionary | llm_generated_v1 | contributed
   license       TEXT,
+  CHECK (plural_none = 0 OR plural IS NULL),
   UNIQUE(lemma, pos, gender)            -- der See / die See
 );
 CREATE INDEX IF NOT EXISTS ix_lemma_lookup ON lemma(lemma, pos);
@@ -36,15 +41,39 @@ CREATE TABLE IF NOT EXISTS surface_form (
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS sense (
-  id        INTEGER PRIMARY KEY,
-  lemma_id  INTEGER NOT NULL REFERENCES lemma(id),
-  ord       INTEGER NOT NULL DEFAULT 0,
-  gloss_en  TEXT NOT NULL,
-  register  TEXT,
-  source    TEXT,
-  license   TEXT
+  id                INTEGER PRIMARY KEY,
+  lemma_id          INTEGER NOT NULL REFERENCES lemma(id),
+  semantic_ref      TEXT NOT NULL UNIQUE,
+  source_namespace  TEXT NOT NULL,
+  source_ref        TEXT NOT NULL,
+  ord               INTEGER NOT NULL DEFAULT 0,
+  register          TEXT,
+  source            TEXT,
+  license           TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_sense_lemma ON sense(lemma_id, ord);
+
+CREATE TABLE IF NOT EXISTS sense_meaning (
+  id        INTEGER PRIMARY KEY,
+  sense_id  INTEGER NOT NULL REFERENCES sense(id) ON DELETE CASCADE,
+  language  TEXT NOT NULL,
+  kind      TEXT NOT NULL CHECK (kind IN ('definition', 'synonym', 'translation')),
+  ord       INTEGER NOT NULL DEFAULT 0,
+  text      TEXT NOT NULL,
+  source    TEXT NOT NULL,
+  license   TEXT NOT NULL,
+  UNIQUE(sense_id, language, kind, ord)
+);
+CREATE INDEX IF NOT EXISTS ix_sense_meaning ON sense_meaning(sense_id, language, ord);
+
+CREATE TABLE IF NOT EXISTS sense_meaning_derivation (
+  generated_meaning_id INTEGER NOT NULL
+      REFERENCES sense_meaning(id) ON DELETE CASCADE,
+  source_meaning_id INTEGER NOT NULL
+      REFERENCES sense_meaning(id) ON DELETE RESTRICT,
+  PRIMARY KEY (generated_meaning_id, source_meaning_id),
+  CHECK (generated_meaning_id <> source_meaning_id)
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS example (
   id           INTEGER PRIMARY KEY,

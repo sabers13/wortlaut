@@ -5,4 +5,5 @@
 {"word": "schnell", "pos": "adj", "lang_code": "de", "senses": [{"glosses": ["rasch"]}], "forms": []}
 {"word": "Berlin", "pos": "proper_noun", "lang_code": "de", "tags": ["neuter"], "senses": [{"glosses": ["Hauptstadt von Deutschland"]}], "forms": []}
 {"word": "mit", "pos": "prep", "lang_code": "de", "senses": [{"glosses": ["zusammen mit"]}], "forms": []}
+{"word": "Milch", "pos": "noun", "lang_code": "de", "tags": ["feminine"], "senses": [{"glosses": ["Milch"]}], "forms": []}
 {"word": "maison", "pos": "noun", "lang_code": "fr"}
