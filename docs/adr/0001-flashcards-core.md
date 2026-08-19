@@ -7,6 +7,12 @@ text below; changes happen in later ADRs.
 **Partially superseded.** The following parts are revised by later ADRs; on
 conflict, the later ADR wins:
 
+**Pending amendment — not in force yet.** The `ADR-0004 (pending)` rows below are
+recorded now so no reader can miss them, but ADR-0004 is `NEEDS COLD REVIEW` and
+unaccepted. Its supersessions take effect only on cold-review approval; until
+then the ADR-0001 text they name remains the implemented contract, and
+`docs/backlog.md` records what that blocks.
+
 | Superseded below | By | Replacement |
 |---|---|---|
 | D2 — resolution at ingest, persisted token index; highlight does zero NLP | ADR-0002 | resolution at capture inside the standalone service; the ingest token index is abandoned and capture runs the resolver locally |
@@ -21,14 +27,23 @@ conflict, the later ADR wins:
 | §17 amendment header; D15–D17; §17.2 decomposition; §17.3 decomposition-specific table ownership; §17.4 `HostContext`; §17.5 integration + `lesson_token`; §17.8 rejection of a two-component split and of a separate HTTP service; §17.9 in-process-first sequencing | ADR-0002 | fully standalone service is the accepted v1 architecture: own container/DB, HTTP + compose integration, app factory, capture-time resolution, no `HostContext`, no shared `german-vocab-core`, no `lesson_token`; the earlier in-process/service-rejection path is superseded rather than deferred |
 | §10 `POST /review` rating input; `GET /decks` due-count-only response | ADR-0003 | on ADR-0002 D25's prefix, `POST /vocab/review` accepts confidence 1–5 only and server maps/logs FSRS rating; `GET /vocab/decks` also returns mastery |
 | §11 four-grade rating UI | ADR-0003 | five-level confidence UI mapped onto FSRS; FSRS itself (D6) unchanged |
+| §1 Problem: the produced card carries the German side "plus an English gloss" | ADR-0004 (pending) | the card carries meaning in the note's **selected non-empty subset of `{de, en, fa}`** (German learner meaning, English meaning, Persian meaning). The target vocabulary language is still German; German grammar renders independently of that selection and is never hidden by it |
+| D9 — `needs_gloss` as "no English gloss"; "user types English during review" | ADR-0004 (pending) | `status='needs_gloss'` means no meaning exists in **any** selected meaning language, from source or user. A note with only an English meaning and set `{de, en, fa}` is resolved, and the DE/FA sections render as absent. A user-authored meaning records the language it was written in. D9's card-creation behaviour and §11's "`needs_gloss` cards enter scheduling normally" rule are unchanged |
+| §11 Card specification: the `Gloss` / `English sense(s), max 3` field-group row, and the `needs_gloss` UI rule's "empty English side" phrasing | ADR-0004 (pending) | the group is **Meaning**: localized meaning rows for the note's selected DE/EN/FA subset, English still source-first and capped at three senses. For nouns the Grammar group additionally renders tri-state plural with its article (`Plural: die Häuser` / `kein Plural` / nothing); unknown plural data may never render as `kein Plural`. Rendered faces stay unstored (D8) |
+| §8 attribution: `sense.source` / `sense.license` as the provenance of the meaning | ADR-0004 (pending) | provenance moves to the **localized meaning row**: each DE/EN/FA text carries its own `source` and `license`, because the three routinely come from different sources under different licenses for one sense. The sense row keeps provenance for the sense *distinction*. `example` attribution is unchanged |
+| §12 stage 04 `gloss_gaps_batch` as an English-gap-only job | ADR-0004 (pending) | stage 04 also creates and simplifies German learner meanings, creates Persian translations, deterministically validates generated rows, and selectively routes flagged rows plus a small random sample to a stronger QA model. Versioned `source='llm_generated_v1'` marking, non-masquerade, and clean reversibility are unchanged, and stage 04 remains the only place an API key exists |
 
 Everything else — D1, D3–D6, D8–D14 (D3 remains the one-resolver invariant;
-D23 only removes the obsolete host-ingest consumer; D11 picker/multi-select, D12
-many-to-many deck membership, and D13 manual-entry sharing remain), D18–D19,
+D23 only removes the obsolete host-ingest consumer; D9's card-creation and
+scheduling behaviour stands and only its English-only gloss wording is superseded
+above; D11 picker/multi-select, D12 many-to-many deck membership, and D13
+manual-entry sharing remain), D18–D19,
 §17.7 CSV import, the unrelated §17.8 rejected generic-note/configurable-template/
-plugin-registry alternatives, the gates (§13), dictionary build and distribution
-(§12), card spec (§11 except the rating UI, D7-derived example-pointer wording,
-and the Example ranking `known` formula superseded above),
+plugin-registry alternatives, the gates (§13, including Gate 2's position and
+thresholds), dictionary build and distribution
+(§12 except stage 04's English-gap-only scope superseded above), card spec (§11
+except the rating UI, D7-derived example-pointer wording, the Example ranking
+`known` formula, and the Gloss field group superseded above),
 and export format/behaviour (§7) — stands as written.
 
 ---

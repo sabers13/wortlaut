@@ -12,6 +12,26 @@ the §17 amendment header; D15–D17; §17.2; §17.3; §17.4; §17.5; §17.8 onl
 rejected "Two-component split (lecture-engine + flashcards)" and "Separate
 container / HTTP service for flashcards" rows; §17.9). D3, D11, D12, D13, D18,
 D19, §17.7, and every unrelated Rejected choice remain in force.
+
+**Amended by ADR-0004 — pending cold review, not in force yet.** ADR-0004 is
+`NEEDS COLD REVIEW`; the rows below take effect only on its approval. It adds a
+per-note meaning-language selection to this ADR's picker/commit contract:
+
+| Amended here | Replacement under ADR-0004 (pending) |
+|---|---|
+| §4 Picker / §4 Stage 2 commit: a selection carries dictionary identity plus `overrides` only | each selection additionally carries the note's **non-empty** meaning-language set drawn from `{de, en, fa}`, which the picker offers at note/card creation |
+| §4 per-selection override schema (`front_override`, `back_override`, `gloss_user`) | one further permitted key, `meaning_langs`: a JSON array of distinct supported language codes. Omission means **no mutation** on a reused note; explicit `null` and `[]` are invalid, because the set may never be emptied; a newly created note requires an explicit non-empty set — there is no implicit default, and the picker's preselection is UI, not API. Persistence is `note_meaning_lang` (ADR-0004 §6.2), patched note-wide in the same atomic transaction as membership creation, exactly as this section already specifies for the other keys. Unknown, duplicate or unsupported codes reject the entire `/vocab/cards` request with HTTP 422 before any note, override, membership or language write |
+| §4 `gloss_user` as an English-only correction for a revalidated `status='needs_gloss'` selection | the user-authored meaning records which language it was written in (ADR-0004 §6.3); it is not assumed English. `needs_gloss` itself becomes language-aware: no meaning in **any** selected language |
+| §6 order 7 — `build stages 03-05 + Dockerfile; stage 04 before mid-September 2026` | stages 03–05 additionally perform the ADR-0004 §8 multilingual offline meaning enrichment (English gap fill, German learner meanings, Persian translations, deterministic validation, selective QA). The mid-September 2026 API-credit constraint is unchanged |
+| §6 order 8's sequencing of the remaining app modules | render/API must additionally support the selected DE/EN/FA meaning set, Persian RTL presentation, and tri-state noun plural on the back before UI/browser completion |
+
+**Unaffected by ADR-0004:** §6 order 5 (Gate 2) and its coverage thresholds,
+verbatim; Gate 2's position **before** stages 02–05 — it measures stage-01
+coverage, which ADR-0004 does not change; the standalone HTTP architecture;
+D20–D27; §3's rejections; §4.1's browser boundary and AGENTS R12; and §5's
+consequences other than the note contract named above. ADR-0004 does not reopen
+the standalone-vs-mounted question.
+
 **Context source:** prior inspection of the German lecture app repo
 (`~/projects/german app`) as it existed at its slice-3 close. That donor evidence
 was not preserved in this handoff; §1 therefore separates accepted design input
