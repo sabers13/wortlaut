@@ -65,11 +65,11 @@ memory of a conversation.
 
 ## Gate
 
-* `make gate` — **PASS**. Measured fresh on `main` by this governance session
+* `make gate` — **PASS**. Measured fresh on `main` by this governance retry session
   on 2026-08-19:
   `.venv/bin/ruff check .` — all checks passed;
   `.venv/bin/mypy --strict .` — success, no issues in **10 source files**;
-  `.venv/bin/pytest -q` — **80 passed** in 6.13s;
+  `.venv/bin/pytest -q` — **80 passed** in 6.18s;
   `.venv/bin/python tools/check_agents.py` — R1 (runtime LLM), R3 (resolver cache
   key), R7 (lecture coupling) pass. R6 and R12 remain deliberately unscaffolded
   until their owning later slices.

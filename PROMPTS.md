@@ -456,7 +456,7 @@ Run the exact checks below. Any failure or mismatch means STOP and report:
   test "$(git rev-parse --is-inside-work-tree)" = "true" || { echo "STOP: not in Git work tree"; exit 1; }
   test "$(git branch --show-current)" = "<EXPECTED_BRANCH>" || { echo "STOP: wrong branch"; exit 1; }
   test "$(git rev-parse HEAD)" = "<EXPECTED_HEAD>" || { echo "STOP: starting HEAD mismatch"; exit 1; }
-  test -z "$(git status --porcelain)" || { echo "STOP: working tree not clean"; exit 1; }
+  test -z "$(git status --porcelain --untracked-files=all)" || { echo "STOP: working tree not clean"; exit 1; }
 
 --------------------------------------------------
 2. SCOPE AND ALLOWLIST
@@ -513,26 +513,38 @@ Perform ONLY the procedure below in order. Any failed check or nonzero exit mean
 STOP immediately and report the step and exact output:
 
 1. Target checkout: <AUTHORITATIVE_REPO_PATH>
-2. Run:
-   git branch --show-current
-   git rev-parse HEAD
-   git rev-parse <EXPECTED_BRANCH>
-   git status --porcelain
+2. Run preflight and ref inspection:
+   test "$(git rev-parse --is-inside-work-tree)" = "true" || { echo "STOP: not in Git work tree"; exit 1; }
+   test "$(git branch --show-current)" = "<EXPECTED_BRANCH>" || { echo "STOP: wrong branch"; exit 1; }
+   test "$(git rev-parse HEAD)" = "<EXPECTED_HEAD>" || { echo "STOP: HEAD mismatch"; exit 1; }
+   test -z "$(git status --porcelain --untracked-files=all)" || { echo "STOP: working tree not clean"; exit 1; }
    if git remote get-url origin >/dev/null 2>&1; then
      git fetch origin
-     git rev-parse origin/<EXPECTED_BRANCH>
+     test "$(git rev-parse origin/<EXPECTED_BRANCH>)" = "<EXPECTED_HEAD>" || { echo "STOP: origin/<EXPECTED_BRANCH> mismatch"; exit 1; }
    fi
-3. Run fresh gate on <EXPECTED_BRANCH>:
-   <gate command>
 
-4. Print and stop:
+3. Run fresh gate on <EXPECTED_BRANCH>, capturing output and exit status from the same invocation:
+   gate_log="$(mktemp)"
+   gate_status=0
+   <gate command> >"$gate_log" 2>&1 || gate_status=$?
+
+4. Print evidence:
    printf 'BRANCH: ';           git branch --show-current
    printf 'HEAD: ';             git rev-parse HEAD
    printf 'ORIGIN HEAD: ';      git rev-parse origin/<EXPECTED_BRANCH> 2>/dev/null || echo "(none)"
-   printf 'CLEAN TREE: ';       test -z "$(git status --porcelain)" && echo yes || echo NO
-   printf 'GATE EXIT: ';        echo "$?"
-   echo '--- GATE OUTPUT ---'
-   <gate command output>
+   printf 'CLEAN TREE: ';       test -z "$(git status --porcelain --untracked-files=all)" && echo yes || echo NO
+   echo '--- BEGIN GATE OUTPUT ---'
+   cat "$gate_log"
+   echo '--- END GATE OUTPUT ---'
+   printf 'GATE EXIT: %s\n' "$gate_status"
+
+5. Fail-closed check:
+   if [ "$gate_status" -ne 0 ]; then
+     rm -f "$gate_log"
+     echo "STOP: gate failed with exit code $gate_status"
+     exit "$gate_status"
+   fi
+   rm -f "$gate_log"
 ```
 
 ## Next step
@@ -554,38 +566,72 @@ independently.
 
 Perform ONLY the steps below, in order. Any failure or unexpected state means STOP:
 
-1. Verify starting state:
+1. Preflight verification:
    test "$(git branch --show-current)" = "main" || { echo "STOP: not on main"; exit 1; }
    test "$(git rev-parse HEAD)" = "<EXPECTED_MAIN_HEAD>" || { echo "STOP: main moved"; exit 1; }
-   test -z "$(git status --porcelain)" || { echo "STOP: working tree not clean"; exit 1; }
+   test -z "$(git status --porcelain --untracked-files=all)" || { echo "STOP: working tree not clean"; exit 1; }
+   if git remote get-url origin >/dev/null 2>&1; then
+     git fetch origin
+     test "$(git rev-parse origin/main)" = "<EXPECTED_MAIN_HEAD>" || { echo "STOP: origin/main divergence"; exit 1; }
+   fi
 
 2. Apply the exact edits specified:
    <EXACT_FILE_EDITS_OR_INSTRUCTIONS>
 
-3. Verify scope is strictly allowlisted:
-   actual="$({ git status --porcelain | cut -c4-; } | LC_ALL=C sort)"
+3. Scope verification (changed files must match allowlist exactly):
+   actual="$({ git status --porcelain --untracked-files=all | cut -c4-; } | LC_ALL=C sort)"
    expected="$(LC_ALL=C sort <<'EOF'
 <ALLOWED_FILES>
 EOF
 )"
    test "$actual" = "$expected" || { echo "STOP: changed files differ from allowlist"; exit 1; }
 
-4. Run validation & gate:
+4. Pre-commit validation:
    git diff --check || { echo "STOP: whitespace errors"; exit 1; }
-   make gate || { echo "STOP: gate failed"; exit 1; }
+   pre_gate_log="$(mktemp)"
+   pre_gate_status=0
+   make gate >"$pre_gate_log" 2>&1 || pre_gate_status=$?
+   if [ "$pre_gate_status" -ne 0 ]; then
+     cat "$pre_gate_log"
+     rm -f "$pre_gate_log"
+     echo "STOP: pre-commit gate failed with exit code $pre_gate_status"
+     exit "$pre_gate_status"
+   fi
+   rm -f "$pre_gate_log"
 
-5. Commit & push (if authorized):
+5. Commit:
    git add <ALLOWED_FILES>
    git commit -m "<COMMIT_MESSAGE>"
-   git push origin main || { echo "STOP: failed to push main"; exit 1; }
-   test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" || { echo "STOP: origin divergence"; exit 1; }
+   COMMIT_SHA="$(git rev-parse HEAD)"
 
-6. Print final evidence and stop:
-   printf 'MAIN HEAD: ';        git rev-parse HEAD
+6. Mandatory post-commit gate (BEFORE push):
+   post_gate_log="$(mktemp)"
+   post_gate_status=0
+   make gate >"$post_gate_log" 2>&1 || post_gate_status=$?
+   if [ "$post_gate_status" -ne 0 ]; then
+     cat "$post_gate_log"
+     rm -f "$post_gate_log"
+     echo "STOP: post-commit gate failed with exit code $post_gate_status (NOT PUSHING)"
+     exit "$post_gate_status"
+   fi
+
+7. Push and remote verification:
+   git push origin main || { rm -f "$post_gate_log"; echo "STOP: failed to push main"; exit 1; }
+   git fetch origin
+   test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" || { rm -f "$post_gate_log"; echo "STOP: origin divergence after push"; exit 1; }
+   test -z "$(git status --porcelain --untracked-files=all)" || { rm -f "$post_gate_log"; echo "STOP: working tree not clean after push"; exit 1; }
+
+8. Print final evidence and stop:
+   printf 'STARTING HEAD: ';    echo "<EXPECTED_MAIN_HEAD>"
+   printf 'COMMIT SHA: ';       echo "$COMMIT_SHA"
+   printf 'PRE-COMMIT GATE: ';  echo "PASS (exit 0)"
+   printf 'POST-COMMIT GATE: '; echo "PASS (exit 0)"
+   printf 'LOCAL MAIN: ';       git rev-parse HEAD
    printf 'ORIGIN MAIN: ';      git rev-parse origin/main
-   printf 'PORCELAIN: [';       git status --porcelain | tr '\n' ';'; echo ']'
-   git log --oneline -1
-   make gate 2>&1 | tail -n 12
+   printf 'CLEAN TREE: ';       test -z "$(git status --porcelain --untracked-files=all)" && echo yes || echo NO
+   echo '--- POST-COMMIT GATE OUTPUT ---'
+   cat "$post_gate_log"
+   rm -f "$post_gate_log"
 ```
 
 ## Next step
