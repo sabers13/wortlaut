@@ -2,6 +2,7 @@
 
 Enforces:
 - R1: Runtime LLM SDK prohibition (pyproject.toml runtime deps and app/ imports)
+- R3: Build-cache keys include resolver hash (tools.resolver_hash canonical helper)
 - R7: Zero lecture-app coupling (no imports or dependencies on lecture app)
 """
 
@@ -71,10 +72,21 @@ FORBIDDEN_LECTURE_MODULES: Final[frozenset[str]] = frozenset({
     "lecture_engine",
 })
 
+EXCLUDED_DIR_NAMES: Final[frozenset[str]] = frozenset({
+    ".git",
+    ".venv",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "build",
+    "dist",
+    "handoff",
+    "reference",
+})
+
 
 def normalize_package_name(dep: str) -> str:
     """Extract and normalize base package name from a PEP 508 dependency string."""
-    # Match leading package name before version/specifier/marker
     match = re.match(r"^([a-zA-Z0-9_.-]+)", dep.strip())
     if not match:
         return dep.strip().lower().replace("_", "-")
@@ -153,6 +165,17 @@ def get_app_python_files(repo_root: Path) -> list[Path]:
     return sorted(app_dir.rglob("*.py"))
 
 
+def get_all_scannable_python_files(repo_root: Path) -> list[Path]:
+    """Find all .py files in repo_root excluding cache and distribution directories."""
+    python_files: list[Path] = []
+    for path in repo_root.rglob("*.py"):
+        parts = set(path.relative_to(repo_root).parts)
+        if any(excluded in parts for excluded in EXCLUDED_DIR_NAMES):
+            continue
+        python_files.append(path)
+    return sorted(python_files)
+
+
 def collect_imports_from_file(file_path: Path) -> list[str]:
     """Parse AST of a python file and return all imported module paths.
 
@@ -215,6 +238,153 @@ def check_r1(repo_root: Path) -> list[str]:
     return violations
 
 
+def detects_independent_resolve_hash(tree: ast.AST, source: str) -> bool:
+    """Check if AST contains an independent SHA-256 calculation over app/resolve.py."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            is_sha256_call = False
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr == "sha256":
+                is_sha256_call = True
+            elif isinstance(func, ast.Name) and func.id == "sha256":
+                is_sha256_call = True
+            elif isinstance(func, ast.Attribute) and func.attr == "new":
+                for arg in node.args:
+                    if isinstance(arg, ast.Constant) and arg.value == "sha256":
+                        is_sha256_call = True
+
+            if is_sha256_call:
+                call_segment = ast.get_source_segment(source, node)
+                if call_segment and (
+                    "resolve.py" in call_segment or "app/resolve.py" in call_segment
+                ):
+                    return True
+                for arg in node.args:
+                    for sub in ast.walk(arg):
+                        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                            if "resolve.py" in sub.value:
+                                return True
+    return False
+
+
+def is_stage_02_module(file_path: Path, tree: ast.AST, source: str) -> bool:
+    """Detect whether a module is a stage-02 build/indexing module."""
+    if file_path.name in ("check_agents.py", "resolver_hash.py"):
+        return False
+    stem = file_path.stem.lower()
+    if any(k in stem for k in ("stage02", "stage_02", "index_tatoeba")):
+        return True
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            name = node.name.lower()
+            if any(k in name for k in ("index_tatoeba", "stage_02", "stage02", "build_stage_02")):
+                return True
+    return False
+
+
+def stage_02_uses_resolver_hash(tree: ast.AST) -> bool:
+    """Check if stage-02 module properly imports and calls tools.resolver_hash."""
+    has_import = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module in ("tools.resolver_hash", "resolver_hash"):
+                has_import = True
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in ("tools.resolver_hash", "resolver_hash"):
+                    has_import = True
+
+    if not has_import:
+        return False
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in (
+                "get_resolver_hash",
+                "get_resolver_short_hash",
+                "resolver_hash",
+            ):
+                return True
+            if isinstance(func, ast.Attribute) and func.attr in (
+                "get_resolver_hash",
+                "get_resolver_short_hash",
+                "resolver_hash",
+            ):
+                return True
+    return False
+
+
+def check_r3(repo_root: Path) -> list[str]:
+    """Check AGENTS Rule R3: Build-cache keys include resolver hash.
+
+    Enforces:
+    1. app/resolve.py exists, is readable, and non-empty.
+    2. No SHA-256 calculation over app/resolve.py exists outside tools/resolver_hash.py.
+    3. Any stage-02 build module that performs caching calls tools.resolver_hash.
+    """
+    violations: list[str] = []
+
+    # 1. Verify app/resolve.py exists and is readable
+    resolve_path = repo_root / "app" / "resolve.py"
+    if not resolve_path.exists() or not resolve_path.is_file():
+        violations.append(f"R3 fail-closed: Required resolver file missing: {resolve_path}")
+    else:
+        try:
+            raw_bytes = resolve_path.read_bytes()
+            if not raw_bytes:
+                violations.append(
+                    f"R3 fail-closed: Required resolver file is empty: {resolve_path}"
+                )
+        except Exception as e:
+            violations.append(f"R3 fail-closed: Cannot read resolver file {resolve_path}: {e}")
+
+    # 2 & 3. Scan all scannable Python files in repository
+    try:
+        py_files = get_all_scannable_python_files(repo_root)
+        canonical_helper = (repo_root / "tools" / "resolver_hash.py").resolve()
+
+        for py_file in py_files:
+            try:
+                # tools/resolver_hash.py is the single authorized canonical definition
+                if py_file.resolve() == canonical_helper:
+                    continue
+
+                source = py_file.read_text(encoding="utf-8")
+                tree = ast.parse(source, filename=str(py_file))
+
+                # Check 2: Independent SHA-256 calculation
+                if detects_independent_resolve_hash(tree, source):
+                    violations.append(
+                        f"R3 violation: Independent SHA-256 of app/resolve.py in {py_file}; "
+                        "must use tools.resolver_hash"
+                    )
+
+                # Check 3: Stage-02 module cache key construction
+                if is_stage_02_module(py_file, tree, source):
+                    # Check if it performs caching/checkpointing
+                    has_caching = (
+                        "checkpoint" in source
+                        or "cache" in source
+                        or "tatoeba_index" in source
+                    )
+                    if has_caching and not stage_02_uses_resolver_hash(tree):
+                        violations.append(
+                            f"R3 violation: Stage-02 build module '{py_file}' constructs "
+                            "cache key without using tools.resolver_hash"
+                        )
+
+            except Exception as e:
+                violations.append(
+                    f"R3 fail-closed: Failed to read/parse Python file {py_file}: {e}"
+                )
+
+    except Exception as e:
+        violations.append(f"R3 fail-closed: {e}")
+
+    return violations
+
+
 def check_r7(repo_root: Path) -> list[str]:
     """Check AGENTS Rule R7: Zero coupling to the lecture app.
 
@@ -254,9 +424,10 @@ def check_r7(repo_root: Path) -> list[str]:
 
 
 def check_all(repo_root: Path) -> list[str]:
-    """Run all scaffolded executable rule checks (R1, R7)."""
+    """Run all scaffolded executable rule checks (R1, R3, R7)."""
     violations: list[str] = []
     violations.extend(check_r1(repo_root))
+    violations.extend(check_r3(repo_root))
     violations.extend(check_r7(repo_root))
     return violations
 
@@ -273,7 +444,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stderr.write(f"  - {v}\n")
         return 1
 
-    sys.stdout.write("AGENTS checks passed: R1 (runtime LLM), R7 (lecture coupling)\n")
+    sys.stdout.write(
+        "AGENTS checks passed: R1 (runtime LLM), R3 (resolver cache key), R7 (lecture coupling)\n"
+    )
     return 0
 
 
