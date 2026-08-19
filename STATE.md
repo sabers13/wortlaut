@@ -6,100 +6,123 @@ memory of a conversation.
 
 ## What landed
 
-* **slice-0 accepted and merged 2026-08-19** (ADR-0002 §6 order 1). Branch
-  `slice/0` at `584e05f3762e1dd16de9e99a1d048b42e7da31b5`, accepted on Attempt 1;
-  `Risk: none`. It established the repository skeleton and the authoritative
-  `make gate` covering ruff, `mypy --strict`, pytest, and executable AGENTS
-  checks.
-* **slice-1 accepted and merged 2026-08-19** (ADR-0002 §6 order 2). Branch
-  `slice/1` at `8d0507b349110b002e381ecd93729a012c5946f5`, accepted on Attempt 1;
-  `Risk: none`, so WORKFLOW §6 required no full-diff review. It landed the pure
-  resolver ladder and compound splitter in `app/resolve.py`, the read-only PART A
-  SQLite dictionary reader in `app/dictionary.py`, the canonical resolver
-  SHA-256 helper, and executable AGENTS R3 enforcement.
-* **Gate-1 runtime provisioning governance repair landed 2026-08-19.**
-  `pyproject.toml` now records `spacy>=3.8.0,<3.9.0` and the exact
-  `de_core_news_md` 3.8.0 wheel dependency. The local project environment was
-  provisioned with spaCy 3.8.15 / model 3.8.0 and verified before slice-2
-  Attempt 1. This was pre-dispatch governance repair: no slice attempt and no
-  audit-counter increment.
-* **slice-2 accepted and merged 2026-08-19** (ADR-0002 §6 order 3 / ADR-0001
-  §13 Gate 1). Branch `slice/2` at
-  `5ef6fb2b622a359d8564a4c4f7f7544e563d44c4`, accepted on Attempt 1;
-  `Risk: none`, so WORKFLOW §6 required no full-diff review. The real
-  `de_core_news_md` 3.8.0 probe under spaCy 3.8.15 observed `dep=svp` for `an`
-  headed by `rufe` and `kommt`; the existing module-level `SVP_DEP = "svp"` was
-  already correct and required no resolver edit. `tests/test_resolve_spacy.py`
-  now locks exactly the five ADR-0001 §13 real-model cases through the existing
-  slice-1 resolver seam. Worker CLOSE evidence: ruff clean;
-  `mypy --strict .` clean over 10 source files; pytest 80 passed; executable
-  AGENTS R1, R3 and R7 passed.
-* **`tasks/slice-3.md` authored** — ADR-0002 §6 order 4 / build stage 01.
-  It specifies the deterministic offline Wiktextract JSONL → SQLite
-  `lemma`/`sense`/`surface_form` build consumed by Gate 2, including
-  attribution, deterministic merge/IDs, multi-word separable surface forms,
-  fail-closed output behavior, and synthetic executable fixtures.
-  `Depends: slice-2`; `Risk: none`; route
-  `gpt-5.6-terra / T3 / high`, fallback `opus-5 / T3 / high`.
+* **slice-0, slice-1, slice-2 accepted and merged 2026-08-19** (ADR-0002 §6
+  orders 1–3), each on Attempt 1 under `Risk: none`. They established the
+  repository skeleton and the authoritative `make gate` (ruff, `mypy --strict`,
+  pytest, executable AGENTS checks); the pure resolver ladder + compound splitter
+  in `app/resolve.py`, the read-only PART A reader in `app/dictionary.py`, the
+  canonical resolver SHA-256 helper and executable R3; and ADR-0001 §13 Gate 1,
+  where the real `de_core_news_md` 3.8.0 probe under spaCy 3.8.15 observed
+  `dep=svp` and confirmed the existing `SVP_DEP = "svp"` needed no resolver edit.
+  `main` is at `063a733f0e07d857e820870ac8a4b79989cf3c32`.
+* **slice-3 implementation ACCEPTED but NOT merged and NOT closed.** Branch
+  `slice/3` at `7ceea14e39a7c831edfc803632d3c868ea0f3091`, pushed to
+  `origin/slice/3`, accepted on **Attempt 1**, report-only, `Risk: none` (so
+  WORKFLOW §6 required no full-diff review). It implements ADR-0002 §6 order 4 /
+  build stage 01: the deterministic offline Wiktextract JSONL → SQLite
+  `lemma`/`sense`/`surface_form` transform, with `rief an` / `ruft an` multi-word
+  separable surface forms proven, `source='wiktionary'` / `license='CC BY-SA'` on
+  every row, and fail-closed no-overwrite output. Its own worker gate recorded
+  ruff clean, `mypy --strict .` over 12 source files, `pytest -q` 91 passed
+  (80 existing + 11 new), and R1/R3/R7 passing. **That acceptance stands.**
+* **ADR-0004 drafted 2026-08-19 — `NEEDS COLD REVIEW`, not accepted.**
+  `docs/adr/0004-multilingual-learner-meanings.md` (D32–D42) makes DE/EN/FA
+  learner meanings a per-note, non-empty display selection over German
+  vocabulary: language-neutral senses plus a normalized localized-meaning
+  relation instead of `sense.gloss_en`; German learner meanings (synonym-first,
+  ≈A2–B1); English source-first; Persian generated offline against a
+  disambiguated sense with RTL presentation; stage 04 broadened to five offline
+  jobs under two LLM **roles**; tri-state noun plural on the card back; inflected
+  forms resolving to the canonical lemma. The target language stays German and
+  ADR-0001 D18 is not reopened. **AGENTS R1 is unchanged: zero LLM at runtime.**
+  Cross-file amendment records were added to ADR-0001, ADR-0002, `AGENTS.md`
+  (C3, R11), `docs/plan.md` and `docs/backlog.md`, each marked pending because
+  ADR-0004 is unaccepted.
+* **`reference/schema.sql`, `app/`, `tools/` and the `slice/3` branch are
+  deliberately unchanged** by that governance session and are now
+  implementation-stale against ADR-0004. The staleness is recorded in
+  `docs/backlog.md`, not silently carried.
 * **Two Authorities / GitHub-first transport is active.** Local Git/terminal is
-  authoritative for machine state, working-tree state, installed runtime
-  dependencies and fresh gates. Private `origin` (`sabers13/flashcard`) is the
-  persistent authoritative mirror for committed/pushed project context.
-  Routine handoff ZIP, report and diff uploads are no longer required when the
-  relevant pushed GitHub state is accessible; the validated ZIP remains the
-  immutable offline fallback. Push synchronization is fail-closed.
-* **ADR-0001/0002/0003 remain accepted and unmodified.** No active
-  `NEEDS COLD REVIEW` marker exists.
+  authoritative for machine state, working tree, installed runtime dependencies
+  and fresh gates; private `origin` (`sabers13/flashcard`) is the persistent
+  mirror for committed/pushed context. Push synchronization is fail-closed.
+* **ADR-0001/0002/0003 remain accepted.** ADR-0004 is the only active
+  `NEEDS COLD REVIEW` marker.
 
 ## Gate
 
-* `make gate` — PASS on accepted slice-2 work: ruff all checks passed;
-  `mypy --strict .` success over 10 source files; `pytest -q` 80 passed;
-  `tools/check_agents.py` passes R1 (runtime LLM), R3 (resolver cache key), and
-  R7 (lecture coupling). R6 and R12 remain deliberately unscaffolded until
-  their owning later slices. The closure worker refreshes the authoritative
-  post-closure stdout+stderr evidence at `handoff/main-gate.txt` after this
-  STATE commit; handoff exists only if that final main gate passes.
+* `make gate` — **PASS on `main` at `063a733f0e07d857e820870ac8a4b79989cf3c32`**,
+  re-run fresh by a read-only preflight worker on 2026-08-19 during this
+  governance session:
+  `.venv/bin/ruff check .` — all checks passed;
+  `.venv/bin/mypy --strict .` — success, no issues in **10 source files**;
+  `.venv/bin/pytest -q` — **80 passed** in 5.91s;
+  `.venv/bin/python tools/check_agents.py` — R1 (runtime LLM), R3 (resolver cache
+  key), R7 (lecture coupling) pass. R6 and R12 remain deliberately unscaffolded
+  until their owning later slices.
+* These are `main` numbers and are **lower than the slice-3 worker's** (12 source
+  files, 91 passed) **by design**: slice-3 is accepted but unmerged, so its
+  `tools/build_dict.py` and 11 stage-01 tests are not on `main`. The divergence is
+  expected evidence of the paused closure, not a regression.
+* This governance session wrote no `handoff/` artifact. `handoff/main-gate.txt`
+  still records the slice-2 closure gate; the next authoritative post-closure
+  evidence is produced by slice-3's closure worker, which cannot run yet.
 
 ## Escalation status
 
-* none — slice-2 accepted on Attempt 1 at its brief-selected T1/low route.
-  The missing-spaCy startup STOP, dependency provisioning repair, failed first
-  provisioning procedure, successful governance-repair retry, formal startup
-  verification, and slice-3 brief materialization were governance/mechanical
-  operations, not §5 implementation attempts.
+* none. slice-3 was accepted on **Attempt 1** at its brief-selected
+  `gpt-5.6-terra / T3 / high` route; the ladder is at position 0 for every task.
+  The ADR-0004 governance amendment is an **owner-driven architecture decision
+  taken after acceptance**, not an implementation failure: it adds no attempt,
+  triggers no escalation, and increments no counter.
 
 ## Sessions since last audit
 
-* 3    <!-- incremented exactly once by slice-2 closure. Audit at >= 10 or a phase boundary. -->
+* 3    <!-- unchanged: non-slice governance sessions do not increment it. Audit at >= 10 or a phase boundary. -->
 
 ## Blocked
 
-* **`reference/smoke_test.py`** — the filed smoke baseline remains path-broken
-  and excluded from normal discovery. `docs/plan.md` assigns its repair to
-  slice-8; that repair must remove the exclusion in the same change.
+* **slice-3 closure — PAUSED by ADR-0004.** `slice/3` must not be merged,
+  rebased, or rewritten. Unblocks only in order: ADR-0004 draft → fresh cold
+  review approval → slice-3 implementation alignment → fresh gate/report
+  acceptance (`docs/backlog.md`).
+* **`reference/schema.sql` is intentionally stale** against ADR-0004 §6/§10 —
+  `sense.gloss_en NOT NULL`, no localized-meaning relation, no per-note
+  meaning-language table, no explicit "no normal plural" marker. Repaired by the
+  slice-3 alignment work, not by a governance session.
+* **ADR-0002 D27 / ADR-0003 D27 share one decision ID** — filed in
+  `docs/backlog.md`; both ADRs are accepted, so the repair needs a session with a
+  mandate to edit accepted ADR bodies.
+* **`reference/smoke_test.py`** — path-broken and excluded from discovery;
+  `docs/plan.md` assigns the repair to slice-8, which must remove the
+  `pyproject.toml` exclusion in the same change.
 * **Compose integration** — independently BLOCKED by the lecture app's Phase 4
   decomposition and missing donor evidence; slice-9 performs the read-only donor
   verification immediately before compose work.
-* **Build stage 04 (batch gloss)** — time-bound: API credit expires
-  **mid-September 2026**; `docs/plan.md` governs the sequence.
+* **Build stage 04** — time-bound: API credit expires **mid-September 2026**;
+  now covers multilingual enrichment under ADR-0004 §8. `docs/plan.md` governs
+  the sequence.
 
 ## Next three actions
 
-1. **slice-3 startup:** open a fresh orchestrator via PROMPTS.md §NEW SLICE OPEN,
-   GitHub-first against private `sabers13/flashcard`; formally verify the
-   closure `main` HEAD, clean local tree, remote synchronization, fresh
-   `make gate`, STATE/disk consistency, both audit triggers, and the actual
-   `Depends: slice-2` ancestry. Verify the accepted slice-2 report is present
-   and records the Gate-1 `svp` evidence required by the slice-3 precondition.
-2. **slice-3 build stage 01 implementation:** dispatch `tasks/slice-3.md` on
-   `gpt-5.6-terra / T3 / high` (fallback `opus-5 / T3 / high`). Implement only
-   the deterministic maintainer-side Wiktextract JSONL → SQLite
-   `lemma`/`sense`/`surface_form` stage and its synthetic executable fixtures;
-   no real dump, network, runtime API, stage-02, or user-state work.
-3. **Before slice-3 closure, author `tasks/slice-4.md`** for ADR-0002 §6 order 5
-   / ADR-0001 Gate 2. Preserve the normative coverage thresholds verbatim:
-   `<85%` returns to governance; `85–<95%` receives the already-specified
-   splitter/fuzzy remedy once and reruns; `>=95%` continues. Set its exhaustive
-   allowlist, risk lookup, and Model/Why/Fallback from WORKFLOW at brief-writing
-   time.
+1. **ADR-0004 cold review** (WORKFLOW §7 / AGENTS G7): a fresh orchestrator
+   session on the other ORCH model, per PROMPTS.md §ADR cold review, reading only
+   the repository. It must verify that the old English-only assumptions are
+   unambiguously superseded, that the stale `reference/schema.sql` and the
+   accepted `slice/3` are explicitly blocked rather than silently contradictory,
+   that Gate 2 stays correctly positioned, that no Rejected choice was reopened,
+   that R1 and the German target language are intact, and that the DE/EN/FA
+   selection, normalized localized meanings, noun plural, morphology behaviour,
+   Persian RTL and offline LLM QA are implementable as written. It outputs
+   `APPROVED — remove NEEDS COLD REVIEW` or a numbered objection list under
+   ADR-0004's `## Cold review`. No dispatch and no implementation before it.
+2. **On approval, return to the existing slice-3 orchestrator** for a slice-3
+   **implementation-alignment brief** against the ADR-0004 data contract. That
+   brief is authored there, not by a governance or cold-review session, and only
+   after approval. On objections, AGENTS G7 applies: an ADR-0004 revision session
+   first, then a fresh cold review.
+3. **Only after slice-3 is aligned, re-accepted and closed:** author
+   `tasks/slice-4.md` for ADR-0002 §6 order 5 / ADR-0001 Gate 2, preserving
+   §6 order 5's coverage thresholds verbatim as their sole authority, with an
+   exhaustive allowlist, WORKFLOW §6 risk lookup, and Model/Why/Fallback set at
+   brief-writing time.
