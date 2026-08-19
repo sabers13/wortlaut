@@ -6,136 +6,108 @@ memory of a conversation.
 
 ## What landed
 
-* **slice-0, slice-1 and slice-2 are accepted and merged.** They established the
-  repository/gate skeleton, canonical resolver and read-only dictionary boundary,
-  executable R3, and the accepted Gate-1 spaCy label result.
-* **slice-3 implementation is ACCEPTED but NOT merged and NOT closed.** The
-  accepted Attempt-1 branch remains exactly
-  `7ceea14e39a7c831edfc803632d3c868ea0f3091` on local and origin `slice/3`,
-  `Risk: none`. Its stage-01 implementation was correct against its original
-  English-only brief; that acceptance still stands. Closure is paused because
-  ADR-0004 later changed the required Stage-01 data contract.
-* **ADR-0004 is ACCEPTED and FROZEN after cold review #3 — FINAL CONVERGENCE REVIEW.**
-  `docs/adr/0004-multilingual-learner-meanings.md` is approved; `NEEDS COLD REVIEW`
-  is removed. O1–O5 and all prior resolution records are preserved. No further
-  ordinary cold review remains; there is no ADR-0004 review #4.
-  D43 separates persisted resolver status from computed
-  `meaning_state = none | partial | complete`; D44 normalizes DE/EN/FA
-  note-local user meanings; D45 records derivation/provenance for generated
-  localized meanings.
-* **O4 is resolved by accepted D46.** v1 retains
-  `derived_compound` learner meanings as a computed ordered component
-  decomposition, never a synthesized whole-compound translation. Component and
-  source-sense selection are deterministic; note-local user meaning wins per
-  language; dictionary-derived availability is all-components-or-none; exact
-  rendered component rows carry provenance; no composed meaning or card face is
-  persisted; resolver status and scheduling remain independent.
-* **O5 is resolved by accepted D47.** Numeric dictionary
-  `lemma_id` / `sense_id` are per-asset caches only. Durable identity uses stable
-  lemma/sense semantic refs. Replacement dictionaries are candidate assets until
-  checksum/integrity/stable-ref validation plus an atomic PART-B relink and active
-  version+SHA update succeed. Missing bindings fail closed without losing user
-  meanings/history; ambiguous refs roll back activation; stale picker asset
-  tokens return HTTP 409 before writes; mixed old-binding/new-asset states are
-  forbidden. Exact relinking is not a second resolver; any true semantic
-  re-resolution must call canonical `app/resolve.py`.
-* **Cross-file ADR-0004 amendments are accepted.** ADR-0001 records the
-  supersession of numeric dictionary identity, replacement lifecycle and
-  historical compound-gloss composition. ADR-0002 keeps the standalone
-  architecture and Gate-2 ordering unchanged while compatibly extending picker
-  identity with stable refs, immutable asset token and stale-token 409 semantics.
-  `AGENTS.md` extends R11 for computed compound provenance and adds executable
-  R13: numeric dictionary IDs are never durable semantic identity.
-* **Implementation ownership is explicit.** slice-3 alignment owns Stage-01 /
-  PART-A stable refs, `sense.source_ref`, D36/D45 representation shape, D46
-  component semantic-binding information and the existing plural shape. slice-6
-  remains the offline multilingual enrichment owner. slice-7 owns PART-B
-  bindings, active dictionary metadata, D43/D44/D46 runtime/render behavior,
-  D47 activation/relink/rollback, picker asset-token semantics and R13 runtime
-  enforcement. slice-8 owns corresponding end-to-end replacement/stale-picker
-  smoke verification.
-* **`reference/schema.sql` remains intentionally stale.** It still lacks the
-  ADR-0004 localized-meaning/user-meaning model, stable semantic refs,
-  `sense.source_ref`, durable dictionary binding relation and active dictionary
-  metadata, and still makes numeric note dictionary IDs appear durable. The
-  documented mismatch is repaired by its owning implementation slices, not by
-  governance.
-* **ADR-0001, ADR-0002, ADR-0003 and ADR-0004 are accepted.** No ADR carries
-  `NEEDS COLD REVIEW`. The pre-existing ADR-0002/ADR-0003 D27 ID
-  collision remains parked and is not reopened by this revision.
-* **ADR cold-review convergence is capped at three reviews per lineage.**
-  Review #1 is broad, review #2 is focused remedy/knock-on verification, and
-  review #3 is the **FINAL CONVERGENCE REVIEW** with a severe-blocker threshold.
-  No fourth ordinary cold review is permitted for the same lineage. A review-3
-  severe blocker is recorded as terminal final-convergence evidence and changes
-  the lineage to NON-CONVERGENT / BLOCKED permanently. Recovery requires product
-  descope or a genuinely new successor ADR lineage that materially simplifies,
-  narrows, splits, or otherwise changes the architecture and explicitly
-  supersedes the blocked lineage; the successor starts at review #1. Cold review
-  detects concrete blockers; it is not architecture optimization.
-* **ADR-0004 cold-review lineage is complete and approved at review #3.**
-  Review #1 produced O1–O3; review #2 verified those remedies and produced O4–O5;
-  review #3 (FINAL CONVERGENCE REVIEW) found no qualifying severe blocker and
-  approved the ADR. The lineage is frozen and closed; there is no ADR-0004
-  review #4.
-* **Two Authorities / supervised-worker fallback remains active.** Local
-  Git/terminal is authoritative for working-tree/runtime/gate facts; private
-  `origin` is the persistent authoritative mirror for committed/pushed state.
+* **slice-0 through slice-3 are accepted, merged and closed.** slice-0 established
+  the repository/gate skeleton; slice-1 landed the canonical resolver/read-only
+  dictionary boundary and R3 scaffold; slice-2 locked the accepted Gate-1 spaCy
+  separable-verb result; slice-3 landed deterministic Stage-01 Wiktextract →
+  SQLite dictionary construction.
+* **slice-3's original Attempt-1 acceptance remains preserved.** Its original
+  implementation was accepted at
+  `7ceea14e39a7c831edfc803632d3c868ea0f3091`. The later owner-driven ADR-0004
+  amendment was not a WORKFLOW §5 implementation failure and did not increment
+  the attempt ladder.
+* **slice-3 ADR-0004 PART-A alignment is landed and independently reviewed.**
+  The alignment implementation is
+  `7423cb5147d1419dba4480826accf67243258a2d`; the mandatory migration-risk T3
+  full-diff review passed at accepted slice head
+  `89c9b89b93addd4211a931d5415e5c8d613a6f45`.
+* **Stage-01 now carries the accepted ADR-0004 PART-A identity/meaning contract.**
+  `lemma.semantic_ref`, `sense.semantic_ref`, `sense.source_namespace`,
+  `sense.source_ref`, normalized `sense_meaning`,
+  `sense_meaning_derivation`, tri-state noun plural, and deterministic D46
+  component semantic bindings are implemented. Numeric dictionary IDs remain
+  current-asset caches only; `sense.gloss_en` is no longer the normative meaning
+  carrier.
+* **ADR-0004 is ACCEPTED / FROZEN.** Cold review #3 was the FINAL CONVERGENCE
+  REVIEW; there is no review #4. D36/D45/D46/D47 and their cross-file amendments
+  remain accepted.
+* **Implementation ownership after slice-3 is unchanged.** slice-4 is ADR-0002
+  §6 order 5 / Gate 2. slice-5 owns Stage 02 / Tatoeba indexing. slice-6 owns
+  stages 03–05 including offline multilingual enrichment. slice-7 owns PART-B,
+  runtime meanings/render/API, durable dictionary bindings, D47 activation/relink
+  and R12/R13 runtime enforcement. slice-8 owns smoke/replacement verification.
+  slice-9 owns later lecture-app compose integration after its independent host
+  prerequisites are satisfied.
+* **ADR-0001, ADR-0002, ADR-0003 and ADR-0004 remain accepted.** The existing
+  ADR-0002 D27 / ADR-0003 D27 identifier collision remains parked as naming debt;
+  no decision content is ambiguous.
+* **Two-authority workflow remains binding.** Local Git/terminal is authoritative
+  for working-tree/runtime/gate facts; private `origin` is the persistent
+  authoritative mirror for committed/pushed state.
 
 ## Gate
 
-* Fresh ADR cold-review convergence-governance gate on 2026-08-20 — **PASS**:
+* **Accepted slice-3 aligned/reviewed gate — PASS on 2026-08-20:**
   `.venv/bin/ruff check .` — all checks passed;
-  `.venv/bin/mypy --strict .` — success, no issues in **10 source files**;
-  `.venv/bin/pytest -q` — **80 passed**;
+  `.venv/bin/mypy --strict .` — success, no issues in **12 source files**;
+  `.venv/bin/pytest -q` — **106 passed**;
   `.venv/bin/python tools/check_agents.py` — R1 (runtime LLM), R3 (resolver cache
-  key), R7 (lecture coupling) pass.
-* R13 is now an executable architectural rule but its implementation checks are
-  intentionally assigned to the later D47-owning alignment/runtime/smoke work;
-  the current gate scaffold therefore still reports R1/R3/R7 only.
-* slice-3 remains unmerged, so main's 10-source-file / 80-test gate is expected
-  to be smaller than slice-3's accepted worker gate. That divergence is not a
-  regression.
+  key), R7 (lecture coupling) passed.
+* Alignment-targeted verification also passed:
+  `tests/test_build_dict_stage01.py` — **23 passed**;
+  `tests/test_dictionary.py` — **14 passed**;
+  `tests/test_resolve.py` — **22 passed**;
+  `tests/test_resolve_spacy.py` — **5 passed**.
+* The closure worker runs the final authoritative post-merge/post-STATE
+  `make gate`; its stdout+stderr is stored in `handoff/main-gate.txt` and is the
+  closure handoff evidence consumed by the next fresh orchestrator.
 
 ## Escalation status
 
-* none. slice-3 remains accepted on Attempt 1 under `Risk: none`. The ADR-0004
-  governance revisions are owner-driven contract changes after acceptance, not
-  WORKFLOW §5 implementation failures; no attempts or escalation positions are
-  added.
+* none. slice-3 remained accepted on Attempt 1. The ADR-0004 alignment was an
+  owner-driven contract amendment rather than a WORKFLOW §5 failure; its
+  `Risk: migration` full-diff review passed.
 
 ## Sessions since last audit
 
-* 3    <!-- unchanged: non-slice governance sessions do not increment it. Audit at >= 10 or a phase boundary. -->
+* 4    <!-- slice-3 normal closure increments the prior value 3 exactly once. Audit at >= 10 or when a phase-boundary trigger is established at fresh startup. -->
 
 ## Blocked
 
-* **slice-3 closure remains PAUSED.** `slice/3` must not be merged, rebased or
-  rewritten. It is blocked ONLY on Stage-01 / PART-A implementation alignment
-  (`tasks/slice-3-alignment.md`) followed by fresh gate/report acceptance and any
-  risk review required by the new brief.
-* **`reference/schema.sql` remains intentionally implementation-stale** against
-  ADR-0004. PART-A omissions belong to slice-3 alignment; PART-B/runtime
-  persistence belongs to slice-7; end-to-end replacement verification belongs to
-  slice-8.
-* **ADR-0002 D27 / ADR-0003 D27 share one decision ID.** Both accepted decisions
+* **ADR-0004 PART-B/runtime schema remains intentionally deferred to slice-7.**
+  PART-A is now landed. Remaining work includes `note_meaning_lang`,
+  `note_user_meaning`, durable `note_dictionary_binding`, active dictionary
+  version+SHA state, resolver/meaning-state separation and D47 runtime
+  activation/relink semantics.
+* **ADR-0002 D27 / ADR-0003 D27 share one identifier.** Both accepted decisions
   remain valid; repair is separately parked.
 * **`reference/smoke_test.py` remains path-broken/excluded.** slice-8 owns the
-  repair and the D47 replacement/stale-picker smoke cases.
-* **Compose integration remains independently blocked** by the lecture-app Phase
-  4 decomposition/donor-evidence requirement; slice-9 owns that later check.
-* **Build stage 04 remains time-bound to mid-September 2026** and now includes
-  ADR-0004 multilingual enrichment. Its sequencing is unchanged.
+  repair plus D47 replacement/stale-picker smoke verification.
+* **Compose integration remains independently blocked** by the lecture app's
+  Phase-4 decomposition and required donor evidence; slice-9 owns that later
+  boundary.
+* **Build stage 04 remains time-bound to mid-September 2026.** Its multilingual
+  enrichment scope is unchanged; Gate 2 and stages 02–03 must precede it.
+* **Non-blocking slice-3 review debt remains in `docs/backlog.md`.** T3 N1 is a
+  synthetic test-fixture `genitive_sg` bind defect; T3 N2 is future fallback
+  fingerprint hardening for potentially volatile upstream numeric bookkeeping.
+  Neither blocks Gate 2.
 
 ## Next three actions
 
-1. **slice-3 ADR-0004 Stage-01 / PART-A alignment.** Extend the already-accepted
-   slice-3 implementation without rebasing, rewriting or merging its accepted
-   history. Implement `tasks/slice-3-alignment.md`.
-2. **Fresh aligned acceptance.** Run the targeted alignment tests and full
-   `make gate`; update the existing slice-3 report with an alignment amendment.
-   Because the alignment changes `reference/schema.sql`, apply WORKFLOW §6's
-   `migration` risk review before final acceptance/merge.
-3. **Normal slice-3 closure.** Only after the aligned work is accepted, perform
-   normal slice-3 closure/merge. Gate 2 remains slice-4 / ADR-0002 §6 order 5
-   with its existing position and thresholds.
+1. **Open slice-4 with formal startup verification.** Verify the closure
+   manifest/final `main` HEAD, clean local tree, origin sanity, fresh `make gate`,
+   STATE consistency, both audit triggers, and the brief's exact
+   `Depends: slice-3` merged condition.
+2. **Supply Gate-2's four local non-repository inputs before dispatch:**
+   a real English-edition Wiktextract JSONL, a real German-edition Wiktextract
+   JSONL, one UTF-8 file containing 200–300 unique nonblank vocabulary headwords
+   from one real German-textbook unit, and a non-empty human-readable unit label.
+   These inputs and generated dictionary/misses artifacts stay local and
+   uncommitted.
+3. **Execute slice-4 / Gate 2 baseline measurement.** The baseline worker is
+   `gemini-flash / T1 / low` (fallback `codex-low / T1 / low`) and may modify only
+   its briefed measurement tool/test/report. ADR-0002 §6 governs mechanically:
+   `<85%` → governance redesign and no Stage 02; `85–<95%` → exactly one explicit
+   orchestrator-authored remedy cycle then one rerun; `>=95%` → continue. Gate 2
+   is a design gate, not the WORKFLOW §5 retry ladder.
