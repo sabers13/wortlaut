@@ -488,7 +488,83 @@ bodies, which is outside this session's mandate. It is filed in
 
 ## Cold review
 
-Pending. This ADR has never been cold-reviewed; its status is `NEEDS COLD REVIEW`
-and the drafting session did not remove it (WORKFLOW §7, AGENTS G7). A cold
-reviewer writes either `APPROVED — remove NEEDS COLD REVIEW` or a numbered
-objection list under this heading.
+**Reviewer:** fresh cold-review orchestrator session, 2026-08-19, repo-only
+context per WORKFLOW §7 / PROMPTS.md §ADR cold review.
+
+**Verdict: OBJECTIONS — `NEEDS COLD REVIEW` stays.** The multilingual direction,
+Gate-2 position, German target-language boundary, zero-runtime-LLM rule, and the
+accepted-but-paused slice-3 treatment are sound. The blockers below are contract
+gaps that make parts of the ADR non-executable as written.
+
+### O1 — BLOCKING. The invented `needs_gloss` redefinition collapses resolution state and meaning-availability state.
+
+The existing resolver/ref contract uses `resolved`, `derived_compound`, and
+`needs_gloss` to describe **resolution outcome** (ADR-0001 §10; `app/resolve.py`),
+and `reference/schema.sql` gives `note.status` the same domain. ADR-0004 §6.3
+redefines that same persisted status by **availability of meaning text in the
+selected languages**. Those are independent state machines. A dictionary-resolved
+`Haus` with selection `{fa}` and no Persian row must become `needs_gloss` under
+§6.3 even though resolution succeeded. Conversely, an unresolved stub given a
+user-authored meaning in its selected language no longer satisfies §6.3's
+`needs_gloss` definition, but it is neither `resolved` nor `derived_compound`. A
+`meaning_langs` patch can also flip meaning availability without changing the
+resolver result, yet no recomputation/transition rule is defined. D32's rationale
+that a non-empty selected set keeps “a card always shows some meaning” true is
+therefore false for the very `needs_gloss` case this ADR preserves.
+
+*Remedy:* separate resolution state from meaning-availability/completeness state
+(or define a replacement status model with equally explicit semantics), say which
+state is persisted, define transitions/recomputation on selected-language changes,
+user-meaning changes, and dictionary-version changes, and amend ADR-0001/ADR-0002
+and resolver/API expectations consistently. The drafting session's invented
+decision (a) is **not accepted in its current form**; the revision must explicitly
+decide whether the learner-facing condition means “no selected meaning exists” or
+“one or more selected meanings are missing” rather than overloading resolver
+status by implication.
+
+### O2 — BLOCKING. `meaning_langs` is well-defined, but localized user-authored meanings have no executable API or persistence contract.
+
+The drafting session's invented decision (b) is sound on its own: omission means
+no mutation on a reused note, `null`/`[]` are invalid, and creation requires an
+explicit non-empty set with no API default. However, ADR-0002 §4 still permits
+exactly `gloss_user: string | null -> note.gloss_user`, only for a revalidated
+`needs_gloss` selection. ADR-0004 §6.3 simultaneously requires a user-authored
+meaning to record **which language it is written in** while deferring the exact
+shape to an implementation slice. That is not an implementation detail: it is the
+public commit/edit contract and the PART-B data model.
+
+The current rules are also behaviorally inconsistent. With selected
+`{de,en,fa}` and only an English source meaning, §6.3 calls the note resolved, so
+ADR-0002's `gloss_user` rule rejects an attempt to add the missing German or
+Persian meaning. If no selected meaning exists and the user adds one, the new
+status definition then makes the note resolved, preventing a second language from
+being added through the same path. One scalar `note.gloss_user` cannot represent
+multiple language-tagged user meanings.
+
+*Remedy:* define the exact language-bearing request shape for user meanings
+(`/vocab/cards` and `/vocab/gloss` if that endpoint remains), the normalized or
+otherwise unambiguous PART-B persistence shape, add/update/clear semantics,
+validation and transaction rules, and how the still-English-only D10 contribution
+path interacts with it. Explicitly supersede ADR-0002 §4's scalar `gloss_user`
+contract and its smoke-baseline expectations instead of leaving the slice to invent
+a public API.
+
+### O3 — BLOCKING. Per-row provenance is required, but generated-row derivation has no data carrier.
+
+D36's conceptual `sense_meaning` target carries only `source` and `license`. D38
+then requires a generated localized meaning that was derived from source-backed
+input to record that derivation so the upstream CC BY-SA obligation remains
+traceable, while also requiring `source='llm_generated_vN'` for clean rollback and
+forbidding generated rows from masquerading as Wiktionary. Those requirements
+cannot all be represented by the target row as written: `source` must remain the
+generation marker, `license` is not a source-row reference, and `sense.source` /
+`sense.license` describe provenance of the semantic distinction rather than the
+localized text used as generation input. AGENTS R11 therefore asserts traceability
+that the proposed relation cannot reconstruct.
+
+*Remedy:* define an explicit localized-meaning derivation/provenance carrier
+(e.g. an upstream/source reference field or normalized derivation relation), its
+cardinality and license semantics, and amend the conceptual target plus R11 wording
+so a generated row can identify both its generation version and every
+source-backed localized row it derives from. Preserve deletion/reversal by the
+versioned generation marker.

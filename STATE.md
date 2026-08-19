@@ -27,7 +27,7 @@ memory of a conversation.
   every row, and fail-closed no-overwrite output. Its own worker gate recorded
   ruff clean, `mypy --strict .` over 12 source files, `pytest -q` 91 passed
   (80 existing + 11 new), and R1/R3/R7 passing. **That acceptance stands.**
-* **ADR-0004 drafted 2026-08-19 — `NEEDS COLD REVIEW`, not accepted.**
+* **ADR-0004 cold-reviewed 2026-08-19 — OBJECTIONS filed (O1, O2, O3); `NEEDS COLD REVIEW` stays.**
   `docs/adr/0004-multilingual-learner-meanings.md` (D32–D42) makes DE/EN/FA
   learner meanings a per-note, non-empty display selection over German
   vocabulary: language-neutral senses plus a normalized localized-meaning
@@ -39,11 +39,14 @@ memory of a conversation.
   ADR-0001 D18 is not reopened. **AGENTS R1 is unchanged: zero LLM at runtime.**
   Cross-file amendment records were added to ADR-0001, ADR-0002, `AGENTS.md`
   (C3, R11), `docs/plan.md` and `docs/backlog.md`, each marked pending because
-  ADR-0004 is unaccepted.
+  ADR-0004 is unaccepted. Cold review identified three blocking contract gaps:
+  O1 (needs_gloss overloaded between resolution and meaning availability),
+  O2 (missing user-authored meaning schema/API/validation), and O3 (missing
+  derivation carrier for generated-row CC BY-SA provenance).
 * **`reference/schema.sql`, `app/`, `tools/` and the `slice/3` branch are
-  deliberately unchanged** by that governance session and are now
-  implementation-stale against ADR-0004. The staleness is recorded in
-  `docs/backlog.md`, not silently carried.
+  deliberately unchanged** by governance sessions and are implementation-stale
+  against ADR-0004. The staleness is recorded in `docs/backlog.md`, not silently
+  carried.
 * **Two Authorities / GitHub-first transport is active.** Local Git/terminal is
   authoritative for machine state, working tree, installed runtime dependencies
   and fresh gates; private `origin` (`sabers13/flashcard`) is the persistent
@@ -53,13 +56,11 @@ memory of a conversation.
 
 ## Gate
 
-* `make gate` — **PASS**. Measured fresh on `main` at
-  `063a733f0e07d857e820870ac8a4b79989cf3c32` by a read-only preflight worker on
-  2026-08-19, and re-run after this session's documentation commits with
-  identical numbers (the commits are documentation-only):
+* `make gate` — **PASS**. Measured fresh on `main` by this cold-review session
+  on 2026-08-19:
   `.venv/bin/ruff check .` — all checks passed;
   `.venv/bin/mypy --strict .` — success, no issues in **10 source files**;
-  `.venv/bin/pytest -q` — **80 passed** in 5.91s;
+  `.venv/bin/pytest -q` — **80 passed** in 6.07s;
   `.venv/bin/python tools/check_agents.py` — R1 (runtime LLM), R3 (resolver cache
   key), R7 (lecture coupling) pass. R6 and R12 remain deliberately unscaffolded
   until their owning later slices.
@@ -86,9 +87,9 @@ memory of a conversation.
 ## Blocked
 
 * **slice-3 closure — PAUSED by ADR-0004.** `slice/3` must not be merged,
-  rebased, or rewritten. Unblocks only in order: ADR-0004 draft → fresh cold
-  review approval → slice-3 implementation alignment → fresh gate/report
-  acceptance (`docs/backlog.md`).
+  rebased, or rewritten. Unblocks only in order: ADR-0004 draft → ADR-0004
+  revision (resolving O1–O3) → fresh cold review approval → slice-3
+  implementation alignment → fresh gate/report acceptance (`docs/backlog.md`).
 * **`reference/schema.sql` is intentionally stale** against ADR-0004 §6/§10 —
   `sense.gloss_en NOT NULL`, no localized-meaning relation, no per-note
   meaning-language table, no explicit "no normal plural" marker. Repaired by the
@@ -108,24 +109,16 @@ memory of a conversation.
 
 ## Next three actions
 
-1. **ADR-0004 cold review** (WORKFLOW §7 / AGENTS G7): a fresh orchestrator
-   session on the other ORCH model, per PROMPTS.md §ADR cold review, reading only
-   the repository. It must verify that the old English-only assumptions are
-   unambiguously superseded, that the stale `reference/schema.sql` and the
-   accepted `slice/3` are explicitly blocked rather than silently contradictory,
-   that Gate 2 stays correctly positioned, that no Rejected choice was reopened,
-   that R1 and the German target language are intact, and that the DE/EN/FA
-   selection, normalized localized meanings, noun plural, morphology behaviour,
-   Persian RTL and offline LLM QA are implementable as written. It outputs
-   `APPROVED — remove NEEDS COLD REVIEW` or a numbered objection list under
-   ADR-0004's `## Cold review`. No dispatch and no implementation before it.
-2. **On approval, return to the existing slice-3 orchestrator** for a slice-3
-   **implementation-alignment brief** against the ADR-0004 data contract. That
-   brief is authored there, not by a governance or cold-review session, and only
-   after approval. On objections, AGENTS G7 applies: an ADR-0004 revision session
-   first, then a fresh cold review.
-3. **Only after slice-3 is aligned, re-accepted and closed:** author
-   `tasks/slice-4.md` for ADR-0002 §6 order 5 / ADR-0001 Gate 2, preserving
-   §6 order 5's coverage thresholds verbatim as their sole authority, with an
-   exhaustive allowlist, WORKFLOW §6 risk lookup, and Model/Why/Fallback set at
-   brief-writing time.
+1. **Start a fresh ADR-0004 revision session to resolve the persisted cold-review objections**
+   (AGENTS G7 / PROMPTS.md §Orchestrator CLOSE step 3): a fresh orchestrator
+   session to resolve the three blocking cold-review objections (O1 needs_gloss
+   redefinition and resolution/meaning-availability state decoupling; O2
+   localized user-authored meanings schema, API, validation and contribution
+   boundary; O3 generated-row provenance and source derivation carrier under
+   AGENTS R11). The revision targets a fresh cold review on close.
+2. **Fresh ADR-0004 cold review** (WORKFLOW §7 / AGENTS G7): a fresh orchestrator
+   session reading only the repository to verify the revised ADR-0004.
+3. **On cold-review approval, return to the existing slice-3 orchestrator** for a
+   slice-3 **implementation-alignment brief** against the approved ADR-0004 data
+   contract. That brief is authored there, not by a governance or cold-review
+   session, and only after approval.
