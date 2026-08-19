@@ -37,29 +37,26 @@ and `tasks/<NEXT>.md` naming key on the slice ID, never the order number.
 
 ## Governance amendment — ADR-0004 (2026-08-19)
 
-`docs/adr/0004-multilingual-learner-meanings.md` was drafted by a non-slice
-governance session and carries `NEEDS COLD REVIEW`. It is **not accepted**;
-nothing below is implementable until a fresh cold review approves it
-(WORKFLOW §7, AGENTS G7).
+`docs/adr/0004-multilingual-learner-meanings.md` was approved and frozen at cold
+review #3 — FINAL CONVERGENCE REVIEW. `NEEDS COLD REVIEW` is removed.
 
 **No slice ID or §6 order in the table above is renumbered.** This amendment adds
 one blocking condition and three scope notes; the sequence is unchanged.
 
 - **slice-3 closure is paused.** Its implementation was accepted on Attempt 1 at
   `7ceea14e39a7c831edfc803632d3c868ea0f3091` under `Risk: none` and remains
-  accepted. It cannot close until ADR-0004 is cold-reviewed **and** the
-  implementation is aligned with the new multilingual data contract and stable
-  semantic identity requirements. Specifically, slice-3 alignment lands:
-  PART-A stable lemma/sense semantic references (`lemma.semantic_ref`,
-  `sense.semantic_ref`); `sense.source_ref`; deterministic D46 component
-  semantic binding data; the D36/D45 localized-meaning and derivation shape
-  (`sense_meaning`, `sense_meaning_derivation`); and the existing tri-state noun
-  plural contract (`lemma.plural`, `lemma.plural_none`). Slice-3 is stage-01
-  dictionary build work and does not implement the runtime activation/API layer.
+  accepted. It cannot close until the implementation is aligned with the accepted
+  multilingual data contract and stable semantic identity requirements.
+  Specifically, slice-3 alignment lands: PART-A stable lemma/sense semantic
+  references (`lemma.semantic_ref`, `sense.semantic_ref`); `sense.source_ref`;
+  deterministic D46 component semantic binding data; the D36/D45
+  localized-meaning and derivation shape (`sense_meaning`,
+  `sense_meaning_derivation`); and the existing tri-state noun plural contract
+  (`lemma.plural`, `lemma.plural_none`). Slice-3 is stage-01 dictionary build
+  work and does not implement the runtime activation/API layer.
 - **This is an owner-driven governance amendment, not a failed WORKFLOW §5
   attempt.** It adds no attempt to the ladder and does not increment the audit
-  counter. The alignment brief is authored by the existing slice-3 orchestrator,
-  after cold review — not here.
+  counter. The alignment brief is `tasks/slice-3-alignment.md`.
 - **slice-4 remains Gate 2**, in its existing position: Gate 2 measures stage-01
   dictionary coverage *before* the expensive later stages, and ADR-0004 does not
   move it. Its thresholds are unchanged. ADR-0002 §6 order 5 remains their sole

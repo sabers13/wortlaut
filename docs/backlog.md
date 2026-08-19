@@ -9,23 +9,19 @@ them. REJECTED items are listed so they do not resurface.
   The slice-3 implementation passed Attempt 1 and was accepted report-only under
   `Risk: none` at `7ceea14e39a7c831edfc803632d3c868ea0f3091`; that acceptance
   stands. It is **not merged and not closed**, and `slice/3` must not be merged,
-  rebased, or rewritten while this item is open. Unblocks strictly in this order:
+  rebased, or rewritten while this item is open. Cold review through review #3 is
+  complete (ADR-0004 APPROVED / FROZEN). Unblocks strictly in this order:
 
   ```
-  ADR-0004 draft
-  -> cold-review objections O1–O3
-  -> ADR-0004 revision resolving O1–O3
-  -> fresh post-revision cold review objections O4–O5
-  -> ADR-0004 revision resolving O4–O5
-  -> fresh cold review approval
-  -> slice-3 implementation alignment
-  -> fresh gate/report acceptance
+  ADR-0004 APPROVED / FROZEN
+  -> slice-3 Stage-01 / PART-A implementation alignment
+  -> fresh gate/report acceptance + required migration-risk review
+  -> normal slice-3 closure
   ```
 
   This is an owner-driven architecture change, **not** a WORKFLOW §5
   implementation failure: no attempt is added to the ladder and the audit counter
-  is unchanged. The alignment brief is authored by the existing slice-3
-  orchestrator only after cold review approves ADR-0004.
+  is unchanged. The alignment brief is `tasks/slice-3-alignment.md`.
 - **`reference/schema.sql` is intentionally stale with respect to ADR-0004.** It
   still shows `sense.gloss_en NOT NULL`, scalar `note.gloss_user`, and
   `note.status` without the new resolver/meaning-state separation documented in
@@ -63,7 +59,7 @@ them. REJECTED items are listed so they do not resurface.
 - **Build stage 04 (multilingual offline meaning enrichment; formerly batch
   gap-gloss)** — time-bound, not blocked: the API credit expires
   **mid-September 2026**. Gate 1 → stage 01 → Gate 2 → stages 02–03 must land
-  before it. Under ADR-0004 §8 (pending cold review) its scope is broadened from
+  before it. Under ADR-0004 §8 its scope is broadened from
   English gap-filling to: fill missing English meanings; create/simplify German
   learner meanings; create Persian translations; deterministically validate every
   generated localized row; and selectively route flagged rows plus a small random
@@ -89,21 +85,19 @@ them. REJECTED items are listed so they do not resurface.
 - `.apkg` export via genanki (~50 lines; carries scheduling + media that TSV cannot).
 - Contribution promotion job at dictionary build (normalised string overlap).
 - Compound gloss trimming (`re.split(r"[;,]", g)[0]` per component; demote the
-  composed gloss, promote the decomposition). Pending ADR-0004 D46 supersedes
-  this deferred behaviour with the all-components-or-none decomposition on
-  approval; until approval the historical row remains only because ADR-0004 is
-  pending.
+  composed gloss, promote the decomposition). Accepted ADR-0004 D46 supersedes
+  this deferred behaviour with the all-components-or-none decomposition.
 - `FREQ` from Tatoeba counts (falls out of stage 02 free; absent, example
   ranking degrades to length-only).
 - Derived card state via `review_log` replay (also the mechanism that keeps
   ADR-0003's confidence mapping revisable).
 - espeak-ng startup check (fail loudly, prefer Wiktionary IPA).
-- Multilingual contribution/voting policy (cite: ADR-0004 D42, pending cold
-  review). The existing `gloss_contribution` scope — English, one vote per user
-  per lemma, promotion at dictionary build (ADR-0001 D10) — stays exactly as
-  accepted and is deliberately **not** generalised to German or Persian. Whether
-  and how learners contribute DE/FA meanings, and how promotion interacts with
-  three provenance regimes, is an undecided design problem, not an oversight.
+- Multilingual contribution/voting policy (cite: ADR-0004 D42). The existing
+  `gloss_contribution` scope — English, one vote per user per lemma, promotion
+  at dictionary build (ADR-0001 D10) — stays exactly as accepted and is
+  deliberately **not** generalised to German or Persian. Whether and how
+  learners contribute DE/FA meanings, and how promotion interacts with three
+  provenance regimes, is an undecided design problem, not an oversight.
 
 ## Standing
 
@@ -126,13 +120,12 @@ them. REJECTED items are listed so they do not resurface.
 - Runtime LLM in any form — ADR-0001 D1.
 - Implementing Brainscape's proprietary scheduler / replacing FSRS — ADR-0003 §3.
 - Parallel `gloss_en` / `gloss_de` / `gloss_fa` columns on `sense` — ADR-0004
-  §12 (pending cold review); every new meaning language would be a migration over
-  a shipped asset, and per-language `source`/`license` has nowhere to live.
+  §12; every new meaning language would be a migration over a shipped asset,
+  and per-language `source`/`license` has nowhere to live.
 - Runtime translation or runtime LLM calls of any kind, cached or not — ADR-0004
-  §12 (pending), restating ADR-0001 D1 / §9 and AGENTS R1 for three languages.
+  §12, restating ADR-0001 D1 / §9 and AGENTS R1 for three languages.
 - LLM-generating the whole dictionary instead of source-first enrichment —
-  ADR-0004 §12 (pending); discards Wiktionary structured grammar and the
-  attribution chain.
-- Separate vocabulary notes per inflected surface form — ADR-0004 §12 (pending);
+  ADR-0004 §12; discards Wiktionary structured grammar and the attribution chain.
+- Separate vocabulary notes per inflected surface form — ADR-0004 §12;
   fragments one FSRS state across a paradigm and duplicates what the resolver
   already does.

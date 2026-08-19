@@ -1,9 +1,11 @@
 # ADR-0004 — Multilingual learner meanings (DE/EN/FA) for German vocabulary
 
-**Status:** NEEDS COLD REVIEW. Drafted 2026-08-19 by a non-slice governance
-session from owner decisions taken after the slice-3 implementation was accepted
-report-only and before slice-3 closure. Not accepted; nothing may be implemented
-against it until PROMPTS.md §ADR cold review approves it (WORKFLOW §7, AGENTS G7).
+**Status:** ACCEPTED / FROZEN. ADR-0004 was approved at cold review #3 —
+**FINAL CONVERGENCE REVIEW**. `NEEDS COLD REVIEW` is removed. O1–O5 and every
+resolution record remain preserved. This ADR lineage is closed to further
+ordinary cold review: there is no ADR-0004 review #4. Subsequent work may
+implement this accepted architecture but must not substantively revise it
+without a genuinely new architectural decision/lineage.
 
 **Amends:** ADR-0001 (§1's English-gloss-only product statement; D9's English-only
 `needs_gloss` wording; §11 Card specification's `Gloss | English sense(s), max 3`
@@ -1225,3 +1227,12 @@ resolver state without losing user meanings/history, ambiguous duplicate refs
 abort the entire activation, old numeric IDs are never match keys, stale picker
 asset tokens are rejected before writes, and failed activation leaves the
 previous asset active. `meaning_state` consults only a validated current binding.
+
+### Cold review #3 — FINAL CONVERGENCE REVIEW — APPROVED
+
+**APPROVED — remove NEEDS COLD REVIEW.**
+
+The final convergence review found no qualifying severe blocker under
+WORKFLOW.md §7 / AGENTS G7. O1–O5 and all resolution records remain preserved.
+ADR-0004 is accepted and frozen. Implementation may resume against D32–D47.
+There is no ADR-0004 review #4.
