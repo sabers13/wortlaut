@@ -33,19 +33,24 @@ then the ADR-0001 text they name remains the implemented contract, and
 | §8 attribution: `sense.source` / `sense.license` as the provenance of the meaning | ADR-0004 (pending) | provenance moves to the **localized meaning row**: each DE/EN/FA text carries its own `source` and `license`, because the three routinely come from different sources under different licenses for one sense. The sense row keeps provenance for the sense *distinction*. The versioned generation marker stays on the generated row, and an explicit derivation relation (`sense_meaning_derivation`, D45) links generated rows to every source-backed localized input, so upstream attribution/license remains traversable. `example` attribution is unchanged |
 | §12 stage 04 `gloss_gaps_batch` as an English-gap-only job | ADR-0004 (pending) | stage 04 also creates and simplifies German learner meanings, creates Persian translations, deterministically validates generated rows, and selectively routes flagged rows plus a small random sample to a stronger QA model. Versioned `source='llm_generated_v1'` marking, non-masquerade, and clean reversibility are unchanged, and stage 04 remains the only place an API key exists |
 | §10 Endpoint `POST /gloss` — "Fill `needs_gloss`, optional contribute" | ADR-0004 (pending) | superseded by `/vocab/gloss` as the language-bearing note-local meaning edit (D44 §6.4): POST upserts `(note_id, language)`; DELETE removes by note/language; independent of resolver status; optional contribution only for English |
+| §4 / D11 numeric dictionary identity `(user_id, lemma_text, pos, sense_id)` | ADR-0004 (pending) | superseded by D47: direct durable identity is the stable `sense_ref`; derived durable identity is the ordered stable component `(lemma_ref, sense_ref)` vector; numeric `lemma_id` / `sense_id` are active-asset caches only; selected meaning languages are not note identity. D11 candidate picker and multi-select stand |
+| §12 dictionary replacement and activation lifecycle | ADR-0004 (pending) | a fetched `dictionary_vN.sqlite` is only a candidate until D47 stable-ref validation + atomic PART-B relink and active-version transaction succeed; on activation failure the previous asset stays active; numeric IDs are never assumed continuous between dictionary versions. D4 static versioned release asset, checksums, separate volume, and R9 stand |
+| §14 deferred Compound gloss trimming / compound composition | ADR-0004 (pending) | historical computed concatenated/trimming behaviour is superseded on approval by D46: one ordered component decomposition per selected language rendered only when all components have localized text in that language; all-components-or-none; user-meaning precedence; no fabricated whole-compound translation; exact component-row provenance; no persisted composed text |
 
 Everything else — D1, D3–D6, D8–D14 (D3 remains the one-resolver invariant;
 D23 only removes the obsolete host-ingest consumer; D9's card-creation and
 scheduling behaviour stands and only its English-only gloss wording is superseded
-above; D11 picker/multi-select, D12 many-to-many deck membership, and D13
-manual-entry sharing remain), D18–D19,
-§17.7 CSV import, the unrelated §17.8 rejected generic-note/configurable-template/
-plugin-registry alternatives, the gates (§13, including Gate 2's position and
-thresholds), dictionary build and distribution
-(§12 except stage 04's English-gap-only scope superseded above), card spec (§11
-except the rating UI, D7-derived example-pointer wording, the Example ranking
-`known` formula, and the Gloss field group superseded above),
-and export format/behaviour (§7) — stands as written.
+above; D11 picker/multi-select stands while numeric-sense identity is superseded
+by D47 above; D12 many-to-many deck membership and D13 manual-entry sharing
+remain), D18–D19, §17.7 CSV import, the unrelated §17.8 rejected
+generic-note/configurable-template/plugin-registry alternatives, the gates (§13,
+including Gate 2's position and thresholds), dictionary build and distribution
+(§12 except stage 04's English-gap-only scope and the numeric-identity/activation
+lifecycle superseded above), card spec (§11 except the rating UI, D7-derived
+example-pointer wording, the Example ranking `known` formula, and the Gloss
+field group superseded above), deferred items (§14 except `lesson_token` dropped
+by ADR-0002 and compound-gloss trimming superseded by D46 above), and export
+format/behaviour (§7) — stands as written.
 
 ---
 

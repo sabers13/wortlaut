@@ -15,12 +15,12 @@ and `tasks/<NEXT>.md` naming key on the slice ID, never the order number.
 | slice-0 | 1 | Order 0 returned its HEAD; the fresh orchestrator ran the first-slice startup exception against that exact SHA | `make gate` exists and passes ruff, `mypy --strict`, `pytest -q`, and executable AGENTS checks. No application feature work. |
 | slice-1 | 2 | — | Resolver/dictionary contract and the R3 scaffold are gate-verified before Gate 1. |
 | slice-2 | 3 | — | Accepted spaCy label plus tests locking the ADR-0001 §13 cases. Failure is fixed before any dictionary build work. |
-| slice-3 | 4 | — | Stage 01 output carries the schema/attribution contract Gate 2 consumes. **Closure BLOCKED** by the ADR-0004 governance amendment below: the accepted Attempt-1 implementation must be aligned to the multilingual meaning contract before it merges. |
+| slice-3 | 4 | — | Stage 01 output carries the schema/attribution contract Gate 2 consumes. **Closure BLOCKED** by the ADR-0004 governance amendment below: the accepted Attempt-1 implementation must be aligned to the multilingual meaning contract and stable semantic refs before it merges. |
 | slice-4 | 5 | — | §6 order 5's thresholds govern verbatim. A design gate, not a §5 retry ladder: `<85%` returns to governance. |
 | slice-5 | 6 | — | Stage 02 imports `app/resolve.py`; cache keys include its SHA-256 (AGENTS R2/R3). |
 | slice-6 | 7 | — | Packaged dictionary path is reproducible; stages 03–05 include the ADR-0004 multilingual offline meaning enrichment (EN gap fill, DE learner meanings, FA translations, deterministic validation, selective QA); stage 04 completes before the mid-September 2026 API-credit expiry. |
-| slice-7 | 8 | — | ADR-0003 review/mastery semantics and AGENTS R12 land before browser integration. Render/API must also support the note's selected DE/EN/FA meaning set, Persian RTL, and tri-state noun plural on the back (ADR-0004 §10) before UI/browser completion. |
-| slice-8 | 9 | — | The `reference/smoke_test.py` path defect is repaired here; assertions match ADR-0002 §4/§5 and ADR-0003 §5. |
+| slice-7 | 8 | — | ADR-0003 review/mastery semantics and AGENTS R12/R13 land before browser integration. Render/API must also support the note's selected DE/EN/FA meaning set, Persian RTL, tri-state noun plural on the back (ADR-0004 §10), PART-B durable bindings, D47 atomic dictionary activation/relink, and stale-picker HTTP 409 before UI/browser completion. |
+| slice-8 | 9 | — | The `reference/smoke_test.py` path defect is repaired here; assertions match ADR-0002 §4/§5, ADR-0003 §5, and ADR-0004 D47 replacement/stale-picker scenarios. |
 | slice-9 | 10 | Lecture app Phase 4 decomposition complete | Read-only, out-of-ladder donor inspection (WORKFLOW §12 / AGENTS G6) writes `tasks/adr-0002-donor-notes.md` first; any contradiction returns to governance. Compose work starts only if donor evidence agrees and the host blocker is gone. |
 
 ## Dispatch boundaries
@@ -48,12 +48,14 @@ one blocking condition and three scope notes; the sequence is unchanged.
 - **slice-3 closure is paused.** Its implementation was accepted on Attempt 1 at
   `7ceea14e39a7c831edfc803632d3c868ea0f3091` under `Risk: none` and remains
   accepted. It cannot close until ADR-0004 is cold-reviewed **and** the
-  implementation is aligned with the new multilingual data contract, which now
-  explicitly includes: a language-neutral `sense` plus `sense_meaning`;
-  `sense_meaning_derivation`; `note_meaning_lang`; `note_user_meaning`;
-  `note.status` remaining the resolver outcome; the computed `meaning_state`
-  (none/partial/complete); supersession of scalar `note.gloss_user`; and the
-  existing tri-state noun plural contract.
+  implementation is aligned with the new multilingual data contract and stable
+  semantic identity requirements. Specifically, slice-3 alignment lands:
+  PART-A stable lemma/sense semantic references (`lemma.semantic_ref`,
+  `sense.semantic_ref`); `sense.source_ref`; deterministic D46 component
+  semantic binding data; the D36/D45 localized-meaning and derivation shape
+  (`sense_meaning`, `sense_meaning_derivation`); and the existing tri-state noun
+  plural contract (`lemma.plural`, `lemma.plural_none`). Slice-3 is stage-01
+  dictionary build work and does not implement the runtime activation/API layer.
 - **This is an owner-driven governance amendment, not a failed WORKFLOW §5
   attempt.** It adds no attempt to the ladder and does not increment the audit
   counter. The alignment brief is authored by the existing slice-3 orchestrator,
@@ -77,13 +79,18 @@ one blocking condition and three scope notes; the sequence is unchanged.
 - **slice-6's stages 03–05 now include multilingual offline meaning enrichment**
   under ADR-0004 §8. The mid-September 2026 API-credit constraint on stage 04 is
   unchanged by the broadening.
-- **Later render/API work** (slice-7 onward) must support the note's selected
-  DE/EN/FA meaning set, Persian RTL presentation, and noun-plural-on-the-back
-  tri-state rendering before UI/browser completion; user-meaning display
-  precedence (note-local `note_user_meaning` over dictionary `sense_meaning`),
-  the language-bearing `/vocab/gloss` POST/DELETE edit endpoint, and the
-  none/partial/complete selected-language availability of D43 `meaning_state`
-  are required for the UI/render behaviour.
+- **slice-7 (runtime app work)** owns: PART-B durable dictionary bindings
+  (`note_dictionary_binding`), active dictionary version+SHA metadata,
+  `note_meaning_lang`, `note_user_meaning`, supersession of scalar
+  `note.gloss_user`, D43/D46 read/render behaviour, user-meaning precedence
+  (note-local `note_user_meaning` over dictionary `sense_meaning`), Persian RTL,
+  tri-state noun plural rendering, the language-bearing `/vocab/gloss` POST/DELETE
+  endpoint, stable picker refs plus dictionary asset token, stale-token HTTP 409
+  rejection, D47 atomic activation/relink/rollback, and AGENTS R12/R13 runtime
+  enforcement before browser integration.
+- **slice-8 (smoke work)** repairs the `reference/smoke_test.py` baseline and owns
+  the end-to-end D47 replacement/stale-picker verification in addition to its
+  existing contract assertions.
 
 ### Operational defaults for the offline build (non-normative)
 

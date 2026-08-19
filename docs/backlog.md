@@ -30,11 +30,16 @@ them. REJECTED items are listed so they do not resurface.
   still shows `sense.gloss_en NOT NULL`, scalar `note.gloss_user`, and
   `note.status` without the new resolver/meaning-state separation documented in
   ADR-0004; it has no `sense_meaning`, no `sense_meaning_derivation`, no
-  `note_meaning_lang`, no `note_user_meaning`, and no `lemma.plural_none`
-  marker. The governance session that drafted ADR-0004 was forbidden from
-  implementation changes, so the mismatch is recorded rather than repaired. It is
-  resolved by the slice-3 alignment work above; until then, read the mismatch as
-  blocked-and-documented, not as an undetected contradiction.
+  `note_meaning_lang`, no `note_user_meaning`, no `lemma.plural_none` marker,
+  no lemma/sense semantic refs (`lemma.semantic_ref`, `sense.semantic_ref`),
+  no `sense.source_ref`, no durable `note_dictionary_binding` representation,
+  no active dictionary version+SHA metadata, and numeric note `lemma_id` /
+  `sense_id` still appear as if durable. The governance session that drafted
+  ADR-0004 was forbidden from implementation changes, so the mismatch is
+  recorded rather than repaired. It is resolved by the owning slice-3 alignment
+  (PART A) and slice-7 runtime (PART B) work, not by this governance session;
+  until then, read the mismatch as blocked-and-documented, not as an undetected
+  contradiction.
 - **ADR-0002 D27 and ADR-0003 D27 are two different decisions sharing one ID.**
   ADR-0002 D27 is the two-stage highlight capture contract; ADR-0003 D27 is the
   five-button confidence UI. Both ADRs are accepted and cold-review-approved, so
@@ -84,7 +89,10 @@ them. REJECTED items are listed so they do not resurface.
 - `.apkg` export via genanki (~50 lines; carries scheduling + media that TSV cannot).
 - Contribution promotion job at dictionary build (normalised string overlap).
 - Compound gloss trimming (`re.split(r"[;,]", g)[0]` per component; demote the
-  composed gloss, promote the decomposition).
+  composed gloss, promote the decomposition). Pending ADR-0004 D46 supersedes
+  this deferred behaviour with the all-components-or-none decomposition on
+  approval; until approval the historical row remains only because ADR-0004 is
+  pending.
 - `FREQ` from Tatoeba counts (falls out of stage 02 free; absent, example
   ranking degrades to length-only).
 - Derived card state via `review_log` replay (also the mechanism that keeps
@@ -101,8 +109,9 @@ them. REJECTED items are listed so they do not resurface.
 
 - Convert `[reviewed]` AGENTS rules to `[executable]` gate checks (R2, R8, R9,
   R10 are candidates). Of the `[executable]` rules, R1 and R7 are scaffolded in
-  slice-0; R3, R6 and R12 are deferred to the slices that create what they
-  govern (`docs/plan.md`).
+  slice-0; R3, R6, R12 and R13 are deferred to the slices that create what they
+  govern (`docs/plan.md`; R13 checks land with the D47 owning runtime/smoke
+  work).
 - `render.back()` with `examples=[]`: tolerated but untested — reachable via
   manual entry (ADR-0001 §6). Add a test in the render slice.
 - Confirm build stage 01 populates multi-word separable surface forms

@@ -9,9 +9,14 @@ against it until PROMPTS.md §ADR cold review approves it (WORKFLOW §7, AGENTS 
 `needs_gloss` wording; §11 Card specification's `Gloss | English sense(s), max 3`
 field row and the `needs_gloss` UI rule's English-only phrasing; §12's stage-04
 English-gap-only scope; §8's per-row attribution scope, extended to localized
-meaning rows) and ADR-0002 (§4's picker/commit contract, which gains an explicit
-per-note meaning-language selection; §4's per-selection override schema; §6
-order 7, whose stages 03–05 now include multilingual offline meaning enrichment).
+meaning rows; §4's numeric `sense_id` note/dictionary-identity assumption;
+§12's dictionary-replacement/activation lifecycle; §14's deferred
+compound-gloss/composition behaviour) and ADR-0002 (§4's picker/commit contract,
+which gains an explicit per-note meaning-language selection; §4's per-selection
+override schema; §4's picker/commit dictionary identity transport and
+revalidation; §5's smoke expectations for dictionary replacement/stale picker;
+§6 order 7, whose stages 03–05 now include multilingual offline meaning
+enrichment).
 
 **Does not amend and does not reopen:** ADR-0001 D1 (no runtime LLM), D3 (one
 resolver), D4 (static SQLite dictionary asset), D8 (rendered faces never stored),
@@ -21,7 +26,7 @@ ADR-0002's standalone-service architecture and browser boundary; ADR-0003 in
 full; AGENTS R1, R2, R4, R9, R12. Gate 2 keeps its position **before** stages
 02–05.
 
-**Decision IDs.** This ADR uses D32–D45. See §14 for a pre-existing ID collision
+**Decision IDs.** This ADR uses D32–D47. See §14 for a pre-existing ID collision
 in the repository that this ADR deliberately does not repair.
 
 ---
@@ -69,6 +74,8 @@ for meanings, and no per-card cost.
 | D43 | **Resolver outcome and meaning availability are independent.** `note.status` remains the persisted resolver outcome (`resolved | derived_compound | needs_gloss`), where `needs_gloss` means only that the resolver reached its stub fallback and could not bind the note to a dictionary-backed identity. Selected-language availability is a separate, computed, non-persisted `meaning_state = none | partial | complete`; the learner-facing "needs meaning" condition is `meaning_state='none'`. Changing language selection, user meanings, or dictionary coverage recomputes `meaning_state` but never rewrites resolver status | A resolved sense with no text in a selected language and an unresolved stub with complete user meanings are both legitimate states; overloading `note.status` with both machines makes every such transition ambiguous (O1). Computing availability from current data keeps a dictionary swap from becoming a user-DB migration |
 | D44 | **Normalized language-bearing user-authored meanings.** One `note_user_meaning` row per `(note_id, language)` holds the user's own DE/EN/FA meaning text. `/vocab/cards` carries an explicit language-keyed `user_meanings` override (string upsert, `null` delete, omission = no mutation, `{}` invalid), and `/vocab/gloss` becomes a language-bearing edit API (POST upsert / DELETE by note+language) independent of resolver status. Scalar `note.gloss_user` is superseded; D10 contribution stays English-only | One scalar gloss cannot represent meanings in three languages, and the old `gloss_user` rule was tied to resolver `needs_gloss` (O2). Normalizing by `(note_id, language)` gives unambiguous add/update/delete semantics, keeps authored data independent of the display selection, and avoids an implicit English default |
 | D45 | **Generated localized-meaning derivation/provenance relation.** `sense_meaning_derivation` records, per generated meaning, every source-backed localized meaning whose text was actually consumed as derivation input; generated→generated edges are forbidden in v1. Generated rows keep their versioned `llm_generated_vN` marker, and rollback by that marker deletes generated rows plus their derivation edges, never source-backed rows | A generated row's `source` must stay the generation version and `license` is not a source-row reference, so the upstream CC BY-SA obligation was unreconstructable from the proposed row alone (O3). A normalized derivation relation makes attribution/license traversal and clean rollback both explicit |
+| D46 | **Derived-compound learner meanings remain in v1, but only as a conservative, computed component decomposition.** For `status='derived_compound'`, the note persists an ordered stable component/sense binding vector; rendering an ordered per-component decomposition for selected language L when all components have localized text in L. If any component lacks L text, no dictionary L block is rendered and L is unavailable under D43. Note-local user meanings win; no composed text or card face is stored; provenance remains the exact component rows rendered (§6.5) | Preserves derived compound learning value without guessing or concatenating inaccurate natural-language translations of whole compounds (O4). All-components-or-none keeps availability and rendering deterministic |
+| D47 | **Dictionary replacement uses stable semantic references and atomic fail-closed re-binding; numeric IDs are per-asset caches only.** PART A assigns deterministic stable semantic references to lemmas and senses (`lemma.semantic_ref`, `sense.semantic_ref`, `sense.source_ref`); PART B persists durable semantic bindings and active dictionary version+SHA metadata. Candidate dictionaries undergo checksum/integrity/stable-ref validation before an atomic relink transaction swaps handles under an exclusive lock; missing items fail closed to `needs_gloss` without losing user data; duplicate/ambiguous refs abort activation; stale picker tokens return HTTP 409 (§6.6) | Numeric SQLite IDs are not durable cross-version identity and change on rebuilds (O5). Stable semantic refs plus fail-closed atomic activation prevent stale ID collisions, wrong-sense binding, and mixed runtime states while preserving user history |
 
 ## 3. German learner meaning (D33)
 
@@ -159,13 +166,26 @@ The sense is the language-neutral semantic identity. Localized texts are rows.
 -- PART A (dictionary asset). Conceptual target; exact DDL is authored by the
 -- slice that lands it, and reference/schema.sql is stale until then (§13).
 
+CREATE TABLE lemma (
+  id           INTEGER PRIMARY KEY,
+  semantic_ref TEXT NOT NULL UNIQUE,  -- namespaced/versioned canonical identity hash (D47)
+  lemma        TEXT NOT NULL,
+  pos          TEXT NOT NULL,
+  gender       TEXT,                  -- 'm' | 'f' | 'n' | NULL
+  freq_rank    INTEGER,
+  plural       TEXT,
+  plural_none  INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE sense (
-  id        INTEGER PRIMARY KEY,
-  lemma_id  INTEGER NOT NULL REFERENCES lemma(id),
-  ord       INTEGER NOT NULL DEFAULT 0,
-  register  TEXT,
-  source    TEXT NOT NULL,          -- provenance of the sense DISTINCTION
-  license   TEXT NOT NULL
+  id           INTEGER PRIMARY KEY,
+  lemma_id     INTEGER NOT NULL REFERENCES lemma(id),
+  semantic_ref TEXT NOT NULL UNIQUE,  -- namespaced/versioned sense identity hash (D47)
+  source_ref   TEXT NOT NULL,         -- upstream stable sense identifier or canonical raw distinction hash
+  ord          INTEGER NOT NULL DEFAULT 0,
+  register     TEXT,
+  source       TEXT NOT NULL,         -- provenance of the sense DISTINCTION
+  license      TEXT NOT NULL
 );
 
 CREATE TABLE sense_meaning (
@@ -190,6 +210,10 @@ CREATE TABLE sense_meaning_derivation (
     CHECK (generated_meaning_id <> source_meaning_id)
 ) WITHOUT ROWID;
 ```
+
+Numeric `lemma.id` and `sense.id` remain local INTEGER primary keys inside one
+`dictionary_vN.sqlite`; they are per-asset local keys, not durable cross-version
+identity (D47).
 
 `sense.gloss_en` is removed as the normative carrier of meaning. The English
 gloss becomes one `sense_meaning` row.
@@ -248,9 +272,13 @@ CREATE TABLE note_meaning_lang (
 - The set must be **non-empty**. SQLite cannot express "at least one child row"
   declaratively, so the non-empty invariant is enforced at the commit/API layer
   and rejected with HTTP 422 before any write (consistent with ADR-0002 §4).
-- The selected set is **not part of note identity**. ADR-0001's
-  `UNIQUE(user_id, lemma_text, pos, sense_id)` dupe rule is unchanged; two notes
-  for one lemma+sense differing only in language selection must never exist.
+- The selected set is **not part of note identity**. ADR-0001's historical
+  numeric-sense note uniqueness assumption `UNIQUE(user_id, lemma_text, pos, sense_id)`
+  is explicitly superseded: selected languages remain not part of note identity;
+  direct/derived dictionary identity is D47's durable semantic binding (stable
+  `sense_ref` for direct, ordered component `(lemma_ref, sense_ref)` vector for
+  derived compounds); and numeric `sense_id` is never durable note identity.
+  Two notes differing only in language selection must never exist.
 - Changing the set is a display change: it adds or removes rendered sections and
   never destroys review history, note data, or FSRS state.
 
@@ -267,12 +295,16 @@ Separately, a **non-persisted computed** state named `meaning_state` has exactly
 `none | partial | complete`. For each currently selected language L, L is
 **available** when either:
 
-1. a `note_user_meaning` row exists for `(note_id, L)`; or
-2. the note has a dictionary `sense_id` and at least one `sense_meaning` row
-   exists for `(sense_id, language=L)`.
+1. a `note_user_meaning` row exists for `(note_id, L)`; OR
+2. `note.status == 'resolved'` and a **successfully validated current D47 direct
+   binding** has at least one matching `sense_meaning` row for `(current_sense_id, language=L)`; OR
+3. `note.status == 'derived_compound'` and a **successfully validated current D47
+   component vector** satisfies D46's all-components localized-meaning rule for L.
 
-If the note has no dictionary-backed sense, condition 2 is false; user meanings
-may still make languages available. Then:
+If the note has no valid current dictionary binding (including an unresolved
+stub or a note whose binding disappeared during dictionary replacement),
+dictionary conditions 2 and 3 are false; user meanings may still make languages
+available. Then:
 
 - `none`: zero selected languages are available;
 - `partial`: at least one, but fewer than all selected languages, are available;
@@ -290,18 +322,22 @@ status.
   writes one or more user meanings.
 - A dictionary-resolved note remains `status='resolved'` even if none of its
   currently selected meaning languages has text.
-- Changing selected meaning languages or editing meaning text **must not**
+- Changing selected meaning languages or editing user meanings **must not**
   rewrite resolver status.
+- Dictionary replacement runs D47 atomic validation and relinking before a new
+  asset is visible. D47's activation/relink owner is the only component that may
+  alter `note.status` upon dictionary replacement (e.g. transitioning a note
+  whose sense or component disappeared to `needs_gloss`, or restoring it on
+  exact re-binding). `meaning_state` is then recomputed against the successfully
+  activated current binding; no bulk persisted `meaning_state` migration is
+  introduced.
 
 **Recalculation.** `meaning_state` is computed, not stored, and is recomputed
 from current data: on note/card read; on rendering; on the representation
 returned after note creation; after `meaning_langs` replacement; after
-user-meaning add/update/delete; and automatically on the next read after
-dictionary asset/version replacement. No migration or bulk user-DB state rewrite
-is needed when dictionary meaning coverage changes. Dictionary replacement may
-alter `meaning_state` (available `sense_meaning` rows changed) but must not
-alter `note.status` merely for that reason; any explicit existing/future
-re-resolution/relink process owns resolver-status changes separately.
+user-meaning add/update/delete; and automatically on reads against the
+successfully activated current dictionary binding. No migration or bulk user-DB
+state rewrite is needed when dictionary meaning coverage changes.
 
 **Scheduling.** Scheduling remains independent of both states. ADR-0001 §11's
 rule stands unchanged: resolver `needs_gloss` cards enter scheduling normally
@@ -384,12 +420,17 @@ available again; the selected set must always remain non-empty; and D43
 
 **Dictionary vs. user meaning rendering.** Source-backed `sense_meaning` rows
 are immutable dictionary data; user edits never overwrite them. For each
-selected language, rendering precedence is:
+selected language:
 
 1. if `note_user_meaning(note_id, language)` exists, render that note-local user
-   meaning as the meaning block for that language;
-2. otherwise render the dictionary `sense_meaning` row(s) for that note's
-   sense/language in deterministic existing order.
+   meaning as the complete meaning block for that language;
+2. else if `note.status == 'resolved'` and a valid current D47 direct binding
+   exists, render the direct dictionary `sense_meaning` row(s) for that note's
+   current sense/language in deterministic order;
+3. else if `note.status == 'derived_compound'` and a valid current D47 component
+   vector satisfies D46's all-components localized-meaning rule for that
+   language, render the computed D46 component decomposition for that language;
+4. otherwise render no meaning block for that language.
 
 A user meaning is therefore a note-local display override for one language; it
 does not modify dictionary provenance. `back_override` remains the existing
@@ -436,6 +477,233 @@ without `contribute:true` does not silently rewrite an earlier contribution —
 contribution stays an explicit submitted vote, separate from local card editing.
 Multilingual contribution/voting and contribution-withdrawal policy remain
 deferred (D42).
+
+### 6.5 Derived-compound learner meanings (D46)
+
+For notes with `status='derived_compound'`, learner meanings remain in v1 as a
+conservative, computed component decomposition rather than an unprincipled
+synthesized translation.
+
+1. **Resolver outcome and component ordering.** `status='derived_compound'`
+   remains solely a persisted resolver outcome. The resolver's compound
+   components are ordered left-to-right, with the grammatical head last. The
+   implementation-alignment work extends derived-compound resolver results from
+   bare surface strings to an ordered stable component binding.
+2. **Deterministic component lemma selection.** For the head component, retain
+   the resolver-selected head. For every preceding component candidate set,
+   order candidates deterministically by current dictionary `freq_rank`
+   ascending (with `NULL` last), then `pos`, then `gender` (with `NULL` last),
+   then stable `lemma.semantic_ref` lexical order; select the first.
+3. **Deterministic source sense selection.** For each selected component lemma,
+   select exactly one source sense independent of display language: lowest
+   `sense.ord`, tie-broken lexically by stable `sense.semantic_ref`.
+4. **Durable persistence.** The ordered component semantic bindings are
+   persisted in PART B under D47 (`note_dictionary_binding` with
+   `role='component'`). No composed compound learner-meaning text is ever
+   persisted in PART A or PART B.
+5. **Language-by-language rendering and availability.** For each selected
+   language L:
+   - If `note_user_meaning(note_id, L)` exists, it is the entire meaning block
+     for L and L is available under D43.
+   - Otherwise, a derived dictionary meaning for L is available ONLY if every
+     bound component lemma has at least one localized `sense_meaning` row for L
+     under its bound source sense.
+   - If only some components have localized meaning text in L, there is NO
+     partial component composition for that language: render no dictionary
+     block for L and count L as unavailable in D43 `meaning_state`.
+6. **Deterministic localized text selection.** When all components have L text,
+   select exactly one localized row per component by the deterministic tuple:
+   - source-backed rows before `llm_generated_vN` rows;
+   - kind priority:
+     - for DE: `synonym`, `definition`, `translation`;
+     - for EN / FA: `translation`, `definition`, `synonym`;
+   - `ord` ascending;
+   - lexical tie-breakers on `source`, `license`, `text`.
+7. **Decomposition rendering.** Render an ordered decomposition, one component
+   lemma + its selected localized text per line/block, left-to-right. The
+   system does **not** concatenate or synthesize those component glosses into a
+   claimed natural-language translation of the whole compound. The historical
+   ADR-0001 §14 "compound gloss trimming" concatenation is superseded on
+   ADR-0004 approval.
+8. **Attribution and provenance.** Derived compound output is computed on
+   read/render and is never stored as a `sense_meaning`, note meaning, or card
+   face (AGENTS R4). Provenance for a derived language block is the ordered set
+   of the exact component `sense_meaning` rows rendered; each retains its own
+   `source` and `license`. If any selected component row is generated, D45
+   derivation traversal remains mandatory. No synthetic compound provenance row
+   is created. User meanings do not alter component/dictionary provenance.
+9. **State and scheduling.** `meaning_state` evaluates D46 availability under the
+   all-components-or-none rule. Resolver status remains `derived_compound` and
+   card scheduling remains independent.
+
+### 6.6 Dictionary semantic identity, relinking, and fail-closed activation (D47)
+
+Numeric SQLite IDs (`lemma.id`, `sense.id`) are per-asset local primary keys and
+are **never durable cross-version semantic identity**. Cross-version dictionary
+replacement is governed by stable semantic references, immutable asset tokens,
+and atomic fail-closed relinking.
+
+#### Stable PART-A identities
+
+- Every dictionary lemma row has exactly one non-empty unique
+  `lemma.semantic_ref`.
+- Every dictionary sense row has exactly one non-empty unique
+  `sense.semantic_ref` and a non-empty source-side `sense.source_ref`.
+- `lemma.semantic_ref` is generated deterministically from a versioned canonical
+  tuple: `(target_lang='de', nfc_lemma_text, pos, gender_or_null_sentinel)`.
+  It uses a namespaced/versioned SHA-256 representation, e.g.
+  `lemma:v1:<sha256(canonical tuple)>`. Exact serialization is specified in
+  implementation and golden-tested. Homographs are disambiguated by POS/gender.
+- `sense.source_ref` is the upstream stable sense identifier when provided by the
+  source. If no upstream identifier exists, build stage 01 deterministically
+  fingerprints the canonical raw source-side sense-distinction record (excluding
+  asset-local numeric IDs and localized/generated enrichment rows). A changed
+  fingerprint indicates a new semantic distinction; continuity must not be
+  guessed.
+- `sense.semantic_ref` is a namespaced/versioned SHA-256 over
+  `(lemma.semantic_ref, sense.source_namespace, sense.source_ref)`. Multiple
+  senses for one homograph produce distinct stable sense refs.
+- Build/release validation rejects blank refs, duplicate refs, malformed refs,
+  and any cross-version reuse of one semantic ref for a different canonical
+  identity tuple. A defective asset is never activatable.
+
+#### Durable PART-B semantic binding
+
+Conceptual `note_dictionary_binding` relation:
+
+```sql
+CREATE TABLE note_dictionary_binding (
+    note_id                    INTEGER NOT NULL REFERENCES note(id) ON DELETE CASCADE,
+    role                       TEXT NOT NULL CHECK (role IN ('direct', 'component')),
+    component_ord              INTEGER NOT NULL DEFAULT 0,
+    lemma_ref                  TEXT NOT NULL,
+    sense_ref                  TEXT NOT NULL,
+    cached_lemma_id            INTEGER,
+    cached_sense_id            INTEGER,
+    bound_dictionary_version   TEXT,
+    PRIMARY KEY (note_id, role, component_ord)
+);
+```
+
+- A `resolved` note has exactly one `direct` binding (`component_ord = 0`).
+- A `derived_compound` note has one or more `component` bindings, contiguous
+  `component_ord` starting at 0 in D46 order, head last.
+- A never-bound `needs_gloss` stub has no semantic binding.
+- If a bound sense or component disappears from the current dictionary, retain
+  its durable semantic refs but clear `cached_lemma_id`, `cached_sense_id`, and
+  `bound_dictionary_version` so historical semantic identity is preserved.
+- Old PART-B `lemma_id` / `sense_id` columns, if retained physically during
+  migration, are convenience caches only and never decide cross-version identity.
+- Direct note create/reuse identity is the stable `sense_ref`. Derived-compound
+  create/reuse identity is the ordered vector of bound component
+  `(lemma_ref, sense_ref)` pairs. If the physical note table requires a scalar
+  uniqueness key, materialize a versioned deterministic `dictionary_key` from
+  those stable refs.
+- User meanings (`note_user_meaning`), selected languages (`note_meaning_lang`),
+  cards, review history, front/back overrides, frozen example sentences, and
+  deck memberships survive relinking unchanged.
+
+#### Picker and API contract
+
+- Stage 1 picker payload (`POST /vocab/highlight`, `POST /vocab/lookup`) exposes
+  an immutable dictionary asset token containing dictionary version + SHA-256
+  checksum.
+- A resolved candidate transports stable lemma `ref` + stable `sense_ref`.
+- A derived-compound candidate transports its ordered component
+  `(lemma_ref, sense_ref)` vector.
+- Numeric `lemma_id` / `sense_id` may be included as convenience caches for the
+  currently active asset but are never authoritative.
+- `/vocab/cards` commit round-trips the exact picker dictionary asset token.
+- If the active dictionary token changed between picker and commit,
+  `/vocab/cards` returns HTTP 409 `dictionary_changed` before ANY write, and the
+  client must refresh/reselect. Stale picker results are never silently rebound.
+
+#### Candidate download vs. activation
+
+- `latest.json` indicates available downloads, but checksum/download success
+  does not make a candidate visible to runtime reads.
+- Candidates are downloaded to immutable versioned file paths,
+  checksum-verified, opened read-only, and validated against schema, integrity,
+  and stable-ref uniqueness gates before becoming eligible for activation.
+- PART B stores one active dictionary version + SHA metadata record.
+
+#### Atomic activation and fail-closed relinking
+
+- The user-data/deck layer owns activation (`app/dictionary.py` remains read-only
+  and never accesses user state per AGENTS C2/R9).
+- Acquire an exclusive dictionary-activation lock excluding concurrent API
+  reads/writes during the transition.
+- Pre-open and validate the candidate dictionary handle before mutating PART B.
+- In a single user-DB transaction, rebind every existing durable semantic
+  binding by exact stable ref matching. Numeric IDs are NEVER used as match
+  keys.
+- Exact one-match rebind updates `cached_lemma_id`, `cached_sense_id`, and
+  `bound_dictionary_version`.
+- Zero matches for a direct sense is a legitimate disappearance outcome: clear
+  cached numeric IDs/version, retain durable refs, set `note.status='needs_gloss'`,
+  and preserve user meanings and review history.
+- Zero matches for ANY component of a derived compound invalidates the entire
+  derived binding: clear cached numeric IDs/version for all components in the
+  vector, retain stable refs/order, set `note.status='needs_gloss'`; never expose
+  a partially rebound compound.
+- If a subsequent asset restores the exact durable sense or component vector,
+  the activation owner restores `note.status` to `resolved` or
+  `derived_compound` after exact all-component rebind.
+- A never-bound `needs_gloss` stub has no semantic ref and is never
+  auto-promoted simply because a new dictionary contains matching text. User
+  capture/re-resolution remains the explicit path for new semantic bindings.
+- Multiple matches for one stable ref, duplicate refs, malformed cardinality, or
+  any candidate integrity ambiguity is an ACTIVATION FAILURE: rollback the user
+  transaction, discard the candidate handle, and keep the previous dictionary
+  active.
+- Implementations must never guess a "closest" replacement sense.
+- `app/resolve.py` is the only resolver. The PART-B activation owner is the ONLY
+  owner of resolver-status mutations caused by dictionary replacement. Exact
+  stable-ref relinking is not a second resolver. If dictionary activation ever
+  requires a true semantic re-resolution rather than an exact stable-ref rebind,
+  the activation owner MUST invoke the canonical `app/resolve.py` resolver; it
+  must not implement or embed an independent resolver path.
+- Update the active dictionary version + SHA metadata in the same user-DB
+  transaction as binding caches and status.
+- While the activation lock is held, commit the user transaction, swap the
+  runtime dictionary handle to the pre-validated candidate, and then release the
+  lock.
+- Requests observe either the complete old state or complete new state, never a
+  mixed binding/asset state.
+- On startup, open the exact immutable asset specified by PART-B active metadata;
+  never bind blindly to `latest`.
+- If candidate validation, relinking, or transaction commit fails, fail closed
+  and continue serving the previous active asset.
+
+#### Meaning state and R9 interaction
+
+- `meaning_state` consults dictionary meanings only through a current binding
+  whose `bound_dictionary_version` matches active PART-B metadata and whose
+  stable refs match cached IDs. It never dereferences an old numeric `sense_id`
+  into a replacement dictionary.
+- User meanings survive all replacement outcomes and remain available.
+- `dictionary_vN.sqlite` remains a disposable, read-only asset in its own file
+  and volume (AGENTS R9). Failed activation affects only candidate state.
+
+#### Required gate coverage
+
+- Deterministic stable-ref generation for lemmas and senses;
+- Uniqueness and malformed/duplicate ref rejection;
+- Rejection of cross-version semantic ref reuse for different canonical tuples;
+- Dictionary replacement where numeric IDs are completely renumbered but stable
+  refs match: notes stay correctly bound;
+- Reused numeric ID pointing to an unrelated sense: must NOT bind;
+- Disappeared sense: user meanings and history survive, status transitions to
+  `needs_gloss` through activation owner;
+- Duplicate/ambiguous stable ref: entire activation rolls back, previous asset
+  stays active;
+- Derived compound all components survive: correctly rebound;
+- Derived compound component disappears: whole derived block unavailable;
+- Never-bound `needs_gloss` remains unbound;
+- Stale picker asset token → HTTP 409 and zero writes;
+- `meaning_state` only sees successfully validated current bindings;
+- No mixed binding/asset state observable;
+- Startup metadata/asset checksum mismatch fails closed.
 
 ## 7. LLM architecture (D37)
 
@@ -618,11 +886,17 @@ Ich rufe dich morgen an.
 
 - Only selected meaning languages render. An unselected language contributes no
   section, no heading, and no empty placeholder.
-- For each selected language, the meaning block renders the note's user-authored
-  `note_user_meaning` for that language when one exists, otherwise the dictionary
-  `sense_meaning` row(s) for the note's sense/language in deterministic existing
-  order (D44 §6.4). A user meaning is a note-local display override for one
-  language and never modifies dictionary provenance.
+- For each selected language, the meaning block renders:
+  1. note-local `note_user_meaning` when one exists (D44);
+  2. otherwise, for `status='resolved'`, the direct dictionary `sense_meaning`
+     rows for the note's sense/language in deterministic order (D36);
+  3. otherwise, for `status='derived_compound'`, the computed D46 component
+     decomposition only when all components satisfy availability for that
+     language (all-components-or-none; no partial composition);
+  4. otherwise no meaning block for that language.
+  A user meaning is a note-local display override for one language and never
+  modifies dictionary provenance. No composed compound text is ever persisted;
+  component provenance remains attributable under AGENTS R11 / D45.
 - **Core German grammar renders independently of the selection.** Disabling
   English does not hide the article, the principal parts, the IPA, or the plural.
 - For nouns, **plural belongs in that core grammar block**:
@@ -698,20 +972,49 @@ gate.
   cold-review-approved and the existing slice-3 orchestrator issues an alignment
   brief. This is an owner-driven governance amendment, **not** a WORKFLOW §5
   implementation failure: it increments no attempt and no audit counter.
-- **Implementation alignment (the slice-3 alignment brief) now requires:**
-  `sense_meaning`; `sense_meaning_derivation`; `note_meaning_lang`;
-  `note_user_meaning`; resolver-status / `meaning_state` separation; removal or
-  supersession of scalar `note.gloss_user`; and the existing plural changes
-  (`lemma.plural` + `lemma.plural_none`). `reference/schema.sql` is intentionally
-  **not** edited here; it becomes implementation-stale until that alignment.
+- **Implementation alignment and owning slices:**
+  - **slice-3 alignment** owns only the Stage-01 / PART-A contract alignment:
+    `lemma.semantic_ref`; `sense.semantic_ref`; `sense.source_ref`; numeric
+    lemma/sense IDs explicitly remaining per-asset local keys; the schema and
+    representation shape needed for D36 `sense_meaning`; the schema and
+    representation shape needed for D45 `sense_meaning_derivation`;
+    deterministic D46 component semantic-binding information needed by the
+    canonical resolver/alignment; and the already-required tri-state noun-plural
+    shape (`lemma.plural`, `lemma.plural_none`). Slice-3 is stage-01 dictionary
+    build work and does not implement the runtime user DB, activation transaction,
+    API behavior, rendering, or smoke scenarios.
+  - **slice-6** remains the offline enrichment owner: stages 03–05
+    populate/enrich multilingual meaning rows under the documented ADR-0004
+    contract; the mid-September 2026 API-credit constraint on stage 04 is
+    unchanged.
+  - **slice-7** (runtime app work) owns PART-B and runtime behavior:
+    `note_meaning_lang`; `note_user_meaning`; scalar `note.gloss_user`
+    supersession/removal; PART-B `note_dictionary_binding`; active dictionary
+    version+SHA metadata; resolver-status / computed `meaning_state` runtime
+    integration; D43/D44/D46 read/render behavior; user-meaning precedence
+    (`note_user_meaning` over dictionary `sense_meaning`); Persian RTL; tri-state
+    noun plural rendering; the language-bearing `/vocab/gloss` POST/DELETE
+    endpoint; stable picker semantic refs; immutable dictionary asset token;
+    stale-token HTTP 409 `dictionary_changed`; D47 dictionary
+    activation/relink/rollback; and AGENTS R12/R13 runtime enforcement before
+    browser integration.
+  - **slice-8** (smoke work) repairs the `reference/smoke_test.py` baseline and
+    owns the corresponding end-to-end D47 replacement and stale-picker smoke
+    verification.
 - **`reference/schema.sql` is deliberately stale** with respect to §6 and §10.
   It still shows `sense.gloss_en NOT NULL`, scalar `note.gloss_user`, and
   `note.status` without the resolver/meaning-state separation documented in §6.3;
   it has no `sense_meaning`, no `sense_meaning_derivation`, no
-  `note_meaning_lang`, no `note_user_meaning`, and no `lemma.plural_none`. That
-  staleness is recorded here and in `docs/backlog.md` rather than repaired in
+  `note_meaning_lang`, no `note_user_meaning`, no `lemma.plural_none`, no
+  lemma/sense stable semantic refs, no `sense.source_ref`, no
+  `note_dictionary_binding` relation, and no active dictionary version+SHA
+  metadata, with numeric `lemma_id` / `sense_id` still appearing as if durable.
+  That staleness is recorded here and in `docs/backlog.md` rather than repaired in
   this governance session, because a schema edit is implementation work and this
-  session is forbidden from it. A cold reviewer should read the mismatch as
+  session is forbidden from it. The documented mismatch is repaired by the
+  respective owning alignment/runtime slices: slice-3 for PART-A/stage-01 shape,
+  slice-7 for PART-B/runtime persistence, and slice-8 for the corresponding
+  end-to-end smoke verification. A cold reviewer should read the mismatch as
   *blocked and documented*, not as an undetected contradiction.
 - Gate 2 (ADR-0002 §6 order 5) is unaffected and **stays where it is**. It
   measures stage-01 lemma/sense coverage — whether a word is found — which no
@@ -869,6 +1172,18 @@ supersede the conflicting ADR-0001 compound-gloss/decomposition behaviour
 instead. In either design, `status='derived_compound'` remains a resolver outcome
 and scheduling remains independent.
 
+**Resolution — 2026-08-19 revision:** RESOLVED by D46 and the D43/D44/D47
+integration in §6. Derived-compound learner meanings remain in v1 as a computed,
+language-by-language component decomposition over one persisted ordered stable
+component/sense binding vector. A note-local user meaning wins for its language;
+otherwise every component must have localized text for that language or the
+derived dictionary block is unavailable. Component order, component/sense
+selection, localized-row selection, rendering, provenance, dictionary-replacement
+interaction and all-components-or-none availability are deterministic. No
+composed compound learner-meaning row or rendered face is persisted;
+`status='derived_compound'` remains solely a resolver outcome and scheduling
+remains independent.
+
 ### O5 — BLOCKING. D43's dictionary-replacement recomputation has no safe cross-version dictionary-identity contract.
 
 D43 requires `meaning_state` to be recomputed automatically from current data on
@@ -897,3 +1212,16 @@ sense; resolver status changes only through its separately owned
 re-resolution/relink rule; and `meaning_state` is computed only against a
 successfully validated binding. Asset activation must not expose a mixed
 old-identity/new-asset state.
+
+**Resolution — 2026-08-19 revision:** RESOLVED by D47. Numeric dictionary
+`lemma_id`/`sense_id` are explicitly per-asset caches, not durable identity.
+PART A gains deterministic stable lemma/sense semantic references; PART B keeps
+durable semantic bindings and active dictionary version+SHA metadata. A candidate
+dictionary is checksum/integrity/stable-ref validated, then every binding is
+relinked by exact stable ref inside one user-DB transaction while reads/writes are
+excluded; only after that transaction commits is the already-open candidate made
+visible. Missing direct senses or compound components fail closed to an unbound
+resolver state without losing user meanings/history, ambiguous duplicate refs
+abort the entire activation, old numeric IDs are never match keys, stale picker
+asset tokens are rejected before writes, and failed activation leaves the
+previous asset active. `meaning_state` consults only a validated current binding.

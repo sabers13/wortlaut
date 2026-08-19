@@ -78,6 +78,10 @@ backlog work.
   a non-empty `source` and `license`. Provenance lives on the localized meaning
   row, not on the sense, because German, English and Persian meanings for one
   sense routinely come from different sources under different licenses.
+  A computed derived-compound meaning block does not create a synthetic
+  persisted provenance row; provenance is the ordered set of the exact component
+  `sense_meaning` rows rendered (ADR-0004 D46), and any generated component rows
+  still traverse D45 derivation edges.
   LLM-generated build rows are marked `source='llm_generated_v1'` or an explicitly
   versioned successor (`llm_generated_vN`); they must never masquerade as
   source-backed Wiktionary rows, must never overwrite a source-backed row in
@@ -106,6 +110,19 @@ backlog work.
   *Defect prevented:* an arbitrary web page or DNS-rebinding host reaching the
   unauthenticated loopback deck API; loopback binding alone does not define a
   browser trust boundary.
+
+- **R13 — Dictionary numeric IDs are never durable semantic identity.** `[executable]`
+  Dictionary-backed PART-B state uses ADR-0004 D47 stable semantic refs;
+  `lemma_id` / `sense_id` may be active-asset caches only. A replacement
+  dictionary is not visible until stable-ref validation and atomic PART-B
+  relink + active-version update complete. Stale picker asset tokens are
+  rejected before writes. Duplicate/ambiguous stable refs or mixed
+  old-binding/new-asset states fail closed. User-authored meanings and review
+  history survive replacement. Gate coverage is assigned to the owning
+  alignment/runtime/smoke slices.
+  *Defect prevented:* a recycled numeric SQLite ID after dictionary rebuild
+  silently binding a user's note to an unrelated semantic sense or exposing wrong
+  meaning text.
 
 ## Governance (process rules; binding on orchestrators, workers, and closure)
 
