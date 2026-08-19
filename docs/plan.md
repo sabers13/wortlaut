@@ -48,9 +48,12 @@ one blocking condition and three scope notes; the sequence is unchanged.
 - **slice-3 closure is paused.** Its implementation was accepted on Attempt 1 at
   `7ceea14e39a7c831edfc803632d3c868ea0f3091` under `Risk: none` and remains
   accepted. It cannot close until ADR-0004 is cold-reviewed **and** the
-  implementation is aligned with the new multilingual data contract (a
-  language-neutral `sense` plus a normalized localized-meaning relation, in place
-  of `sense.gloss_en`).
+  implementation is aligned with the new multilingual data contract, which now
+  explicitly includes: a language-neutral `sense` plus `sense_meaning`;
+  `sense_meaning_derivation`; `note_meaning_lang`; `note_user_meaning`;
+  `note.status` remaining the resolver outcome; the computed `meaning_state`
+  (none/partial/complete); supersession of scalar `note.gloss_user`; and the
+  existing tri-state noun plural contract.
 - **This is an owner-driven governance amendment, not a failed WORKFLOW §5
   attempt.** It adds no attempt to the ladder and does not increment the audit
   counter. The alignment brief is authored by the existing slice-3 orchestrator,
@@ -76,7 +79,11 @@ one blocking condition and three scope notes; the sequence is unchanged.
   unchanged by the broadening.
 - **Later render/API work** (slice-7 onward) must support the note's selected
   DE/EN/FA meaning set, Persian RTL presentation, and noun-plural-on-the-back
-  tri-state rendering before UI/browser completion.
+  tri-state rendering before UI/browser completion; user-meaning display
+  precedence (note-local `note_user_meaning` over dictionary `sense_meaning`),
+  the language-bearing `/vocab/gloss` POST/DELETE edit endpoint, and the
+  none/partial/complete selected-language availability of D43 `meaning_state`
+  are required for the UI/render behaviour.
 
 ### Operational defaults for the offline build (non-normative)
 

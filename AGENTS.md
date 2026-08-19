@@ -79,10 +79,17 @@ backlog work.
   row, not on the sense, because German, English and Persian meanings for one
   sense routinely come from different sources under different licenses.
   LLM-generated build rows are marked `source='llm_generated_v1'` or an explicitly
-  versioned successor; they must never be indistinguishable from Wiktionary rows,
-  must never overwrite a source-backed row in place (simplifying one produces a
-  new generated row beside it), and must be reversible by deleting on that marker
-  alone.
+  versioned successor (`llm_generated_vN`); they must never masquerade as
+  source-backed Wiktionary rows, must never overwrite a source-backed row in
+  place (simplifying one produces a new generated row beside it), and must be
+  reversible by deleting on that marker alone. Every source-backed localized
+  meaning text actually consumed by generation, simplification, or semantic QA
+  as derivation input is recorded in a derivation edge
+  (`sense_meaning_derivation`, ADR-0004 D45 §6.1); generated→generated
+  derivation edges are forbidden in v1; upstream source/license obligations
+  remain traversable through those derivation edges; and rollback by generated
+  version deletes generated rows plus their derivation edges, never source-backed
+  rows.
   *Defect prevented:* CC BY-SA obligations and clean rollback of generated rows
   are unreconstructable after the fact (ADR-0001 §8, §12; ADR-0004 §8).
 

@@ -13,6 +13,8 @@ them. REJECTED items are listed so they do not resurface.
 
   ```
   ADR-0004 draft
+  -> cold-review objections O1–O3
+  -> ADR-0004 revision resolving O1–O3
   -> fresh cold review approval
   -> slice-3 implementation alignment
   -> fresh gate/report acceptance
@@ -23,9 +25,11 @@ them. REJECTED items are listed so they do not resurface.
   is unchanged. The alignment brief is authored by the existing slice-3
   orchestrator only after cold review approves ADR-0004.
 - **`reference/schema.sql` is intentionally stale with respect to ADR-0004.** It
-  still shows `sense.gloss_en NOT NULL` and has no localized-meaning relation, no
-  per-note meaning-language table, and no explicit "no normal plural" marker on
-  `lemma`. The governance session that drafted ADR-0004 was forbidden from
+  still shows `sense.gloss_en NOT NULL`, scalar `note.gloss_user`, and
+  `note.status` without the new resolver/meaning-state separation documented in
+  ADR-0004; it has no `sense_meaning`, no `sense_meaning_derivation`, no
+  `note_meaning_lang`, no `note_user_meaning`, and no `lemma.plural_none`
+  marker. The governance session that drafted ADR-0004 was forbidden from
   implementation changes, so the mismatch is recorded rather than repaired. It is
   resolved by the slice-3 alignment work above; until then, read the mismatch as
   blocked-and-documented, not as an undetected contradiction.

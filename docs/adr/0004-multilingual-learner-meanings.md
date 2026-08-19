@@ -21,7 +21,7 @@ ADR-0002's standalone-service architecture and browser boundary; ADR-0003 in
 full; AGENTS R1, R2, R4, R9, R12. Gate 2 keeps its position **before** stages
 02–05.
 
-**Decision IDs.** This ADR uses D32–D42. See §14 for a pre-existing ID collision
+**Decision IDs.** This ADR uses D32–D45. See §14 for a pre-existing ID collision
 in the repository that this ADR deliberately does not repair.
 
 ---
@@ -55,7 +55,7 @@ for meanings, and no per-card cost.
 
 | # | Decision | Rationale |
 |---|---|---|
-| D32 | **Three independent meaning languages.** A vocabulary note carries a **non-empty** selected subset of `{de, en, fa}` — seven legal combinations. The selected set is part of the note's meaning-display contract and drives which meaning sections a card renders. German grammar is **not** part of that selection and is never hidden by it | The learner, not the build, decides which meanings help. Making the set per-note and non-empty keeps "a card always shows some meaning" true without forcing a language on anyone |
+| D32 | **Three independent meaning languages.** A vocabulary note carries a **non-empty** selected subset of `{de, en, fa}` — seven legal combinations. The selected set is part of the note's meaning-display contract and drives which meaning sections a card renders. German grammar is **not** part of that selection and is never hidden by it | The learner, not the build, decides which meanings help. Making the set per-note and non-empty ensures every note specifies at least one desired learner-meaning language without forcing a language on anyone; actual content availability is represented separately by D43 (`meaning_state`) and may be none, partial or complete |
 | D33 | **German learner meaning is a first-class meaning, not the absence of a translation.** For each semantic sense: prefer one simple, common German synonym when it accurately preserves the sense; otherwise one short learner-friendly German explanation; target ≈A2–B1 comprehension where practical; never substitute an easier but semantically different word | "No translation" is not a teaching artifact. A learner-comprehensible German gloss is the monolingual-dictionary habit the app should build, and it is the only meaning language that stays inside the target language |
 | D34 | **English stays source-first.** Wiktionary-derived English meanings are preferred wherever present. Missing English meanings may be generated **only** in the maintainer-side offline build, never at runtime | Preserves ADR-0001 §8's attribution chain and D1. Generation is a gap filler, not a source |
 | D35 | **Persian is a first-class optional meaning language.** Persian text is generated offline against an **already disambiguated German semantic sense**, never from an isolated surface string, and with deterministic/source-backed context supplied to the generator. Persian rendering must support RTL correctly | Sense-blind translation of `Schloss` produces one wrong answer half the time. RTL is a presentation requirement of the renderer; it introduces no runtime service |
@@ -66,6 +66,9 @@ for meanings, and no per-card cost.
 | D40 | **Inflected and otherwise changed surface forms resolve to the canonical lemma.** One vocabulary note is based on the lemma; a conjugated, declined, comparative, or separable surface form never justifies a second note. Named regression families are planned test coverage, not aspiration (§9) | Reaffirms ADR-0001 D3 and the resolution ladder against the concrete way learners actually type and highlight. Per-form notes would fragment one FSRS state across a paradigm |
 | D41 | **The card's meaning section is driven by the note's selected set**; only selected languages render. Core German grammar (article/gender, plural, principal parts, IPA, audio, separability, governed case, gradation) renders independently of that set. Rendered faces remain unstored (ADR-0001 D8 / AGENTS R4) | The selection is a display contract over structured fields — precisely the thing D8 made cheap. Storing per-language faces would recreate the migration cost D8 deleted |
 | D42 | **Multilingual contribution policy is deferred, not decided.** The existing `gloss_contribution` scope (ADR-0001 D10) stays exactly as accepted — English, one vote per user per lemma — and is **not** silently generalized to German or Persian | No accepted decision requires generalizing it, and promotion/voting across three languages with different provenance rules is its own design problem. Deferring is cheaper than guessing (docs/backlog.md) |
+| D43 | **Resolver outcome and meaning availability are independent.** `note.status` remains the persisted resolver outcome (`resolved | derived_compound | needs_gloss`), where `needs_gloss` means only that the resolver reached its stub fallback and could not bind the note to a dictionary-backed identity. Selected-language availability is a separate, computed, non-persisted `meaning_state = none | partial | complete`; the learner-facing "needs meaning" condition is `meaning_state='none'`. Changing language selection, user meanings, or dictionary coverage recomputes `meaning_state` but never rewrites resolver status | A resolved sense with no text in a selected language and an unresolved stub with complete user meanings are both legitimate states; overloading `note.status` with both machines makes every such transition ambiguous (O1). Computing availability from current data keeps a dictionary swap from becoming a user-DB migration |
+| D44 | **Normalized language-bearing user-authored meanings.** One `note_user_meaning` row per `(note_id, language)` holds the user's own DE/EN/FA meaning text. `/vocab/cards` carries an explicit language-keyed `user_meanings` override (string upsert, `null` delete, omission = no mutation, `{}` invalid), and `/vocab/gloss` becomes a language-bearing edit API (POST upsert / DELETE by note+language) independent of resolver status. Scalar `note.gloss_user` is superseded; D10 contribution stays English-only | One scalar gloss cannot represent meanings in three languages, and the old `gloss_user` rule was tied to resolver `needs_gloss` (O2). Normalizing by `(note_id, language)` gives unambiguous add/update/delete semantics, keeps authored data independent of the display selection, and avoids an implicit English default |
+| D45 | **Generated localized-meaning derivation/provenance relation.** `sense_meaning_derivation` records, per generated meaning, every source-backed localized meaning whose text was actually consumed as derivation input; generated→generated edges are forbidden in v1. Generated rows keep their versioned `llm_generated_vN` marker, and rollback by that marker deletes generated rows plus their derivation edges, never source-backed rows | A generated row's `source` must stay the generation version and `license` is not a source-row reference, so the upstream CC BY-SA obligation was unreconstructable from the proposed row alone (O3). A normalized derivation relation makes attribution/license traversal and clean rollback both explicit |
 
 ## 3. German learner meaning (D33)
 
@@ -104,7 +107,9 @@ preferred, ADR-0001's three-sense cap continues to govern how many English
 meanings a lemma carries, and attribution stays per row. What changes is only
 where the text lives — a localized meaning row with `language='en'`,
 `kind='translation'` — and that a missing English meaning is now one absent
-meaning among up to three, not automatically a `needs_gloss` card (§6).
+meaning among up to three. Whether a note is resolver-`needs_gloss` is decided
+solely by the resolver outcome, never by whether English text happens to exist
+(D43, §6.3).
 
 Generation of missing English meanings remains a build-time job. There is no
 `/gloss/generate`; ADR-0001 §10's "that absence is the design" stands.
@@ -175,10 +180,45 @@ CREATE TABLE sense_meaning (
   UNIQUE(sense_id, language, kind, ord)
 );
 CREATE INDEX ix_sense_meaning ON sense_meaning(sense_id, language, ord);
+
+CREATE TABLE sense_meaning_derivation (
+    generated_meaning_id INTEGER NOT NULL
+        REFERENCES sense_meaning(id) ON DELETE CASCADE,
+    source_meaning_id INTEGER NOT NULL
+        REFERENCES sense_meaning(id) ON DELETE RESTRICT,
+    PRIMARY KEY (generated_meaning_id, source_meaning_id),
+    CHECK (generated_meaning_id <> source_meaning_id)
+) WITHOUT ROWID;
 ```
 
 `sense.gloss_en` is removed as the normative carrier of meaning. The English
 gloss becomes one `sense_meaning` row.
+
+**Derivation (D45).** `sense_meaning_derivation` records, for each generated
+localized meaning, every source-backed localized meaning whose **text** was
+actually consumed as derivation input. Cardinality:
+
+- one generated meaning → zero or more source-backed localized inputs;
+- one source-backed localized meaning → zero or more generated meanings;
+- each pair is unique.
+
+Build-time validation (not SQLite FK syntax) enforces that:
+
+- `generated_meaning_id` points to a row whose `source` is a versioned
+  `llm_generated_vN` marker;
+- `source_meaning_id` points to a source-backed, non-generated localized meaning;
+- both rows belong to the same semantic `sense_id`;
+- generated-to-generated derivation edges are forbidden in v1;
+- every source-backed localized meaning row whose text is actually supplied to
+  generation, simplification, or semantic QA as derivation input is recorded.
+
+If generation uses no localized source-backed meaning text and operates only
+from source-backed sense/grammar/context fields, zero derivation edges are
+valid — the generated row's `sense_id` plus sense provenance still identifies
+its semantic sense lineage. If a pipeline revision would otherwise consume a
+generated meaning as derivation input, v1 must instead re-anchor to the
+original source-backed localized rows or STOP; do not create generated→generated
+provenance chains.
 
 **The `language` column carries no enumerating `CHECK` and no foreign key to a
 closed list.** Adding a fourth meaning language must be data plus UI, never DDL —
@@ -214,19 +254,188 @@ CREATE TABLE note_meaning_lang (
 - Changing the set is a display change: it adds or removes rendered sections and
   never destroys review history, note data, or FSRS state.
 
-### 6.3 `needs_gloss` under three languages (supersedes D9's English-only wording)
+### 6.3 Resolver status vs. meaning availability (D43; supersedes D9's English-only wording)
 
-- `status='needs_gloss'` means the note has **no** available meaning text in
-  **any** of its selected meaning languages, from source or from the user.
-- A note whose selected set is `{de, en, fa}` and which has only an English
-  meaning is **resolved**. The DE and FA sections render as absent, not as
-  failure, and this is not a status.
-- ADR-0001 §11's rule stands unchanged: `needs_gloss` cards enter scheduling
-  normally and are never quarantined. What is superseded is only the assumption
-  that the missing thing is English.
-- The user-authored meaning field must record **which language it is written
-  in**. Its exact column/table shape is set by the slice that lands the note
-  contract; it may not default to English silently.
+`note.status` is and remains the **persisted resolver outcome**, with exactly
+`resolved | derived_compound | needs_gloss`. `needs_gloss` means **only** that
+the resolver reached its fourth fallback/stub outcome and could not bind the
+note to a dictionary-backed resolved or derived-compound identity
+(ADR-0001 §10, `app/resolve.py`). It is **not** a statement about whether
+DE/EN/FA meaning text currently exists.
+
+Separately, a **non-persisted computed** state named `meaning_state` has exactly
+`none | partial | complete`. For each currently selected language L, L is
+**available** when either:
+
+1. a `note_user_meaning` row exists for `(note_id, L)`; or
+2. the note has a dictionary `sense_id` and at least one `sense_meaning` row
+   exists for `(sense_id, language=L)`.
+
+If the note has no dictionary-backed sense, condition 2 is false; user meanings
+may still make languages available. Then:
+
+- `none`: zero selected languages are available;
+- `partial`: at least one, but fewer than all selected languages, are available;
+- `complete`: every selected language is available.
+
+The learner-facing "needs meaning" condition is `meaning_state == 'none'`, **not**
+"one or more selected languages missing". `partial` is a usable card, not a
+failure condition. Missing selected-language sections may be absent from
+rendering and may expose an edit/add affordance, but they do not change resolver
+status.
+
+**Status interactions (normative):**
+
+- An unresolved/stub note remains `status='needs_gloss'` even after the learner
+  writes one or more user meanings.
+- A dictionary-resolved note remains `status='resolved'` even if none of its
+  currently selected meaning languages has text.
+- Changing selected meaning languages or editing meaning text **must not**
+  rewrite resolver status.
+
+**Recalculation.** `meaning_state` is computed, not stored, and is recomputed
+from current data: on note/card read; on rendering; on the representation
+returned after note creation; after `meaning_langs` replacement; after
+user-meaning add/update/delete; and automatically on the next read after
+dictionary asset/version replacement. No migration or bulk user-DB state rewrite
+is needed when dictionary meaning coverage changes. Dictionary replacement may
+alter `meaning_state` (available `sense_meaning` rows changed) but must not
+alter `note.status` merely for that reason; any explicit existing/future
+re-resolution/relink process owns resolver-status changes separately.
+
+**Scheduling.** Scheduling remains independent of both states. ADR-0001 §11's
+rule stands unchanged: resolver `needs_gloss` cards enter scheduling normally
+and are never quarantined. Likewise `meaning_state=none` or `partial` does not
+quarantine a resolved note. What is superseded is only the assumption that
+`needs_gloss` said something about missing meaning text.
+
+### 6.4 Normalized language-bearing user meanings (D44)
+
+Conceptual PART-B relation:
+
+```sql
+CREATE TABLE note_user_meaning (
+    note_id  INTEGER NOT NULL
+        REFERENCES note(id) ON DELETE CASCADE,
+    language TEXT NOT NULL,
+    text     TEXT NOT NULL,
+    PRIMARY KEY (note_id, language)
+) WITHOUT ROWID;
+```
+
+This is conceptual architecture DDL; implementation/alignment owns the exact
+physical migration. The currently supported API language codes are exactly
+`de | en | fa`. There is **no** closed database `CHECK` or language-enum FK —
+the API enforces the current supported set (same rule as §6.1's `language`
+column). One note may have at most one user-authored meaning per language in
+v1. `note.gloss_user` is superseded as the normative persistence carrier (D44;
+see the ADR-0002 supersession below).
+
+**`/vocab/cards` request contract.** The existing per-selection `overrides`
+object is unchanged, and `meaning_langs` stays exactly as already defined. One
+further permitted override key is added: `user_meanings` — an object keyed by
+language, with allowed keys exactly `de | en | fa`.
+
+```json
+{
+  "selections": [
+    {
+      "ref": "stable-dictionary-ref",
+      "sense_id": 17,
+      "overrides": {
+        "meaning_langs": ["de", "fa"],
+        "user_meanings": {
+          "de": "mit jemandem am Telefon sprechen",
+          "fa": "تماس گرفتن"
+        }
+      }
+    }
+  ],
+  "capture_context": { },
+  "deck": { }
+}
+```
+
+Each value is either a nonblank JSON string — insert or replace
+`(note_id, language)` — or JSON `null` — delete `(note_id, language)` if present
+(idempotent no-op when absent). A blank or whitespace-only string is invalid and
+must **not** mean delete. An empty `user_meanings: {}` is invalid with HTTP 422;
+omission is the no-op representation. Unknown language key, unknown override
+key, unsupported type, blank text, duplicate language representation, malformed
+object, or any other validation failure rejects the entire `/vocab/cards`
+request with HTTP 422 **before any write**. No language is inferred from
+content, and no language silently defaults to English.
+
+On a newly created note, `meaning_langs` is still explicitly required and
+non-empty, and omitted `user_meanings` creates no user-meaning rows. On a reused
+note, omitted `user_meanings` means no mutation and only explicitly present
+language keys are changed. All validation occurs before mutation, and the entire
+`/vocab/cards` commit remains atomic across candidate identity revalidation,
+note create/reuse, front/back override changes, `meaning_langs`,
+`user_meanings`, note/deck membership, and capture/example persistence; any
+failure returns HTTP 422 with zero writes.
+
+**Interaction with `meaning_langs`.** `meaning_langs` is a display/render
+selection, not ownership of authored data. A `note_user_meaning` may exist for
+an unselected language; removing a language from `meaning_langs` must **not**
+delete its user meaning; reselecting that language makes the stored user meaning
+available again; the selected set must always remain non-empty; and D43
+`meaning_state` counts only currently selected languages.
+
+**Dictionary vs. user meaning rendering.** Source-backed `sense_meaning` rows
+are immutable dictionary data; user edits never overwrite them. For each
+selected language, rendering precedence is:
+
+1. if `note_user_meaning(note_id, language)` exists, render that note-local user
+   meaning as the meaning block for that language;
+2. otherwise render the dictionary `sense_meaning` row(s) for that note's
+   sense/language in deterministic existing order.
+
+A user meaning is therefore a note-local display override for one language; it
+does not modify dictionary provenance. `back_override` remains the existing
+whole-back override and remains orthogonal — it is not repurposed as structured
+meaning storage.
+
+**`/vocab/gloss` contract.** `/vocab/gloss` is retained to minimize API churn
+but is superseded from "fill a resolver needs_gloss card" to the dedicated
+language-bearing note-user-meaning edit endpoint.
+
+```json
+POST /vocab/gloss
+{ "note_id": 123, "language": "fa", "text": "تماس گرفتن", "contribute": false }
+```
+
+`note_id` identifies an existing note; `language` is required and exactly one of
+`de | en | fa`; `text` is required, a JSON string with at least one
+non-whitespace code point, stored verbatim. The operation is an upsert of
+`(note_id, language)`, valid regardless of `note.status` and valid whether or
+not `language` is currently selected. No resolver-status mutation occurs, and
+the returned meaning state is recomputed under D43.
+
+```text
+DELETE /vocab/gloss/{note_id}/{language}
+```
+
+`language` must be one of `de | en | fa`; only the matching `note_user_meaning`
+row is deleted; deleting a nonexistent row is idempotent success; `meaning_langs`
+is not altered; resolver `note.status` is not altered; D43 meaning state is
+recomputed for the returned/current representation. The API may use the existing
+project convention for the precise success status code; the mutation semantics
+above are normative.
+
+**D10 / `gloss_contribution`.** ADR-0001 D10 remains English-only. `contribute`
+is valid only on `POST /vocab/gloss` with `language == "en"`. `contribute:
+true` upserts the user's one existing D10 English contribution for the note's
+lemma/POS to the exact submitted English text, in the same transaction as the
+English user-meaning upsert; `contribute: false` or omission does not mutate
+`gloss_contribution`; `contribute: true` with `de` or `fa` is HTTP 422 before
+any write. German/Persian meanings are never written to `gloss_contribution`.
+Deleting a local English `note_user_meaning` does not implicitly retract or
+delete a previously submitted contribution, and changing a local English meaning
+without `contribute:true` does not silently rewrite an earlier contribution —
+contribution stays an explicit submitted vote, separate from local card editing.
+Multilingual contribution/voting and contribution-withdrawal policy remain
+deferred (D42).
 
 ## 7. LLM architecture (D37)
 
@@ -305,17 +514,41 @@ Constraints that survive the broadening unchanged:
   explicitly versioned successor (`llm_generated_v2`, …). A new prompt, model
   role occupant, or pipeline revision that changes row semantics gets a new
   version string rather than reusing the old one.
-- `DELETE FROM sense_meaning WHERE source LIKE 'llm_generated_%'` (or the
-  specific version) must cleanly reverse a generation run.
 - **No generated row may masquerade as source-backed Wiktionary content**
   (AGENTS R11). A generated row never carries `source='wiktionary'` or
-  `'wiktionary_de'`, and a source-backed row is never rewritten in place by the
-  pipeline — simplifying an existing German Wiktionary definition produces a
-  *new* generated row alongside it, so the source text stays recoverable.
-- License on a generated row records the generation terms, not CC BY-SA
-  inherited from a source it did not come from. Where a generated row is derived
-  from source-backed input, the derivation is recorded so the CC BY-SA
-  obligation of ADR-0001 §8 remains traceable.
+  `'wiktionary_de'` unless it is genuinely source-backed, and a source-backed
+  row is never rewritten in place by the pipeline — simplifying an existing
+  German Wiktionary definition produces a *new* generated row alongside it, so
+  the source text stays recoverable.
+- **Derivation (D45).** Every source-backed localized text input actually
+  consumed by generation, simplification, or semantic QA is recorded in
+  `sense_meaning_derivation` (cardinality and validation in §6.1). Generated
+  rows keep their versioned `source` marker; upstream Wiktionary identity is not
+  written into that field; generated→generated derivation edges are forbidden in
+  v1.
+- **License semantics (D45).** For a generated `sense_meaning`: `source`
+  identifies the generation pipeline/version; `license` records the output
+  distribution/license classification assigned by the maintainer build policy
+  after considering applicable upstream obligations. It must not falsely
+  relabel generated output as Wiktionary. Each linked source-backed localized
+  row retains its own `source`/`license`; derivation edges do not duplicate or
+  replace those licenses. Attribution/package generation must traverse
+  `generated sense_meaning → sense_meaning_derivation → source-backed
+  sense_meaning row(s)` so upstream attribution/license obligations remain
+  reconstructable. If build policy cannot establish an output-license
+  classification compatible with the linked upstream obligations, validation
+  must STOP rather than erase the provenance problem.
+- **Rollback (D45).** Rollback is driven solely by the generated version marker:
+
+  ```sql
+  DELETE FROM sense_meaning WHERE source = 'llm_generated_vN';
+  ```
+
+  Deleting the generated row cascades its outgoing `sense_meaning_derivation`
+  edges, and must **not** delete source-backed localized meaning rows.
+  `ON DELETE RESTRICT` on `source_meaning_id` prevents deleting a source row
+  while a generated row still depends on it. Generated data therefore remains
+  cleanly reversible without provenance loss.
 - Stage 04 stays inside the mid-September 2026 API-credit window recorded in
   `docs/backlog.md`; broadening its scope does not move that constraint.
 
@@ -385,6 +618,11 @@ Ich rufe dich morgen an.
 
 - Only selected meaning languages render. An unselected language contributes no
   section, no heading, and no empty placeholder.
+- For each selected language, the meaning block renders the note's user-authored
+  `note_user_meaning` for that language when one exists, otherwise the dictionary
+  `sense_meaning` row(s) for the note's sense/language in deterministic existing
+  order (D44 §6.4). A user meaning is a note-local display override for one
+  language and never modifies dictionary provenance.
 - **Core German grammar renders independently of the selection.** Disabling
   English does not hide the article, the principal parts, the IPA, or the plural.
 - For nouns, **plural belongs in that core grammar block**:
@@ -460,13 +698,21 @@ gate.
   cold-review-approved and the existing slice-3 orchestrator issues an alignment
   brief. This is an owner-driven governance amendment, **not** a WORKFLOW §5
   implementation failure: it increments no attempt and no audit counter.
+- **Implementation alignment (the slice-3 alignment brief) now requires:**
+  `sense_meaning`; `sense_meaning_derivation`; `note_meaning_lang`;
+  `note_user_meaning`; resolver-status / `meaning_state` separation; removal or
+  supersession of scalar `note.gloss_user`; and the existing plural changes
+  (`lemma.plural` + `lemma.plural_none`). `reference/schema.sql` is intentionally
+  **not** edited here; it becomes implementation-stale until that alignment.
 - **`reference/schema.sql` is deliberately stale** with respect to §6 and §10.
-  It still shows `sense.gloss_en NOT NULL`, no `sense_meaning`, no
-  `note_meaning_lang`, and no `lemma.plural_none`. That staleness is recorded
-  here and in `docs/backlog.md` rather than repaired in this governance session,
-  because a schema edit is implementation work and this session is forbidden from
-  it. A cold reviewer should read the mismatch as *blocked and documented*, not
-  as an undetected contradiction.
+  It still shows `sense.gloss_en NOT NULL`, scalar `note.gloss_user`, and
+  `note.status` without the resolver/meaning-state separation documented in §6.3;
+  it has no `sense_meaning`, no `sense_meaning_derivation`, no
+  `note_meaning_lang`, no `note_user_meaning`, and no `lemma.plural_none`. That
+  staleness is recorded here and in `docs/backlog.md` rather than repaired in
+  this governance session, because a schema edit is implementation work and this
+  session is forbidden from it. A cold reviewer should read the mismatch as
+  *blocked and documented*, not as an undetected contradiction.
 - Gate 2 (ADR-0002 §6 order 5) is unaffected and **stays where it is**. It
   measures stage-01 lemma/sense coverage — whether a word is found — which no
   part of this ADR changes. It must continue to run before the expensive later
@@ -522,6 +768,15 @@ decide whether the learner-facing condition means “no selected meaning exists�
 “one or more selected meanings are missing” rather than overloading resolver
 status by implication.
 
+**Resolution — 2026-08-19 revision:** RESOLVED by D43 and the corresponding
+ADR-0001/ADR-0002 pending supersession amendments. `note.status` remains the
+persisted resolver outcome (`resolved | derived_compound | needs_gloss`);
+selected-language availability is instead the computed, non-persisted
+`meaning_state = none | partial | complete`. The learner-facing "needs meaning"
+condition is `meaning_state='none'`. Language-selection, user-meaning and
+dictionary-coverage changes recompute meaning state without mutating resolver
+status.
+
 ### O2 — BLOCKING. `meaning_langs` is well-defined, but localized user-authored meanings have no executable API or persistence contract.
 
 The drafting session's invented decision (b) is sound on its own: omission means
@@ -549,6 +804,14 @@ path interacts with it. Explicitly supersede ADR-0002 §4's scalar `gloss_user`
 contract and its smoke-baseline expectations instead of leaving the slice to invent
 a public API.
 
+**Resolution — 2026-08-19 revision:** RESOLVED by D44. User-authored meanings
+are normalized as one `note_user_meaning` row per note/language; `/vocab/cards`
+uses an explicit language-keyed `user_meanings` override with exact
+add/update/delete/validation/transaction semantics; `/vocab/gloss` becomes a
+language-bearing edit API independent of resolver status; scalar
+`note.gloss_user` is superseded; D10 contribution remains explicitly
+English-only.
+
 ### O3 — BLOCKING. Per-row provenance is required, but generated-row derivation has no data carrier.
 
 D36's conceptual `sense_meaning` target carries only `source` and `license`. D38
@@ -568,3 +831,9 @@ cardinality and license semantics, and amend the conceptual target plus R11 word
 so a generated row can identify both its generation version and every
 source-backed localized row it derives from. Preserve deletion/reversal by the
 versioned generation marker.
+
+**Resolution — 2026-08-19 revision:** RESOLVED by D45 and amended AGENTS R11.
+Generated localized meanings retain their versioned `llm_generated_vN` source
+marker while a normalized `sense_meaning_derivation` relation records every
+source-backed localized text input used in derivation. Cardinality, license
+traceability, validation, and rollback semantics are now explicit.

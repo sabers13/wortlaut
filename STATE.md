@@ -43,6 +43,21 @@ memory of a conversation.
   O1 (needs_gloss overloaded between resolution and meaning availability),
   O2 (missing user-authored meaning schema/API/validation), and O3 (missing
   derivation carrier for generated-row CC BY-SA provenance).
+* **ADR-0004 revision resolving O1–O3 landed in the working tree 2026-08-19**
+  (governance revision, supervised local worker under WORKFLOW §14). ADR-0004
+  remains **`NEEDS COLD REVIEW`** and is extended to D32–D45: **D43** keeps
+  `note.status` as the persisted resolver outcome (`resolved | derived_compound |
+  needs_gloss`) and adds the computed, non-persisted `meaning_state = none |
+  partial | complete` (learner-facing "needs meaning" = `meaning_state='none'`);
+  **D44** normalizes DE/EN/FA user meanings as `note_user_meaning` with a
+  language-keyed `user_meanings` override and a language-bearing `/vocab/gloss`
+  POST/DELETE API, superseding scalar `note.gloss_user` (D10 stays English-only);
+  **D45** adds `sense_meaning_derivation` for generated-row provenance, license
+  traversal, and rollback. `AGENTS.md` R11 and the ADR-0001/ADR-0002 pending
+  supersession records, `docs/plan.md`, and `docs/backlog.md` were amended
+  accordingly. `reference/schema.sql` remains intentionally stale. This is a
+  governance revision, **not** a WORKFLOW §5 attempt: no attempt is added and
+  the audit counter is unchanged.
 * **Supervised Worker Fallback governance workflow adopted 2026-08-19**
   (`WORKFLOW.md` §0/§1/§14, `AGENTS.md` G3/G8/G11, `PROMPTS.md`). Distinguishes
   project decision authority (retained by primary ChatGPT orchestrator),
@@ -65,11 +80,11 @@ memory of a conversation.
 
 ## Gate
 
-* `make gate` — **PASS**. Measured fresh on `main` by this governance retry session
-  on 2026-08-19:
+* `make gate` — **PASS**. Measured fresh on `main` by the ADR-0004 revision
+  governance session on 2026-08-19:
   `.venv/bin/ruff check .` — all checks passed;
   `.venv/bin/mypy --strict .` — success, no issues in **10 source files**;
-  `.venv/bin/pytest -q` — **80 passed** in 6.18s;
+  `.venv/bin/pytest -q` — **80 passed** in 6.30s;
   `.venv/bin/python tools/check_agents.py` — R1 (runtime LLM), R3 (resolver cache
   key), R7 (lecture coupling) pass. R6 and R12 remain deliberately unscaffolded
   until their owning later slices.
@@ -118,19 +133,15 @@ memory of a conversation.
 
 ## Next three actions
 
-1. **Start a fresh ADR-0004 revision session to resolve the persisted cold-review objections**
-   (AGENTS G7 / PROMPTS.md §Orchestrator CLOSE step 3): a fresh orchestrator
-   session to resolve the three blocking cold-review objections (O1 needs_gloss
-   redefinition and resolution/meaning-availability state decoupling; O2
-   localized user-authored meanings schema, API, validation and contribution
-   boundary; O3 generated-row provenance and source derivation carrier under
-   AGENTS R11). Under Supervised Worker Fallback (WORKFLOW §14), the ChatGPT
-   orchestrator can design the revision and dispatch a supervised local worker to
-   apply and commit the governance edits. The revision targets a fresh cold
-   review on close.
-2. **Fresh ADR-0004 cold review** (WORKFLOW §7 / AGENTS G7): a fresh orchestrator
-   session reading only the repository to verify the revised ADR-0004.
-3. **On cold-review approval, return to the existing slice-3 orchestrator** for a
+1. **Fresh ADR-0004 cold review** (WORKFLOW §7 / AGENTS G7) — a fresh orchestrator
+   session reading only the repository to review the revised ADR-0004 (D32–D45,
+   O1–O3 resolved, `NEEDS COLD REVIEW` intact). **No implementation dispatch is
+   allowed before this approves the ADR.**
+2. **On cold-review approval, return to the existing slice-3 orchestrator** for a
    slice-3 **implementation-alignment brief** against the approved ADR-0004 data
-   contract. That brief is authored there, not by a governance or cold-review
-   session, and only after approval.
+   contract. That brief is authored there — not by a governance or cold-review
+   session — and only after approval.
+3. **On aligned implementation, the existing slice-3 orchestrator runs fresh
+   gate/report acceptance and slice-3 closure** against `slice/3` at
+   `7ceea14e39a7c831edfc803632d3c868ea0f3091` (still accepted, unmerged,
+   unclosed).
