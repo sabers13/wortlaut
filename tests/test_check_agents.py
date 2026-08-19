@@ -1,7 +1,8 @@
-"""Unit and integration tests for tools/check_agents.py."""
+"""Unit and integration tests for tools/check_agents.py and tools/resolver_hash.py."""
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -11,9 +12,17 @@ import pytest
 from tools.check_agents import (
     check_all,
     check_r1,
+    check_r3,
     check_r7,
     main,
     normalize_package_name,
+)
+from tools.resolver_hash import (
+    get_resolver_hash,
+    get_resolver_short_hash,
+)
+from tools.resolver_hash import (
+    main as resolver_hash_main,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -30,6 +39,34 @@ def test_clean_repo_passes() -> None:
     """The repository tree must pass all rule checks cleanly."""
     violations = check_all(REPO_ROOT)
     assert violations == []
+
+
+def test_resolver_hash_matches_raw_bytes() -> None:
+    """tools/resolver_hash.py computes exact SHA-256 over app/resolve.py raw bytes."""
+    resolve_path = REPO_ROOT / "app" / "resolve.py"
+    expected = hashlib.sha256(resolve_path.read_bytes()).hexdigest()
+    assert get_resolver_hash(resolve_path) == expected
+    assert get_resolver_short_hash(resolve_path, 8) == expected[:8]
+
+
+def test_resolver_hash_fails_on_missing_file(tmp_path: Path) -> None:
+    """tools/resolver_hash.py fails closed when resolve.py is missing."""
+    missing = tmp_path / "missing_resolve.py"
+    with pytest.raises(FileNotFoundError):
+        get_resolver_hash(missing)
+
+
+def test_resolver_hash_cli(capsys: pytest.CaptureFixture[str]) -> None:
+    """tools/resolver_hash.py CLI prints hash to stdout and exits 0."""
+    resolve_path = REPO_ROOT / "app" / "resolve.py"
+    exit_code = resolver_hash_main([str(resolve_path)])
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    expected = hashlib.sha256(resolve_path.read_bytes()).hexdigest()
+    assert captured.out.strip() == expected
+
+
+# --- R1 Tests ---
 
 
 def test_r1_clean_subproject(tmp_path: Path) -> None:
@@ -66,7 +103,9 @@ def test_r1_rejects_forbidden_runtime_dependencies(tmp_path: Path, forbidden_dep
     )
     violations = check_r1(tmp_path)
     assert len(violations) >= 1
-    assert any("R1 violation" in v and "Forbidden runtime LLM dependency" in v for v in violations)
+    assert any(
+        "R1 violation" in v and "Forbidden runtime LLM dependency" in v for v in violations
+    )
 
 
 @pytest.mark.parametrize(
@@ -95,6 +134,114 @@ def test_r1_rejects_forbidden_imports_in_app(tmp_path: Path, forbidden_code: str
     violations = check_r1(tmp_path)
     assert len(violations) >= 1
     assert any("R1 violation" in v and "Forbidden LLM import" in v for v in violations)
+
+
+# --- R3 Tests ---
+
+
+def _setup_valid_r3_project(tmp_path: Path) -> None:
+    """Helper to set up minimal valid R3 project layout."""
+    app_dir = tmp_path / "app"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    (app_dir / "resolve.py").write_text(
+        "SVP_DEP = 'svp'\ndef resolve(): pass\n",
+        encoding="utf-8",
+    )
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    (tools_dir / "resolver_hash.py").write_text(
+        "import hashlib\nfrom pathlib import Path\ndef get_resolver_hash(): return 'abc'\n",
+        encoding="utf-8",
+    )
+
+
+def test_r3_clean_project_passes(tmp_path: Path) -> None:
+    """A clean project with resolve.py and canonical resolver_hash passes R3."""
+    _setup_valid_r3_project(tmp_path)
+    assert check_r3(tmp_path) == []
+
+
+def test_r3_fails_when_resolve_py_missing(tmp_path: Path) -> None:
+    """R3 fails closed when app/resolve.py is missing."""
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir(parents=True)
+    (tools_dir / "resolver_hash.py").write_text(
+        "def get_resolver_hash(): pass\n",
+        encoding="utf-8",
+    )
+
+    violations = check_r3(tmp_path)
+    assert len(violations) >= 1
+    assert any(
+        "R3 fail-closed" in v and "Required resolver file missing" in v
+        for v in violations
+    )
+
+
+def test_r3_rejects_independent_resolve_hash(tmp_path: Path) -> None:
+    """R3 rejects a second, independent SHA-256 calculation of app/resolve.py."""
+    _setup_valid_r3_project(tmp_path)
+    (tmp_path / "tools" / "other_tool.py").write_text(
+        "import hashlib\nfrom pathlib import Path\n"
+        "h = hashlib.sha256(Path('app/resolve.py').read_bytes()).hexdigest()\n",
+        encoding="utf-8",
+    )
+
+    violations = check_r3(tmp_path)
+    assert len(violations) >= 1
+    assert any(
+        "R3 violation" in v and "Independent SHA-256 of app/resolve.py" in v
+        for v in violations
+    )
+
+
+def test_r3_rejects_stage_02_without_resolver_hash(tmp_path: Path) -> None:
+    """R3 rejects a stage-02 module that caches without tools.resolver_hash."""
+    _setup_valid_r3_project(tmp_path)
+    (tmp_path / "tools" / "index_tatoeba.py").write_text(
+        "def checkpoint(name, fn):\n"
+        "    pass\n\n"
+        "def index_tatoeba():\n"
+        "    checkpoint('tatoeba_index_v1', lambda: None)\n",
+        encoding="utf-8",
+    )
+
+    violations = check_r3(tmp_path)
+    assert len(violations) >= 1
+    assert any(
+        "R3 violation" in v and "constructs cache key without using tools.resolver_hash" in v
+        for v in violations
+    )
+
+
+def test_r3_accepts_stage_02_with_resolver_hash(tmp_path: Path) -> None:
+    """R3 accepts a stage-02 build module that calls tools.resolver_hash."""
+    _setup_valid_r3_project(tmp_path)
+    (tmp_path / "tools" / "index_tatoeba.py").write_text(
+        "from tools.resolver_hash import get_resolver_hash\n\n"
+        "def checkpoint(name, fn):\n"
+        "    pass\n\n"
+        "def index_tatoeba():\n"
+        "    r_hash = get_resolver_hash()[:8]\n"
+        "    checkpoint(f'tatoeba_index_{r_hash}', lambda: None)\n",
+        encoding="utf-8",
+    )
+
+    violations = check_r3(tmp_path)
+    assert violations == []
+
+
+def test_r3_fails_closed_on_unparseable_file(tmp_path: Path) -> None:
+    """R3 fails closed when a scanned Python file cannot be parsed."""
+    _setup_valid_r3_project(tmp_path)
+    (tmp_path / "tools" / "broken.py").write_text("def broken_syntax(:\n", encoding="utf-8")
+
+    violations = check_r3(tmp_path)
+    assert len(violations) >= 1
+    assert any("R3 fail-closed" in v and "Failed to read/parse" in v for v in violations)
+
+
+# --- R7 Tests ---
 
 
 @pytest.mark.parametrize(
@@ -140,6 +287,9 @@ def test_r7_rejects_forbidden_imports_in_app(tmp_path: Path, forbidden_code: str
     violations = check_r7(tmp_path)
     assert len(violations) >= 1
     assert any("R7 violation" in v and "Forbidden lecture-app import" in v for v in violations)
+
+
+# --- CLI and Generic Fail-Closed Tests ---
 
 
 def test_fail_closed_on_missing_pyproject(tmp_path: Path) -> None:
