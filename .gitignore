@@ -29,6 +29,27 @@ dist/
 # Process and workflow handoff artifacts (see PROMPTS.md / ADRs)
 handoff/
 
+# Environment and secrets (never commit or push)
+.env
+.env.*
+*.env
+*.pem
+*.key
+*.token
+
+# Local runtime databases and user data (AGENTS R9)
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Model and downloader caches
+.cache/
+models/
+downloads/
+
 # OS artifacts
 .DS_Store
 Thumbs.db

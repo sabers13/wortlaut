@@ -23,6 +23,13 @@ memory of a conversation.
   de-staled this file and `docs/backlog.md` against disk and amended slice-0 A6
   to ignore `handoff/`, which PROMPTS.md §Closure worker writes into the repo
   and never commits. Neither is a §5 attempt.
+- **Two Authorities & GitHub transport governance revision.** Encoded the strict
+  authority split: local Git/terminal is authoritative for machine state,
+  uncommitted files, and fresh gate execution; private GitHub repository mirror
+  is authoritative for committed context, briefs, reports, and allowed diff
+  ranges. Encoded GitHub-first startup, push synchronization (G9), no routine
+  ZIP/diff uploads (G10), remote sanity checks, and privacy protections, retaining
+  handoff ZIPs as immutable offline snapshots and fallbacks.
 - **ADR-0001/0002/0003 remain accepted and unmodified.** No active
   `NEEDS COLD REVIEW` marker exists.
 
@@ -61,9 +68,10 @@ memory of a conversation.
 ## Next three actions
 
 1. **slice-1 implementation:** fresh orchestrator per PROMPTS.md §NEW SLICE OPEN
-   with this closure's handoff ZIP; verify `Depends: slice-0` is merged, then
-   dispatch `tasks/slice-1.md` on `gpt-5.6-terra / T3 / high` (fallback
-   `opus-5 / T3 / high`) with `EXPECTED_MAIN_HEAD` supplied explicitly.
+   (GitHub-first default using private GitHub mirror, or with
+   `handoff/orchestrator-handoff-slice-1.zip` as fallback); verify `Depends: slice-0`
+   is merged, then dispatch `tasks/slice-1.md` on `gpt-5.6-terra / T3 / high`
+   (fallback `opus-5 / T3 / high`) with `EXPECTED_MAIN_HEAD` supplied explicitly.
 2. **Author `tasks/slice-2.md`** — ADR-0002 §6 order 3, Gate 1: verify the spaCy
    separable-particle dependency label and lock the ADR-0001 §13 `CASES` — before
    dispatching slice-1 closure.

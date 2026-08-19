@@ -7,40 +7,46 @@ CLOSE step was skipped.
 **The `## Next step` rule (normative, WORKFLOW.md §10).** Every reusable
 orchestrator prompt below MUST be followed immediately by an owner-facing
 `## Next step` that states: exactly what to do next; which worker/model/session
-receives the prompt; whether a fresh conversation is required; what to attach
-(handoff ZIP, briefs); and what evidence/output to return to the orchestrator.
-The `## Next step` stays **outside** the prompt block so owner instructions
-never become worker instructions. A reusable prompt without it is an
-**incomplete dispatch**. This applies to every prompt type: repository
-bootstrap, implementation, retry, governance/repair, escalation, review/risk,
-closure, audit, and `NEW SLICE OPEN`.
+receives the prompt; whether a fresh conversation is required; what repository
+identity / branch / commit to target (or fallback ZIP/diff to attach); and what
+evidence/output to return to the orchestrator. The `## Next step` stays
+**outside** the prompt block so owner instructions never become worker instructions.
+A reusable prompt without it is an **incomplete dispatch**. This applies to every
+prompt type: repository bootstrap, implementation, retry, governance/repair,
+escalation, review/risk, closure, audit, and `NEW SLICE OPEN`.
 
 ---
 
 ## Orchestrator — NEW SLICE OPEN (canonical; printed by the previous slice's closure)
 
 ````
-Read WORKFLOW.md, AGENTS.md and STATE.md from the attached handoff ZIP. The ZIP
-is the authoritative startup material — do not rely on any previous chat's
-memory. (First-slice exception: slice-0 has no ZIP; read the repo after the
+Read WORKFLOW.md, AGENTS.md, and STATE.md from the private GitHub repository
+(or from the attached handoff ZIP if in offline/fallback mode). The GitHub
+repository is the persistent authoritative mirror for committed state — do not
+rely on previous-chat memory or request manual file uploads for pushed content.
+(First-slice exception: slice-0 has no prior push/ZIP; read the repo after the
 one-time repository bootstrap worker has succeeded.)
 
 You are the orchestrator for slice-<ID>, and this chat owns it from dispatch
 through retries, review, acceptance, and closure. Startup is a formal
 verification stage (WORKFLOW.md §10) — run it before any dispatch:
 
-1. Manifest final main HEAD == `git rev-parse main` (via a read-only worker if
-   a terminal is needed).
-2. main-gate.txt in the ZIP shows a passing gate, stderr included; have a
-   worker re-run <gate command> and compare numbers.
-3. STATE.md agrees with disk: escalation status, audit counter, blocked items.
-4. Audit triggers: phase boundary reached, or `Sessions since last audit` >= 10
+1. Verify expected main HEAD == `git rev-parse main` via a read-only terminal worker:
+   `<expected main HEAD>`.
+2. Verify clean working tree (`git status --porcelain` is empty).
+3. Verify remote sanity (`git remote get-url origin` and `git fetch --dry-run origin`
+   if configured).
+4. Gate re-run: have a worker re-run <gate command>, capturing stdout and
+   stderr, and verify numbers match clean passing status. (Compare with
+   handoff/main-gate.txt).
+5. STATE.md agrees with disk: escalation status, audit counter, blocked items.
+6. Audit triggers: phase boundary reached, or `Sessions since last audit` >= 10
    -> run the §Audit prompt first; no dispatch this session.
-5. Read tasks/<ID>.md and verify EVERY entry in its `Depends:` field is merged.
-   Do not assume the dependency is simply the previous slice.
+7. Read tasks/<ID>.md and verify EVERY entry in its `Depends:` field is merged
+   in the local repository. Do not assume the dependency is simply the previous slice.
 
 For slice-0 only, there is no prior manifest or `main-gate.txt`: replace checks
-1–2 with a read-only terminal worker running exactly:
+1–4 with a read-only terminal worker running exactly:
 
 ```
 test "$(git rev-parse main)" = "<bootstrap main HEAD>" || {
@@ -51,7 +57,7 @@ sed -n '/^## Gate$/,/^## /p' STATE.md | grep -q '^- none' || {
   echo "STOP: STATE.md does not record Gate = none"; exit 1; }
 ```
 
-Then perform checks 3–5 normally.
+Then perform checks 5–7 normally.
 
 Any check fails, or any cross-file contradiction exists -> STOP and report;
 repair durably in files before dispatch (repairs are not §5 attempts).
@@ -59,10 +65,10 @@ repair durably in files before dispatch (repairs are not §5 attempts).
 Then dispatch the implementation worker per the brief's Model line, with the
 complete terminal procedure (commands + fail conditions). Retries and
 escalations stay in this chat. After acceptance (and the §6 risk review if
-labeled), dispatch the closure worker per PROMPTS.md §Closure worker. After a
-validated handoff ZIP exists, print the next NEW SLICE OPEN prompt + ZIP path,
-each with its ## Next step, then end this chat. Apply WORKFLOW.md mechanically;
-cite rubric rows, never feel.
+labeled), dispatch the closure worker per PROMPTS.md §Closure worker. After
+successful closure and remote push synchronization, print the next NEW SLICE
+OPEN prompt + fallback ZIP path, each with its ## Next step, then end this chat.
+Apply WORKFLOW.md mechanically; cite rubric rows, never feel.
 ````
 
 ## Next step (template the closure prints under this prompt)
@@ -74,16 +80,23 @@ worker succeeded. Attach **no prior handoff ZIP**: none exists. Fill
 receipt, paste the prompt above, and continue there.
 
 For **slice-1 and later**, open a **fresh** orchestrator chat (ORCH model per
-WORKFLOW.md §0), attach the validated `<zip path>` produced by the previous slice
-closure, paste the prompt above, and continue there. In either case, return
-nothing to this chat — it is closed.
+WORKFLOW.md §0) with GitHub access to `<repo-identity>`.
+- **GitHub connected (default):** Paste the prompt above with `<expected main HEAD>`
+  filled. No manual ZIP or diff upload is required — the orchestrator reads
+  committed state directly from GitHub and dispatches a read-only worker for local
+  checks.
+- **Fallback (GitHub disconnected/stale):** Attach the validated `<zip path>`
+  produced by the previous slice closure, paste the prompt above, and continue
+  there.
+In either case, return nothing to this chat — it is closed.
 
 ---
 
 ## Orchestrator — OPEN (non-slice: question / checkpoint / governance)
 
 ```
-Read WORKFLOW.md, AGENTS.md and STATE.md.
+Read WORKFLOW.md, AGENTS.md and STATE.md from the private GitHub repository
+(or local repository on disk).
 
 I'm at <checkpoint | question | governance>. <one line of context>
 
@@ -178,6 +191,11 @@ decisions not in the brief, stop-and-ask conditions hit, problems noticed but
 not fixed, work left undone. If the brief carried a Risk label, add the line
 "Review: PENDING (T3, full diff)" at the top.
 
+If a remote is configured, push the slice branch for review visibility:
+  if git remote get-url origin >/dev/null 2>&1; then
+    git push -u origin slice/<ID> || { echo "STOP: failed to push slice/<ID>"; exit 1; }
+  fi
+
 Print the report path, the branch HEAD SHA, and the gate numbers, then stop.
 ```
 
@@ -221,9 +239,15 @@ step and output — you are not authorized to resolve anything.
    handoff/main-gate.txt handoff/MANIFEST.md
    Any listed file missing -> STOP. No handoff exists on STOP.
 9  Validate: python3 -c "import zipfile;
-   assert zipfile.ZipFile('<zip>').testzip() is None" ; and verify
+   assert zipfile.ZipFile('handoff/orchestrator-handoff-slice-<NEXT>.zip').testzip() is None" ; and verify
    MANIFEST.md's final main HEAD equals `git rev-parse main` -> else STOP.
-10 Print the ZIP path and final main HEAD, then stop.
+10 Remote push synchronization (if origin remote is configured):
+   if git remote get-url origin >/dev/null 2>&1; then
+     git push origin main || { echo "STOP: failed to push main"; exit 1; }
+     git push origin slice/<ID> || { echo "STOP: failed to push slice/<ID>"; exit 1; }
+   fi
+11 Print the final main HEAD, remote push status, next brief path, and fallback
+   ZIP path, then stop.
 ```
 
 **MANIFEST.md template** (orchestrator authors it; closure worker packages it):
@@ -236,14 +260,15 @@ Review:           PASS (ORCHESTRATOR, full diff)   # risk-labeled slices
 Gate:             PASS — see main-gate.txt (stdout+stderr)
 Sessions since last audit: <n — must equal committed STATE.md>
 Next brief:       tasks/<NEXT>.md  (Depends: <verbatim from the brief>)
+Remote mirror:    origin (pushed: yes | not configured)
 ```
 
 ## Next step (orchestrator writes under the closure dispatch)
 
 Send the prompt above to a T1 worker (`gemini-flash / T1 / low`, fallback
-`codex-low / T1 / low`) with terminal access. Return here: the ZIP path and
-final main HEAD, or the STOP report verbatim. On success this chat prints the
-NEW SLICE OPEN prompt and ends.
+`codex-low / T1 / low`) with terminal access. Return here: the final main HEAD,
+remote push status, next brief path, and fallback ZIP path, or the STOP report
+verbatim. On success this chat prints the NEW SLICE OPEN prompt and ends.
 
 ---
 
@@ -252,8 +277,8 @@ NEW SLICE OPEN prompt and ends.
 Open a **fresh** orchestrator session (other model of the ORCH pair if available):
 
 ```
-Read WORKFLOW.md, AGENTS.md, STATE.md, and docs/adr/<ID>. You have no other
-context, deliberately.
+Read WORKFLOW.md, AGENTS.md, STATE.md, and docs/adr/<ID> from the private GitHub
+repository (or local repository on disk). You have no other context, deliberately.
 
 Review this ADR against the repo as it exists on disk: internal contradictions,
 conflicts with prior ADRs or AGENTS.md, costs understated, alternatives
@@ -267,8 +292,9 @@ CLOSE (non-slice).
 
 ## Next step
 
-Open a fresh chat with the **other** ORCH model, paste the prompt, no
-attachments beyond repo access. Return here: APPROVED or the objection list.
+Open a fresh chat with the **other** ORCH model, paste the prompt, no file
+attachments needed beyond GitHub/repo access. Return here: APPROVED or the
+objection list.
 
 ---
 
@@ -278,7 +304,8 @@ Open a T3 session:
 
 ```
 Read AGENTS.md, tasks/<ID>.md, tasks/<ID>.report.md, then the FULL diff of
-branch slice/<ID> against main.
+branch slice/<ID> against main (directly from the pushed GitHub branch/compare,
+or via local git diff if offline).
 
 This slice is risk-labeled <label>. The gate is green; you are here for what
 the gate cannot see: idempotency, partial-failure states, rollback safety, and
@@ -290,8 +317,10 @@ list. No merge until this line is filled. Then stop.
 
 ## Next step
 
-Send to a fresh T3 session (`<model>`) with repo terminal access. Return here:
-the filled Review line, verbatim. Closure cannot be dispatched before it.
+Send to a fresh T3 session (`<model>`) with GitHub access (or repo terminal
+access). No manual `.diff` file upload is required when the branch is pushed to
+GitHub. Return here: the filled Review line, verbatim. Closure cannot be
+dispatched before it.
 
 ---
 
@@ -299,7 +328,8 @@ the filled Review line, verbatim. Closure cannot be dispatched before it.
 
 ```
 Read WORKFLOW.md, AGENTS.md, STATE.md, docs/adr/, docs/backlog.md, and
-`git log --oneline -50`. This is an audit session — no dispatch.
+`git log --oneline -50` from the private GitHub repository (or local repository).
+This is an audit session — no dispatch.
 
 Verify: STATE.md's "What landed" against git log; gate numbers against a fresh
 gate run; escalation counts against dispatch history in reports; every NEEDS
@@ -307,13 +337,15 @@ COLD REVIEW resolved; no cross-file contradictions. File contradictions in
 docs/backlog.md as BLOCKED — do not resolve them in your head.
 
 Close: reset `Sessions since last audit` to 0 in STATE.md content you author
-(committed via a closure-style worker), and print the pending NEW SLICE OPEN.
+(committed via a closure-style worker), ensure push synchronization to remote,
+and print the pending NEW SLICE OPEN.
 ```
 
 ## Next step
 
-Open a fresh ORCH chat, attach the current handoff ZIP, paste the prompt.
-Return: nothing — its close prints the next prompt.
+Open a fresh ORCH chat with GitHub repository access (or attach fallback handoff
+ZIP if offline), paste the prompt. Return: nothing — its close prints the next
+prompt.
 
 ---
 
@@ -360,16 +392,19 @@ Session close, per WORKFLOW.md §8. Do these in order, then stop.
      parked item              -> docs/backlog.md (BLOCKED + what unblocks it)
 
 3. If any ADR was created or substantively modified this session, the
-   next-session block below MUST target an ADR cold review (see §ADR review),
-   before any dispatch. An approving cold review's own review-status record and
-   the immediate administrative removal of `NEEDS COLD REVIEW` do not by
-   themselves trigger another cold review. Any other substantive ADR content
-   change still does. An objecting review follows AGENTS G7: revision next, then
-   a fresh cold review.
+       next-session block below MUST target an ADR cold review (see §ADR review),
+       before any dispatch. An approving cold review's own review-status record and
+       the immediate administrative removal of `NEEDS COLD REVIEW` do not by
+       themselves trigger another cold review. Any other substantive ADR content
+       change still does. An objecting review follows AGENTS G7: revision next, then
+       a fresh cold review.
 
-4. Do not summarise the session. STATE.md is the summary.
+4. Push synchronization: if docs or governance commits were made, ensure updated
+   main is pushed to the private remote mirror (`git push origin main`).
 
-5. Print ONLY the next session's prompt (NEW SLICE OPEN if the next action is a
+5. Do not summarise the session. STATE.md is the summary.
+
+6. Print ONLY the next session's prompt (NEW SLICE OPEN if the next action is a
    slice; otherwise the appropriate template), placeholders filled from what
    you just recorded, followed by its ## Next step.
 ```

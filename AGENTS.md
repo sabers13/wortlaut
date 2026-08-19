@@ -121,11 +121,13 @@ backlog work.
   *Defect prevented:* judgment silently absorbed into the one step nobody
   reviews — the merge (WORKFLOW §11).
 
-- **G5 — Handoff packaging fails closed.** Missing file, failing final gate,
-  moved `main`, or invalid ZIP ⇒ no handoff exists. The final gate runs after
-  the STATE.md closure commit; `main-gate.txt` includes stderr; the manifest
+- **G5 — Handoff packaging and synchronization fail closed.** `[reviewed]`
+  Missing required file, failing final gate, moved `main`, push failure, or
+  corrupted ZIP archive ⇒ no handoff exists. The final gate runs after the
+  STATE.md closure commit; `main-gate.txt` includes stderr; the manifest
   carries the actual final `main` HEAD and an audit counter equal to committed
-  STATE.md.
+  STATE.md; and `main` is pushed to the private remote mirror before handoff is
+  complete.
   *Defect prevented:* the next orchestrator discovering mid-flight that its
   authoritative startup material describes a repo state that never existed
   (WORKFLOW §11).
@@ -149,6 +151,52 @@ backlog work.
   *Defect prevented:* a literal reading of CLOSE step 3 loops either an objected
   unchanged draft or an already-approved ADR through cold review forever
   (WORKFLOW §7).
+
+- **G8 — Two authorities: local execution vs. private GitHub mirror.** `[reviewed]`
+  The local Git repository / terminal environment is authoritative for: `git status`
+  and uncommitted/untracked files; the actual checked-out branch; fresh `git rev-parse`
+  verification when execution depends on it; installed Python packages, spaCy models,
+  local services, databases, caches, credentials, environment variables, and other
+  machine state; `make gate` and all fresh executable verification; and local
+  mutations (commits, merges, branch creation). The private GitHub repository is the
+  authoritative persistent mirror for committed/pushed state available there:
+  committed source and documentation; `WORKFLOW.md`, `AGENTS.md`, `STATE.md`,
+  `PROMPTS.md`, ADRs, plans, backlog, task briefs, worker reports, pushed branches/commits,
+  commit history, and committed diff ranges when WORKFLOW permits such inspection.
+  GitHub presence does **not** prove a clean local working tree, local runtime state,
+  or a fresh passing gate.
+  *Defect prevented:* an orchestrator assuming remote mirror existence proves local
+  cleanliness, runtime correctness, or passing gate status (ADR-0001/0002).
+
+- **G9 — Push synchronization and privacy invariant.** `[reviewed]`
+  Committed repository state required by a subsequent orchestrator or external
+  reviewer must be pushed to the private GitHub mirror before handoff. Specifically:
+  accepted commits must be pushed before a later session relies on them; after
+  worker close, slice branches must be pushed when external review is required;
+  after accepted closure/merge, updated `main` must be pushed before the next
+  slice handoff is considered complete; authored next-slice briefs and governance
+  changes must be committed and pushed before subsequent chats consume them. A push
+  failure must be reported as a handoff/synchronization failure, never silently
+  ignored. The repository is private by default. No `.env`, API keys, credentials,
+  local databases (`*.sqlite`, `*.db`), `.venv`, model caches, or user data may
+  ever be committed or pushed.
+  *Defect prevented:* stale or missing remote state causing subsequent orchestrator
+  sessions to act on out-of-sync context or desynchronizing multi-session handoffs,
+  or leaking private credentials and local database state to remotes.
+
+- **G10 — GitHub-first access; no routine ZIP or manual diff upload.** `[reviewed]`
+  When GitHub access is available, orchestrators and reviewers must inspect
+  committed files, briefs, reports, and authorized diff ranges directly from the
+  private GitHub repository without requiring the owner to upload handoff ZIPs,
+  markdown files, or patch/diff files. Manual handoff ZIPs and manual diff uploads
+  are strictly fallback mechanisms used when GitHub is disconnected, unavailable,
+  stale, or incomplete, or when an immutable offline archive is explicitly mandated.
+  GitHub access does not broaden diff-reading permissions: orchestrators continue to
+  review reports rather than diffs (WORKFLOW §1), and full-diff review remains
+  strictly restricted to risk-labeled slices under WORKFLOW §6.
+  *Defect prevented:* manual courier toil and token waste uploading redundant files,
+  while preventing unauthorized full-diff leakage into normal report-based
+  orchestration reviews.
 
 ## Conventions
 
