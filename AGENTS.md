@@ -73,11 +73,18 @@ backlog work.
   newline corrupts every record after it (ADR-0001 D14/§7).
 
 - **R11 — Attribution is per row, always filled.** `[reviewed]` Every `sense`
-  and `example` row carries `source` and `license`; LLM-generated build rows are
-  marked `source='llm_generated_v1'` and must never be indistinguishable from
-  Wiktionary rows.
+  row, every **localized meaning** row (the DE/EN/FA learner-meaning texts hanging
+  off a sense — ADR-0004 §6, pending cold review), and every `example` row carries
+  a non-empty `source` and `license`. Provenance lives on the localized meaning
+  row, not on the sense, because German, English and Persian meanings for one
+  sense routinely come from different sources under different licenses.
+  LLM-generated build rows are marked `source='llm_generated_v1'` or an explicitly
+  versioned successor; they must never be indistinguishable from Wiktionary rows,
+  must never overwrite a source-backed row in place (simplifying one produces a
+  new generated row beside it), and must be reversible by deleting on that marker
+  alone.
   *Defect prevented:* CC BY-SA obligations and clean rollback of generated rows
-  are unreconstructable after the fact (ADR-0001 §8, §12).
+  are unreconstructable after the fact (ADR-0001 §8, §12; ADR-0004 §8).
 
 - **R12 — Browser-facing localhost requests are origin/host guarded.** `[executable]`
   `cors_origins` is an exact-origin allowlist; `*` is forbidden. Every request
@@ -207,6 +214,13 @@ backlog work.
 - **C2 — Dependency direction is one-way:** `api → deck → render → dictionary →
   resolve`. Nothing below `deck` touches user state; that is what makes `render`
   and `dictionary` exact-match testable (ADR-0001 §10).
-- **C3 — German-only, by decision.** No generic note types, no cloze, no
-  configurable templates (ADR-0001 D18). Proposals to generalise are
-  Stop-and-ask, not scope.
+- **C3 — German-only, by decision.** "German-only" names the **target
+  vocabulary language**: German is the only language whose words become notes. It
+  does **not** mean learner-facing meanings must be written in German, nor that
+  they must be written in English. A note may display its meaning in German,
+  English and/or Persian — a per-note, non-empty selection rendered over
+  structured fields (ADR-0004, pending cold review) — and that is a display
+  contract, not a generalisation of the app. What stays rejected is unchanged: no
+  generic note types, no cloze, no configurable templates (ADR-0001 D18, §17.8),
+  and no second target language. Proposals to generalise, including making the
+  target language configurable, are Stop-and-ask, not scope.
