@@ -28,6 +28,12 @@ them. REJECTED items are listed so they do not resurface.
   `app/`. BLOCKED with the `app/` rewrite; fix the paths in the slice that first
   makes the baseline executable, and amend its capture/card/review assertions
   exactly as ADR-0002 §4/§5 and ADR-0003 §5 require.
+  slice-0 additionally excluded `reference/` from ruff, mypy and pytest discovery
+  in `pyproject.toml`, because `smoke_test.py` cannot type-check while it imports
+  a non-existent `app.*` and the directory is outside slice-0's Allowlist. The
+  slice that repairs the baseline **must remove that exclusion in the same
+  change**, or the repaired file silently escapes the gate that is supposed to
+  verify it.
 
 ## Deferred (cite: ADR-0001 §14)
 
