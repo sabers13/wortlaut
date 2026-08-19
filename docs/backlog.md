@@ -21,12 +21,6 @@ them. REJECTED items are listed so they do not resurface.
 - **Build stage 04 (batch gap-gloss)** — time-bound, not blocked: the API
   credit expires **mid-September 2026**. Gate 1 → stage 01 → Gate 2 →
   stages 02–03 must land before it.
-- **Repo is not a git repository** — no `.git` on disk, so no `main`, commits, or
-  git log. This blocks the normal slice lifecycle. ADR-0002 is approved and the
-  binding bootstrap procedure exists at WORKFLOW §10 / PROMPTS.md §Repository
-  bootstrap worker. Planning is complete (`docs/plan.md`, `tasks/slice-0.md`), so
-  this unblocks when a T1 terminal worker runs that procedure and returns
-  `BOOTSTRAP MAIN HEAD: <sha>` — the owner stays a courier (AGENTS G3).
 - **`reference/smoke_test.py` is path-broken as filed** — it does
   `sys.path.insert(0, dirname(__file__))` then imports `app.*` and opens
   `schema.sql` beside itself, i.e. it expects `reference/app/` and
@@ -50,7 +44,9 @@ them. REJECTED items are listed so they do not resurface.
 ## Standing
 
 - Convert `[reviewed]` AGENTS rules to `[executable]` gate checks (R2, R8, R9,
-  R10 are candidates; R1, R3, R6, R7, R12 are executable from slice-0/early).
+  R10 are candidates). Of the `[executable]` rules, R1 and R7 are scaffolded in
+  slice-0; R3, R6 and R12 are deferred to the slices that create what they
+  govern (`docs/plan.md`).
 - `render.back()` with `examples=[]`: tolerated but untested — reachable via
   manual entry (ADR-0001 §6). Add a test in the render slice.
 - Confirm build stage 01 populates multi-word separable surface forms
