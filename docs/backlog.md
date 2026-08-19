@@ -15,6 +15,8 @@ them. REJECTED items are listed so they do not resurface.
   ADR-0004 draft
   -> cold-review objections O1–O3
   -> ADR-0004 revision resolving O1–O3
+  -> fresh post-revision cold review objections O4–O5
+  -> ADR-0004 revision resolving O4–O5
   -> fresh cold review approval
   -> slice-3 implementation alignment
   -> fresh gate/report acceptance

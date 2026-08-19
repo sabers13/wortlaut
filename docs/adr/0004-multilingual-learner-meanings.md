@@ -837,3 +837,63 @@ Generated localized meanings retain their versioned `llm_generated_vN` source
 marker while a normalized `sense_meaning_derivation` relation records every
 source-backed localized text input used in derivation. Cardinality, license
 traceability, validation, and rollback semantics are now explicit.
+
+### O4 — BLOCKING. D43 leaves `derived_compound` meaning availability undefined and can disagree with rendering.
+
+D43 preserves `note.status = resolved | derived_compound | needs_gloss` but
+defines a selected language as available only when either a note-local
+`note_user_meaning` exists or the note has a direct dictionary `sense_id` with a
+matching `sense_meaning`. That is not exhaustive for the retained
+`derived_compound` outcome. ADR-0001's resolution ladder produces derived
+compounds from dictionary-backed components, and its still-retained compound
+gloss/decomposition path derives learner meaning from those component meanings.
+A derived-compound note need not have its own direct `sense_id`.
+
+The resulting state machine is ambiguous: the card may have a dictionary-derived
+compound/component meaning to render while D43 is forced to report
+`meaning_state='none'`; alternatively an implementation must invent an
+unrecorded third availability rule. Multilingual meanings make the gap larger
+because it is also undefined which component localized meanings establish
+availability for DE, EN or FA, and what happens when only some components have
+text in a selected language.
+
+*Remedy:* define one executable `derived_compound` meaning contract. If
+component-derived localized meanings remain part of v1, specify
+language-by-language availability, deterministic component/sense selection and
+ordering, behaviour when only some component meanings exist, note-local
+`note_user_meaning` precedence, rendering, and source/license attribution; state
+whether the derived text is computed or persisted while preserving the
+rendered-faces-never-stored rule. If v1 intentionally excludes dictionary-derived
+compound meanings from selected-language availability/rendering, explicitly
+supersede the conflicting ADR-0001 compound-gloss/decomposition behaviour
+instead. In either design, `status='derived_compound'` remains a resolver outcome
+and scheduling remains independent.
+
+### O5 — BLOCKING. D43's dictionary-replacement recomputation has no safe cross-version dictionary-identity contract.
+
+D43 requires `meaning_state` to be recomputed automatically from current data on
+the next read after a dictionary asset/version replacement. Its dictionary
+availability predicate dereferences the note's persisted numeric `sense_id`.
+The repository, however, treats `dictionary_vN.sqlite` as a versioned,
+replaceable/disposable asset while PART-B notes persist numeric `lemma_id` and
+`sense_id`; `lemma_text` is explicitly denormalized so user data survives
+dictionary rebuilds. No accepted contract guarantees that those numeric IDs
+identify the same lemma/sense in every future dictionary version, and no
+activation-time relink step is required before D43 reads the replacement asset.
+
+Consequently a replacement can make an old numeric `sense_id` disappear or,
+more dangerously, make the same integer identify a different new sense. D43
+cannot then distinguish genuine meaning-coverage change from stale identity, so
+automatic recomputation can return a false `none`/`partial` state or expose
+meaning text for the wrong sense while leaving resolver status untouched.
+
+*Remedy:* define the cross-version identity/activation contract before D43 is
+accepted. Either guarantee and gate stable persisted dictionary identities across
+all asset versions, or persist/use a stable semantic reference and perform a
+fail-closed relink/rebind of `lemma_id`/`sense_id` before a replacement asset is
+made visible to reads. Define the disappeared/ambiguous-sense case explicitly:
+user-authored meanings survive; no stale numeric ID may bind to an unrelated
+sense; resolver status changes only through its separately owned
+re-resolution/relink rule; and `meaning_state` is computed only against a
+successfully validated binding. Asset activation must not expose a mixed
+old-identity/new-asset state.

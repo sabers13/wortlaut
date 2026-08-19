@@ -58,6 +58,17 @@ memory of a conversation.
   accordingly. `reference/schema.sql` remains intentionally stale. This is a
   governance revision, **not** a WORKFLOW §5 attempt: no attempt is added and
   the audit counter is unchanged.
+* **ADR-0004 fresh post-O1–O3 cold review 2026-08-19 — OBJECTIONS O4–O5 filed; `NEEDS COLD REVIEW` stays.**
+  O1–O3 were verified resolved. O4 finds D43 incomplete for
+  `status='derived_compound'`: its selected-language availability predicate only
+  recognizes note-local user meaning or a direct `sense_id`/`sense_meaning`,
+  while the retained compound decomposition/gloss path can provide derived
+  meaning without a direct sense. O5 finds dictionary replacement unsafe and
+  undefined: D43 requires automatic recomputation against a replacement asset,
+  but no cross-version stable numeric sense identity or mandatory fail-closed
+  relink contract exists. No implementation dispatch is allowed. The next
+  governance action is an ADR-0004 revision resolving O4–O5, followed by a fresh
+  cold review.
 * **Supervised Worker Fallback governance workflow adopted 2026-08-19**
   (`WORKFLOW.md` §0/§1/§14, `AGENTS.md` G3/G8/G11, `PROMPTS.md`). Distinguishes
   project decision authority (retained by primary ChatGPT orchestrator),
@@ -80,11 +91,11 @@ memory of a conversation.
 
 ## Gate
 
-* `make gate` — **PASS**. Measured fresh on `main` by the ADR-0004 revision
-  governance session on 2026-08-19:
+* `make gate` — **PASS**. Measured fresh on `main` by the ADR-0004 post-O1–O3
+  cold-review close on 2026-08-19:
   `.venv/bin/ruff check .` — all checks passed;
   `.venv/bin/mypy --strict .` — success, no issues in **10 source files**;
-  `.venv/bin/pytest -q` — **80 passed** in 6.30s;
+  `.venv/bin/pytest -q` — **80 passed**;
   `.venv/bin/python tools/check_agents.py` — R1 (runtime LLM), R3 (resolver cache
   key), R7 (lecture coupling) pass. R6 and R12 remain deliberately unscaffolded
   until their owning later slices.
@@ -111,9 +122,10 @@ memory of a conversation.
 ## Blocked
 
 * **slice-3 closure — PAUSED by ADR-0004.** `slice/3` must not be merged,
-  rebased, or rewritten. Unblocks only in order: ADR-0004 draft → ADR-0004
-  revision (resolving O1–O3) → fresh cold review approval → slice-3
-  implementation alignment → fresh gate/report acceptance (`docs/backlog.md`).
+  rebased, or rewritten. Unblocks only in order: ADR-0004 draft → O1–O3 cold
+  review → O1–O3 revision → post-revision cold review O4–O5 → ADR-0004 revision
+  resolving O4–O5 → fresh cold review approval → slice-3 implementation
+  alignment → fresh gate/report acceptance (`docs/backlog.md`).
 * **`reference/schema.sql` is intentionally stale** against ADR-0004 §6/§10 —
   `sense.gloss_en NOT NULL`, no localized-meaning relation, no per-note
   meaning-language table, no explicit "no normal plural" marker. Repaired by the
@@ -133,15 +145,14 @@ memory of a conversation.
 
 ## Next three actions
 
-1. **Fresh ADR-0004 cold review** (WORKFLOW §7 / AGENTS G7) — a fresh orchestrator
-   session reading only the repository to review the revised ADR-0004 (D32–D45,
-   O1–O3 resolved, `NEEDS COLD REVIEW` intact). **No implementation dispatch is
-   allowed before this approves the ADR.**
-2. **On cold-review approval, return to the existing slice-3 orchestrator** for a
-   slice-3 **implementation-alignment brief** against the approved ADR-0004 data
-   contract. That brief is authored there — not by a governance or cold-review
-   session — and only after approval.
-3. **On aligned implementation, the existing slice-3 orchestrator runs fresh
-   gate/report acceptance and slice-3 closure** against `slice/3` at
-   `7ceea14e39a7c831edfc803632d3c868ea0f3091` (still accepted, unmerged,
-   unclosed).
+1. **Fresh ADR-0004 revision session** (AGENTS G7) — resolve blocking objections
+   O4–O5 in the ADR and every cross-file amendment required by their remedies.
+   Preserve O1–O5 and all existing resolution records. Do not dispatch
+   implementation. Close to another fresh ADR-0004 cold review.
+2. **Fresh ADR-0004 cold review** (WORKFLOW §7 / AGENTS G7) — review the
+   O4–O5 revision from repository-only context. No implementation dispatch until
+   it approves and removes `NEEDS COLD REVIEW`.
+3. **Only after approval, return to the existing slice-3 orchestrator** for the
+   implementation-alignment brief against the accepted ADR-0004 contract.
+   `slice/3` remains fixed at
+   `7ceea14e39a7c831edfc803632d3c868ea0f3091` until that alignment work begins.
