@@ -14,7 +14,9 @@ memory of a conversation.
   canonical resolver SHA-256 helper and executable R3; and ADR-0001 §13 Gate 1,
   where the real `de_core_news_md` 3.8.0 probe under spaCy 3.8.15 observed
   `dep=svp` and confirmed the existing `SVP_DEP = "svp"` needed no resolver edit.
-  `main` is at `063a733f0e07d857e820870ac8a4b79989cf3c32`.
+  slice-2 closure left `main` at `063a733f0e07d857e820870ac8a4b79989cf3c32`; this
+  session's documentation commits sit directly on top of it and are pushed. The
+  live `main` HEAD is deliberately not restated here — read it from the repository.
 * **slice-3 implementation ACCEPTED but NOT merged and NOT closed.** Branch
   `slice/3` at `7ceea14e39a7c831edfc803632d3c868ea0f3091`, pushed to
   `origin/slice/3`, accepted on **Attempt 1**, report-only, `Risk: none` (so
@@ -51,9 +53,10 @@ memory of a conversation.
 
 ## Gate
 
-* `make gate` — **PASS on `main` at `063a733f0e07d857e820870ac8a4b79989cf3c32`**,
-  re-run fresh by a read-only preflight worker on 2026-08-19 during this
-  governance session:
+* `make gate` — **PASS**. Measured fresh on `main` at
+  `063a733f0e07d857e820870ac8a4b79989cf3c32` by a read-only preflight worker on
+  2026-08-19, and re-run after this session's documentation commits with
+  identical numbers (the commits are documentation-only):
   `.venv/bin/ruff check .` — all checks passed;
   `.venv/bin/mypy --strict .` — success, no issues in **10 source files**;
   `.venv/bin/pytest -q` — **80 passed** in 5.91s;
