@@ -18,14 +18,22 @@ Decision is REMEDY_REQUIRED (85% <= 94.50% < 95%).
 No remedy implemented. Awaiting the single separately orchestrated splitter/fuzzy remedy amendment.
 
 ### Gate-2 remedy/rerun
-Not applicable unless baseline is 85–<95 and an explicit orchestrator remedy amendment is later issued.
-Awaiting the single separately orchestrated splitter/fuzzy remedy amendment under slice-4.
+One-time authorized lexical coverage remedy completed.
+Rerun command executed with `--lexical-split-remedy`.
+Total: 200
+Hits: 198
+Misses: 2
+Coverage ratio: 0.99
+Display coverage: 99.00%
+Raw CLI decision: CONTINUE
+Final post-remedy Gate-2 disposition: CONTINUE
 
 ### Stop-and-ask
 None.
 
 ### Work left undone
-Baseline Gate-2 coverage measurement is complete. Awaiting orchestrator remedy amendment for the single authorized Gate-2 remedy/rerun cycle.
+None. One-time Gate-2 remedy cycle is complete and Gate 2 has reached its final accepted decision point (CONTINUE).
+
 
 ## DESIGN RESET SUMMARY
 
@@ -123,3 +131,93 @@ am Wochenende
 diese Woche
 nächste Woche
 ```
+
+## ONE-TIME GATE-2 REMEDY / RERUN
+
+### Remedy authorization
+
+- amendment HEAD: `1eab518ba779576b3e9486855c32d8bdfdcfbb1a`
+- baseline: 189 / 200 = 94.50%
+- baseline Decision: `REMEDY_REQUIRED`
+- remedy cycles before rerun: 1
+- remedy cycles after rerun: 0
+
+### Remedy contract
+
+- Opt-in `--lexical-split-remedy` flag (default `False`). Without the flag, baseline behavior is strictly preserved.
+- Complete-term resolver execution happens first (`resolve_word(term, dictionary, gender=gender_hint)`). If whole-term resolves or derives as compound, it is counted as a hit immediately.
+- Lexical splitting occurs only when `--lexical-split-remedy` is enabled and whole-term resolution missed.
+- Splitting is performed strictly on Unicode whitespace runs or literal ASCII hyphen runs (`r"(?:\s+|-+)"`).
+- Empty fragments are discarded; at least two non-empty lexical pieces are required.
+- Each piece is resolved independently through canonical `resolve_word(piece, dictionary)` with no gender hint propagated.
+- A lexical piece succeeds iff any returned ref has status `resolved` or `derived_compound`.
+- The original textbook entry is counted as a hit iff EVERY lexical piece succeeds.
+- No fuzzy matching, stemming, translation, spell-correction, manual lowercasing, or article dropping is performed.
+- No modifications were made to `app/resolve.py`, `app/dictionary.py`, or Stage-01 build logic.
+
+### Rerun evidence
+
+Command executed:
+```
+python tools/gate2_coverage.py \
+  --dictionary build/gate2/stage01.sqlite \
+  --words "$GATE2_WORDS_FILE" \
+  --misses-out build/gate2/gate2-remedy-misses.txt \
+  --lexical-split-remedy
+```
+
+Artifacts and inputs:
+- Stage-01 asset: `build/gate2/stage01.sqlite` (reused preserved asset, not rebuilt)
+- Stage-01 SHA-256: `06c98d098691f7cdfff7d87d11d802fee2b73933f4e7e3e9e332a95aca997547`
+- Word list SHA-256: `2f2c35ea5ebb19ad4a69c19d5505836bb603453b73086c6902753d5786282924`
+
+Raw CLI output JSON:
+```json
+{
+  "total": 200,
+  "hits": 198,
+  "misses": 2,
+  "coverage_ratio": 0.99,
+  "display_percentage": "99.00%",
+  "display_coverage": "99.00%",
+  "misses_output": "build/gate2/gate2-remedy-misses.txt",
+  "misses_output_path": "build/gate2/gate2-remedy-misses.txt",
+  "decision": "CONTINUE"
+}
+```
+
+Integer threshold evaluation:
+- `100 * hits = 19800`
+- `95 * total = 19000`
+- `19800 >= 19000` -> `CONTINUE`
+
+Raw CLI decision: `CONTINUE`
+Final post-remedy Gate-2 disposition: `CONTINUE`
+
+Exact complete remedy misses list (2 entries preserved in `build/gate2/gate2-remedy-misses.txt`):
+```
+hundertundeins
+das Nebenfach
+```
+
+### Delta
+
+- Baseline hits: 189
+- Rerun hits: 198
+- Recovered hits: +9 (Bis morgen, Bis nächste Woche, Bis Samstag, der PIN-Code, während der Woche, jede Woche, am Wochenende, diese Woche, nächste Woche)
+- Baseline misses: 11
+- Rerun misses: 2
+- Coverage delta: +4.50% (94.50% -> 99.00%)
+
+### Validation
+
+- Targeted Gate-2 test count: 37 passed (`tests/test_gate2_coverage.py`)
+- Stage-01 test count: 46 passed (`tests/test_build_dict_stage01.py`)
+- Final make-gate pytest count: 166 passed
+- Direct-script subprocess remedy test: PASS (`test_gate2_coverage_direct_script_subprocess_remedy_flag`)
+- PYTHONPATH required: no
+- Stage-01 rebuild: none (preserved asset reused and verified)
+- App modification: none (`app/` untouched)
+
+There is no second Gate-2 remedy cycle.
+Gate 2 is ADR-0002 §6 order 5 and is not the WORKFLOW §5 retry ladder.
