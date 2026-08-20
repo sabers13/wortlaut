@@ -591,3 +591,380 @@ None or exact condition.
 ```
 
 Populate only from executable evidence.
+
+## T3-ceiling design reset — resolver containment and Stage-02 lookup parity
+
+### Ceiling result
+
+The original slice-5 implementation ladder exhausted:
+
+- Attempt 1: T2 Failure 1 — infrastructure interruption during the real
+  Stage-02 cache MISS.
+- Attempt 2: T2 Failure 2 — systemd-oomd killed the real cache-MISS tmux
+  execution scope.
+- Attempt 3: T3 worker-reported PASS, subsequently rejected during orchestrator
+  report-only acceptance by executable post-pass evidence.
+
+Attempt 3 is therefore the terminal T3 failure for the original ladder.
+
+Per WORKFLOW §5 this is not followed by Attempt 4.
+
+The prior task is classified as misspecified and has returned to design.
+
+The redesigned task is re-dispatched from Design-reset Attempt 1 with a new
+attempt ladder. The original three attempts remain permanently recorded and are
+not renumbered or absorbed.
+
+### What succeeded before the design reset
+
+Attempt 3 successfully established the bounded-memory real-data execution path.
+
+Its real Stage-02 run completed:
+
+- real cache MISS: PASS;
+- exact-key cache HIT: PASS;
+- MISS/HIT cache key equality: PASS;
+- both SQLite `PRAGMA quick_check`: `ok`;
+- targeted Stage-02 tests: 50 passed;
+- Stage-01 regression tests: 46 passed;
+- full `make gate`: 216 passed;
+- AGENTS R3: PASS;
+- `git diff --check`: PASS.
+
+The original real-data evidence was:
+
+- Stage-01 SHA-256:
+  `06c98d098691f7cdfff7d87d11d802fee2b73933f4e7e3e9e332a95aca997547`
+- German projection SHA-256:
+  `093c75b568e6bc10b637a903c2e253e54670144ad25ab527490fb1278f08744c`
+- English projection SHA-256:
+  `9ed0e241964b6ab28b1961192fc014eac9ba12dc851462a8264dce276246f139`
+- DE→EN links SHA-256:
+  `4ce5d9123141d3c93ef6c104ef498198067d594028d81446cc47712074ca0d97`
+- export:
+  `Tatoeba weekly export 2026-08-15`
+- license:
+  `CC BY 2.0 FR`
+- resolver SHA-256:
+  `b09ee526951fdd28bfcfffbe3f43253c21e627e731e66d1daffeb3ca34fddc2d`
+- spaCy model:
+  `de_core_news_md`
+- real acceptance `n_process`:
+  `1`
+- CLI default `n_process`:
+  `8`
+- original cache key:
+  `stage02:v1:0be1d3165dfe261b2c5706226948990b62030aa1b86c424e3e3c76cca747ef57`
+- output SHA-256:
+  `070cb12a0461f70266ca1414e257e66d656cafce80c62aea8fb7a54e6dd27316`
+- output bytes:
+  `4830187520`
+- persisted examples:
+  `777657`
+- examples with English:
+  `494939`
+- examples without English:
+  `282718`
+- example_lemma rows:
+  `296004868`
+- distinct indexed lemmas:
+  `112759`
+- incomplete attribution:
+  `0`
+- orphan associations:
+  `0`.
+
+These successful execution facts remain historical evidence. They do NOT make
+the Stage-02 asset acceptable after the post-pass semantic failure below.
+
+### Post-pass acceptance failure
+
+A read-only orchestrator acceptance probe against the completed Attempt-3 MISS
+asset found:
+
+- Tatoeba examples: `777657`;
+- token-count sum: `7293617`;
+- average token count: `9.378964`;
+- maximum token count: `255`;
+- example_lemma rows: `296004868`;
+- distinct indexed lemmas: `112759`;
+- associations/example: `380.636795`;
+- associations/token: `40.584098`.
+
+A deterministic first/middle/last sample of 90 examples then produced:
+
+- canonical unique lemma IDs mean: `517.344444`;
+- canonical unique lemma IDs median: `12`;
+- canonical unique lemma IDs maximum: `15186`;
+- missing expected canonical associations: `94`;
+- unexpected cross-sentence foreign hits: `0`;
+- exact sampled persisted-association mismatches: `55 / 90`.
+
+The absence of cross-sentence foreign hits rules out simple batch-to-batch
+association leakage, but the persisted Stage-02 index is not behaviorally equal
+to the canonical resolver result.
+
+### Forensic result
+
+A second read-only forensic probe established:
+
+- Stage-01 `PRAGMA quick_check`: `ok`;
+- Stage-02 `PRAGMA quick_check`: `ok`;
+- duplicate Stage-01 `(lemma, pos, gender)` groups: `0`;
+- duplicate Stage-01 `semantic_ref` groups: `0`;
+- sampled cases with missing canonical expected associations: `55`.
+
+Therefore the failure is NOT caused by duplicate canonical Stage-01 lemma
+identity.
+
+Observed canonical resolver fan-out included:
+
+1. Sentence:
+   `Was ist das?`
+
+   The punctuation token `?`, spaCy POS `PUNCT`, resolved to 28 numeric lemma
+   IDs spanning unrelated nouns/proper nouns.
+
+2. Sentence:
+   `Die Großeltern haben Geschenke für ihre Enkelkinder mitgebracht.`
+
+   Token `haben`, spaCy POS `AUX`, resolved to `15168` numeric lemma IDs,
+   spanning suffix entries, multi-word verb phrases, and unrelated entries.
+
+3. Stage-02/live-resolver parity mismatches included canonical IDs such as:
+
+   - `Ihr`, POS `DET`;
+   - `Ists`, POS `NOUN`;
+
+   returned by the live canonical resolver but absent from the persisted
+   `example_lemma` association set for sampled sentences.
+
+The evidence supports:
+
+- Stage-01 identity multiplicity: NO;
+- canonical resolver surface-form fan-out: YES;
+- Stage-02 lookup/persistence behavioral mismatch against the canonical runtime
+  resolver: YES.
+
+### Root cause boundary
+
+The existing canonical resolver implementation applies its surface-form POS
+filter only when at least one surface result has the requested POS.
+
+When surface-form matches exist but NONE has the requested POS, the resolver
+retains and returns the entire mismatched surface result set.
+
+That behavior permits a token such as `haben` tagged `AUX` or punctuation tagged
+`PUNCT` to fall through into unrelated surface-form dictionary rows.
+
+This is a canonical resolver implementation defect, not a Stage-01 identity
+collision.
+
+Separately, Stage-02's memory-bounded lookup implementation does not yet have an
+executable behavioral-parity contract proving that, for the same dictionary
+asset, it returns exactly the same lookup results as `app.dictionary.Dictionary`
+to `app.resolve.resolve_token`.
+
+The original slice-5 A4 requirement mandated the canonical resolver but did not
+make that lookup-oracle parity executable. That omission allowed the persisted
+index and live runtime resolver to disagree while the original gate remained
+green.
+
+### Architecture decision
+
+No ADR is reopened.
+
+The accepted architecture remains unchanged:
+
+- `app.resolve` is the one canonical resolver;
+- dictionary knowledge is injected through `LookupProtocol`;
+- `app.dictionary.Dictionary` remains the runtime read-only SQLite
+  implementation;
+- Stage-02 must use the same canonical `resolve_token`;
+- no second resolver is permitted.
+
+The design reset repairs implementation semantics and makes oracle parity
+executable. It does not introduce a new resolution architecture.
+
+### Redesigned task — Phase A: cheap resolver/parity repair
+
+Before ANY new real Stage-02 build, repair and prove resolver semantics using
+small executable tests.
+
+Phase A may modify only:
+
+- `app/resolve.py`
+- `tools/build_dict.py`
+- `tests/test_resolve.py`
+- `tests/test_build_dict_stage02.py`
+- `tasks/slice-5.report.md`
+
+No schema, dependency, ADR, AGENTS, WORKFLOW, runtime API, user DB, Stage-01
+builder, Stage-01 test, or unrelated path may change.
+
+#### A. Strict surface-form POS containment
+
+When `resolve_word(..., pos=P)` receives surface-form matches:
+
+- if `P` is not `None`, only surface-form rows whose dictionary POS equals `P`
+  may be returned from that surface-form step;
+- if zero surface-form rows match `P`, the resolver MUST NOT return rows of
+  another POS merely because they share the surface string;
+- with zero same-POS surface matches, resolution continues to the existing next
+  ladder step/fallback;
+- when `pos=None`, existing unfiltered surface-form behavior remains unchanged.
+
+Add regression tests proving:
+
+- a requested POS with only wrong-POS surface matches does not return those
+  mismatched rows;
+- a mixture of matching and nonmatching POS surface rows returns only the
+  requested POS;
+- punctuation with no `PUNCT` dictionary match cannot acquire unrelated numeric
+  lemma IDs through surface-form fallback;
+- existing exact, separable-verb, compound, and stub regressions remain passing.
+
+Do not invent a second resolver and do not bypass `resolve_token`.
+
+#### B. Stage-02 lookup-oracle parity
+
+The memory-bounded Stage-02 lookup implementation may remain optimized, but for
+the same SQLite asset its resolver-facing behavior MUST be equivalent to
+`app.dictionary.Dictionary`.
+
+Executable tests must prove parity for at least:
+
+- `lookup_exact`;
+- `lookup_surface_form`;
+- `lookup_senses`;
+
+including:
+
+- case-sensitive and case-insensitive lookup cases;
+- two rows whose lemma text differs only by capitalization;
+- requested POS filtering;
+- requested gender filtering where applicable;
+- deterministic ordering;
+- result deduplication;
+- sense ordering.
+
+Also run both lookup implementations through canonical `resolve_token` over the
+same synthetic tokens and require identical numeric lemma-ID sets.
+
+Do not solve parity by importing or copying resolver logic into
+`tools/build_dict.py`.
+
+#### C. Real Stage-01 cheap preflight
+
+Before any real Stage-02 rebuild, use the preserved accepted Stage-01 SQLite
+asset read-only with `de_core_news_md`, `n_process=1`, and canonical
+`resolve_token`.
+
+For the forensic regression sentences above:
+
+- punctuation `?` must not return unrelated numeric dictionary IDs;
+- `haben` tagged `AUX` must not return surface-form rows whose dictionary POS is
+  not `AUX`;
+- Stage-02's lookup adapter and `app.dictionary.Dictionary` must produce
+  identical resolver numeric-ID sets token-by-token.
+
+This is a read-only cheap preflight and is NOT a Stage-02 build.
+
+#### D. Resolver-hash invalidation
+
+Because `app/resolve.py` changes, the canonical resolver SHA-256 MUST change.
+
+The redesigned Stage-02 cache key computed from the same real inputs must
+therefore differ from:
+
+`stage02:v1:0be1d3165dfe261b2c5706226948990b62030aa1b86c424e3e3c76cca747ef57`
+
+Do not manually version-bump merely to force inequality.
+
+The change must arise through the existing canonical
+`tools.resolver_hash.get_resolver_hash` dependency.
+
+### Phase-A verification gate
+
+Before a new real corpus build is authorized, require:
+
+- targeted resolver tests PASS;
+- targeted Stage-02 tests PASS;
+- Stage-01 regression tests PASS unchanged;
+- real Stage-01 forensic preflight PASS;
+- Stage-02/runtime lookup parity PASS;
+- new resolver hash recorded;
+- new real-input cache key recorded and different from the defective key;
+- `git diff --check` PASS;
+- full `make gate` PASS;
+- exact allowlist PASS.
+
+If any Phase-A requirement fails, STOP and return to the slice-5 orchestrator.
+
+DO NOT start a real Stage-02 corpus build in Phase A.
+
+### Redesigned task — Phase B: real rebuild only after orchestrator authorization
+
+A real Stage-02 rebuild is intentionally deferred until the orchestrator accepts
+the complete Phase-A evidence.
+
+Phase B will:
+
+- preserve and reverify the accepted Stage-01 input and Tatoeba projections;
+- use a fresh design-reset run directory and fresh cache;
+- use the repaired canonical resolver;
+- use the parity-proven Stage-02 lookup implementation;
+- perform one required real cache MISS and one exact-key HIT;
+- require logical MISS/HIT equality;
+- rerun the post-pass sentence-local sanity probe before acceptance;
+- record real counts/hashes;
+- replace the defective historical Attempt-3 evidence in the current report
+  with an explicit superseding design-reset result while preserving all original
+  attempt history.
+
+The defective Attempt-3 Stage-02 output is historical evidence, not a candidate
+for reuse as the Phase-B cache or final asset.
+
+### Redesigned attempt routing
+
+The new ladder begins at:
+
+`Design-reset Attempt 1`
+
+Phase-A Model:
+
+`gpt-5.6-terra / T3 / high`
+
+Fallback:
+
+`opus-5 / T3 / high`
+
+Risk:
+
+`none`
+
+Why:
+
+The repair touches the canonical resolver and the Stage-02 resolver-facing
+oracle boundary. Errors can be internally self-consistent while semantically
+wrong, as the exhausted original ladder proved. This is the same core resolver
+boundary originally routed T3 and therefore remains T3 despite the tightened
+tests.
+
+No lower-tier fallback is authorized.
+
+Phase B is not authorized by this design-reset record alone. It requires an
+explicit orchestrator continuation after Phase-A acceptance.
+
+### Storage/evidence rule
+
+Until Phase-A acceptance, do not delete:
+
+- the accepted Stage-01 SQLite asset;
+- the Attempt-3 MISS SQLite used for forensic evidence.
+
+No new real Stage-02 build is authorized in Phase A.
+
+After Phase-A acceptance, the orchestrator may authorize a separate mechanical
+cleanup of redundant failed-run/cache/HIT artifacts before the Phase-B rebuild
+so disk space is recovered without losing required evidence.
