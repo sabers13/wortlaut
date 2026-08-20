@@ -499,3 +499,223 @@ STOP and return exact evidence.
 Do not invent another repair inside the worker.
 
 Gate-2 threshold branches remain unchanged and have still not been reached.
+
+## Failure-3 same-tier retry amendment — canonical-equivalent fallback senses
+
+### Attempt-3 evidence
+
+Attempt 3 was the first T2 implementation attempt after two T1 failures.
+
+The Failure-2 fingerprint:v2 repair progressed the real Stage-01 build beyond
+the Ahnenpasses collision.
+
+The next real-build failure was:
+
+Duplicate sense semantic_ref
+'sense:v1:499f3666879448681186d3242b7569e700ef731408b3be7bfdd5c3a64ab0054b'
+for lemma 'Freimaurer'
+
+Read-only diagnosis proved one English Wiktextract record contained two senses:
+
+Sense 0:
+- glosses = ["Freemason"]
+- tags = ["masculine", "strong"]
+- links = [["Freemason", "Freemason"]]
+
+Sense 1:
+- glosses = ["freemason"]
+- tags = ["masculine", "strong"]
+- links = [["freemason", "freemason"]]
+
+Both currently produce exactly:
+
+fingerprint:v1:acaf6bce09b1e3d64f44e3766fb55f5c176b03cacb9e3bc7f7c6f34dd63b01bc
+
+and therefore the same sense.semantic_ref.
+
+The only raw differences are:
+- capitalization in glosses;
+- capitalization in links.
+
+`links` is deliberately excluded from the accepted A4 fallback projection.
+
+For ordinary fingerprint:v1 fields, A4 intentionally applies casefold and
+cosmetic punctuation/whitespace normalization.
+
+Therefore these two senses are canonical-equivalent under the accepted v1
+identity contract. This is NOT evidence that fingerprint:v1 needs another
+identity expansion.
+
+No Gate-2 coverage measurement occurred.
+
+This is the first T2 implementation failure.
+
+### Retry classification
+
+WORKFLOW §5 requires one same-tier T2 retry before T3 escalation.
+
+Attempt 4:
+
+Model: claude-code / T2 / high
+Fallback: codex / T2 / high
+Risk: none
+
+If Attempt 4 fails as an implementation attempt, that is the second T2 failure
+and the next implementation dispatch escalates to T3.
+
+### Fingerprint contracts remain unchanged
+
+Attempt 4 MUST NOT modify:
+
+- fingerprint:v1 canonicalization;
+- fingerprint:v2 canonicalization;
+- fingerprint:v1/v2 version-selection rules;
+- senseid source-ref behavior;
+- Wikidata source-ref behavior;
+- compute_sense_semantic_ref;
+- lemma.semantic_ref;
+- source_namespace.
+
+The Ahnenpass/Ahnenpaß v2 regression must remain passing.
+
+The final duplicate/ambiguous stable-ref guard remains fail-closed.
+
+### New canonical-duplicate rule
+
+A narrow coalescing rule is permitted ONLY while processing the `senses[]`
+array of one participating English-edition Wiktextract record.
+
+For two raw senses within that SAME source record:
+
+1. Both must resolve through the fallback path.
+   Their source refs must begin with:
+   - `fingerprint:v1:`
+   or
+   - `fingerprint:v2:`
+
+2. Neither may be using:
+   - senseid:
+   - senseids:v1:
+   - wikidata:
+   - wikidata-set:v1:
+
+3. Compute the complete canonical fallback projection bytes using the exact
+   canonicalization/version rules already used to create their fallback refs.
+
+4. If:
+   - fallback version is the same;
+   - canonical projection bytes are byte-for-byte identical;
+   - resulting fallback source_ref is identical;
+
+   then they represent one canonical-equivalent source distinction for Stage-01
+   persistence.
+
+5. Keep the FIRST occurrence in the raw `senses[]` source order.
+
+6. Skip each later canonical-equivalent duplicate from:
+   - sense-row creation;
+   - semantic-ref duplicate checking;
+   - learner-meaning creation.
+
+7. The retained first sense keeps its original source-backed learner-meaning
+   text exactly as accepted Stage-01 currently does.
+
+For the diagnosed Freimaurer source order, this means:
+
+retained meaning:
+  Freemason
+
+later cosmetic duplicate:
+  freemason
+
+is not persisted as a second sense/meaning.
+
+This is deterministic because A6 already treats raw `senses[]` source order as
+normative for retained source senses and learner meanings.
+
+### Critical scope boundary
+
+This coalescing rule applies ONLY to duplicate fallback senses inside the SAME
+participating source record.
+
+Do NOT coalesce duplicate refs across separate source records.
+
+Do NOT coalesce explicit upstream senseid/Wikidata duplicates.
+
+Do NOT coalesce two fallback senses whose canonical projection bytes differ.
+
+Any such duplicate final semantic_ref remains a hard BuildDictError.
+
+Do NOT:
+- add links to the A4 fingerprint;
+- add raw source line number;
+- add sense array index to identity;
+- add collision counters;
+- hash raw JSON;
+- choose a duplicate based on Gate-2 vocabulary;
+- change the textbook inputs;
+- disable duplicate stable-ref validation.
+
+### Required Attempt-4 tests
+
+Attempt 4 must prove:
+
+1. The real-shape Freimaurer record with both senses builds successfully.
+
+2. Exactly ONE persisted Freimaurer sense is produced for those two
+   canonical-equivalent raw senses.
+
+3. Exactly ONE English learner meaning from that pair is persisted.
+
+4. The retained learner meaning is the first raw source text:
+   `Freemason`.
+
+5. The retained source_ref remains the existing expected fingerprint:v1 value;
+   no new fingerprint version is introduced.
+
+6. Repeated fallback senses within one raw record that differ only by accepted
+   v1 cosmetic normalization coalesce.
+
+7. Canonical-equivalent fingerprint:v2 senses within one source record also
+   coalesce if their complete v2 canonical projection bytes are identical.
+
+8. Two fallback senses within one source record whose canonical projection
+   bytes differ do NOT coalesce.
+
+9. Duplicate explicit `senseid` values continue to fail closed.
+
+10. Duplicate explicit Wikidata identity continues to fail closed or preserves
+    the existing fail-closed behavior.
+
+11. A duplicate fallback source_ref appearing across separate source records is
+    NOT silently coalesced; existing global duplicate validation remains
+    authoritative.
+
+12. Ahnenpass vs Ahnenpaß still produces two distinct fingerprint:v2 source
+    refs and two distinct semantic refs.
+
+13. April multi-gender regression remains passing.
+
+14. Existing fingerprint:v1 cosmetic-stability tests remain unchanged and pass.
+
+15. Existing general duplicate-semantic-ref failure test remains; do not weaken
+    or delete it.
+
+### Real-data retry
+
+Attempt 4 reruns the real Stage-01 build exactly once using the same supplied
+Gate-2 inputs.
+
+Do not preprocess or alter those inputs.
+
+If the real build fails again:
+STOP.
+Do not repair further in that worker.
+
+That failure is the second T2 failure and returns to the orchestrator for T3
+escalation.
+
+If the build succeeds, continue to the existing slice-4 Gate-2 baseline
+measurement exactly once.
+
+The 85% / 95% threshold branches remain unchanged.
