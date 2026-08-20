@@ -719,3 +719,263 @@ If the build succeeds, continue to the existing slice-4 Gate-2 baseline
 measurement exactly once.
 
 The 85% / 95% threshold branches remain unchanged.
+
+## Failure-4 T3 escalation amendment — ambiguous upstream sense identifiers
+
+### Attempt-4 evidence
+
+Attempt 4 was the second and final T2 implementation attempt.
+
+The canonical-equivalent fallback-sense repair progressed the real Stage-01
+build beyond the prior Freimaurer collision.
+
+The next real-build failure was:
+
+Duplicate sense semantic_ref
+'sense:v1:01e0eddbab389880247bc574469f9b58e12dc6e647007984845c6c8c95bfc9bc'
+for lemma 'Konjunktion'
+
+The participating English-Wiktionary source record contained two distinct raw
+senses with the same explicit upstream sense identifier:
+
+sense 0:
+- glosses = ["conjunction"]
+- senseid = ["de:grammar"]
+
+sense 1:
+- glosses = ["conjunction", "coordinating conjunction"]
+- tags = ["specifically"]
+- senseid = ["de:grammar"]
+
+The two senses are not canonical-equivalent fallback duplicates.
+
+The upstream value `de:grammar` is therefore ambiguous within this lemma:
+it is present, but it does not uniquely identify one semantic distinction.
+
+No Gate-2 coverage measurement occurred.
+
+Attempt 4 is T2 Failure 2.
+
+### Escalation classification
+
+WORKFLOW §5 requires escalation to T3.
+
+Attempt 5:
+
+Model: gpt-5.6-terra / T3 / high
+Fallback: opus-5 / T3 / high
+Risk: none
+
+Why:
+the next repair affects interpretation of D47 durable source-side semantic
+identity and requires simultaneous reasoning about explicit identifier priority,
+ambiguity scope, fallback stability, source-order independence, the existing
+fingerprint contracts, and cross-version identity.
+
+There is no further T2 implementation attempt.
+
+If Attempt 5 fails as an implementation attempt, WORKFLOW §5 reaches its T3
+ceiling. Do not retry T3. Return to the orchestrator as a design problem.
+
+Why-risk:
+the implementation allowlist remains maintainer-only offline build tooling,
+tests, Gate-2 measurement tooling and report. No schema/migration file,
+auth/security path, externally callable runtime API, destructive user-data
+operation, or existing mutable data artifact is touched. No WORKFLOW §6 risk
+row matches.
+
+### Interpretation of "usable upstream identifier"
+
+The existing identity priority remains:
+
+1. usable senseid / senseids candidate;
+2. usable sense-level Wikidata candidate;
+3. deterministic fallback fingerprint.
+
+The word `usable` is now made executable.
+
+An explicit source identifier is usable for one raw sense ONLY when its
+canonical candidate source_ref is unambiguous within the final Stage-01 lemma
+identity to which that raw sense belongs.
+
+Lemma identity remains exactly:
+
+(word normalized as already specified, canonical_pos, gender)
+
+Do not broaden ambiguity scope across unrelated lemma identities.
+
+The same upstream value may legitimately occur under different lemmas because
+sense.semantic_ref is namespaced by lemma.semantic_ref.
+
+### Required ambiguity algorithm
+
+Source-ref selection for English raw senses must be resolved
+deterministically at lemma-identity scope, not greedily one sense at a time.
+
+For each final lemma identity:
+
+1. Gather all participating English-edition raw senses contributing to that
+   lemma identity before final source-ref assignment.
+
+2. For every raw sense, independently compute its cleaned senseid candidate
+   using the already-accepted normalization and serialization rules.
+
+3. Count each non-empty canonical senseid candidate source_ref across ALL raw
+   English senses for that lemma identity.
+
+4. A senseid candidate occurring exactly once is usable.
+
+5. A senseid candidate occurring more than once is ambiguous.
+
+6. EVERY raw sense carrying that ambiguous candidate must treat senseid as
+   unusable. Do not allow the first occurrence to keep it and only demote later
+   occurrences; that would make identity source-order-dependent.
+
+7. For senses whose senseid candidate is absent or ambiguous, evaluate the
+   Wikidata candidate using the same uniqueness rule at the SAME lemma-identity
+   scope.
+
+8. A Wikidata candidate occurring exactly once among the relevant senses is
+   usable.
+
+9. A Wikidata candidate occurring more than once is ambiguous for every member
+   carrying that candidate.
+
+10. If neither priority yields a usable explicit identifier, use the existing
+    fallback fingerprint algorithm.
+
+This gives the effective priority:
+
+unique senseid
+    -> unique Wikidata
+        -> existing fingerprint:v1 or fingerprint:v2
+
+### Important stability properties
+
+Do NOT create a hybrid source_ref such as:
+- senseid + line number;
+- senseid + source-order index;
+- senseid + collision counter.
+
+Do NOT arbitrarily allow one member of an ambiguous senseid group to keep the
+explicit ID.
+
+Do NOT hash raw JSON.
+
+Do NOT mutate the source JSONL.
+
+Do NOT condition ambiguity resolution on the textbook words.
+
+Do NOT disable final duplicate semantic-ref validation.
+
+Do NOT change:
+- lemma.semantic_ref;
+- compute_sense_semantic_ref;
+- source_namespace;
+- fingerprint:v1 canonicalization;
+- fingerprint:v2 canonicalization;
+- same-record canonical-equivalent fallback coalescing.
+
+The Ahnenpass/Ahnenpaß v2 correction remains binding.
+
+The Freimaurer same-record fallback coalescing correction remains binding.
+
+The April multi-gender correction remains binding.
+
+### Learner-meaning order/cap
+
+Ambiguous-ID demotion changes only source identity selection.
+
+It does NOT by itself merge, reorder or remove distinct raw senses.
+
+Existing A6 source-order and max-three learner-meaning behavior remains
+unchanged after the already-authorized canonical-equivalent fallback dedupe.
+
+For the diagnosed Konjunktion record, both raw senses remain distinct because
+their fallback projections differ.
+
+### Required Attempt-5 regressions
+
+Attempt 5 must prove at minimum:
+
+1. A unique senseid still produces exactly the existing:
+   senseid:<identifier>
+   source_ref.
+
+2. Multiple usable IDs within one raw sense still preserve the existing
+   senseids:v1 behavior.
+
+3. Two distinct raw senses in one lemma identity carrying the same canonical
+   senseid candidate mark that candidate ambiguous for BOTH senses.
+
+4. Neither member is allowed to retain the ambiguous explicit source_ref.
+
+5. If those two senses have no usable Wikidata identifier, each falls through
+   independently to its existing fallback fingerprint.
+
+6. The diagnosed Konjunktion shape builds successfully.
+
+7. Konjunktion produces two distinct persisted source senses when both survive
+   the existing learner-meaning cap.
+
+8. Their final source_ref values differ.
+
+9. Their sense.semantic_ref values differ.
+
+10. Their meanings remain source-backed and correctly associated:
+    - conjunction
+    - conjunction / coordinating conjunction according to existing A6 meaning
+      persistence semantics.
+
+11. Ambiguous senseid + one unique usable Wikidata candidate falls through to
+    that Wikidata candidate rather than directly to fallback.
+
+12. A duplicated Wikidata candidate is likewise ambiguous and falls through to
+    fallback for every member carrying it.
+
+13. Ambiguity detection works across separate English raw entry records that
+    merge into the SAME lemma identity, not merely within one JSONL line.
+
+14. The same senseid candidate appearing under two DIFFERENT lemma identities
+    does not make either candidate ambiguous merely because the text is globally
+    reused.
+
+15. Source ordering does not decide which member keeps an ambiguous identifier;
+    reversing contributing raw-record order yields the same resolved identities.
+
+16. Explicit IDs that are unique continue to take priority over fallback.
+
+17. Existing explicit duplicate-ID fail-closed test is superseded only where
+    its old expectation assumed a duplicated source ID was automatically usable.
+    Replace that narrow obsolete expectation with ambiguity-demotion tests.
+
+18. Final duplicate-semantic-ref validation remains tested and fail-closed for
+    any ambiguity that survives the complete identity-resolution procedure.
+
+19. Freimaurer regression remains passing.
+
+20. Ahnenpass/Ahnenpaß regression remains passing.
+
+21. April multi-gender regression remains passing.
+
+22. Existing v1/v2 golden and cosmetic-stability tests remain passing.
+
+### Real-data execution
+
+Attempt 5 reruns the same real Stage-01 build exactly once after targeted tests
+and `make gate` pass.
+
+If the real build fails again for another incompatibility:
+STOP immediately.
+
+Do not repair further in that T3 worker.
+
+That is the WORKFLOW §5 T3 ceiling and returns to design.
+
+If the real build succeeds:
+continue to the existing real Gate-2 baseline measurement exactly once.
+
+Gate-2 threshold behavior remains unchanged:
+- <85 -> GOVERNANCE_REDESIGN_REQUIRED
+- 85..<95 -> REMEDY_REQUIRED
+- >=95 -> CONTINUE
