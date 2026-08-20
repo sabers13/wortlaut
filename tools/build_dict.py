@@ -16,6 +16,7 @@ import sqlite3
 import sys
 import tempfile
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Sequence
@@ -36,6 +37,14 @@ POS_MAP: Final[dict[str, str]] = {
     "conj": "CCONJ",
     "particle": "PART",
     "intj": "INTJ",
+}
+
+GENDER_CANONICAL_ORDER: Final[tuple[str, ...]] = ("der", "die", "das")
+GENDER_ORDER_MAP: Final[dict[str | None, int]] = {
+    None: 0,
+    "der": 1,
+    "die": 2,
+    "das": 3,
 }
 
 STAGE01_SCHEMA_SQL: Final[str] = """
@@ -149,26 +158,45 @@ def compute_lemma_semantic_ref(word: str, pos: str, gender: str | None) -> str:
     return f"lemma:v1:{hashlib.sha256(payload).hexdigest()}"
 
 
+LINKAGE_FIELDS: Final[frozenset[str]] = frozenset({
+    "form_of",
+    "alt_of",
+    "compound_of",
+    "taxonomic",
+})
+
+
 def canonicalize_string_projection(s: str) -> str | None:
-    """Canonicalize string for sense fallback fingerprint projection."""
+    """Canonicalize string for non-linkage sense fallback fingerprint projection (A4)."""
     s = unicodedata.normalize("NFC", s).casefold()
     s = "".join(" " if unicodedata.category(c).startswith("P") else c for c in s)
     s = " ".join(s.split())
     return s if s else None
 
 
-def canonicalize_projection_value(val: object) -> object:
+def canonicalize_string_linkage(s: str) -> str | None:
+    """Canonicalize string for identity-bearing linkage fields (Failure-2 amendment / v2)."""
+    s = unicodedata.normalize("NFC", s)
+    s = " ".join(s.split())
+    return s if s else None
+
+
+def canonicalize_projection_value(val: object, is_linkage: bool = False) -> object:
     """Canonicalize any value (string, list, dict, scalar) for fallback fingerprint."""
     if val is None:
         return None
     if isinstance(val, str):
-        return canonicalize_string_projection(val)
+        return (
+            canonicalize_string_linkage(val)
+            if is_linkage
+            else canonicalize_string_projection(val)
+        )
     if isinstance(val, (int, float, bool)):
         return val
     if isinstance(val, list):
         canon_items: list[Any] = []
         for item in val:
-            c = canonicalize_projection_value(item)
+            c = canonicalize_projection_value(item, is_linkage=is_linkage)
             if c is not None:
                 canon_items.append(c)
         if not canon_items:
@@ -188,79 +216,190 @@ def canonicalize_projection_value(val: object) -> object:
         for k in sorted(val.keys()):
             if not isinstance(k, str):
                 continue
-            c_val = canonicalize_projection_value(val[k])
+            c_val = canonicalize_projection_value(val[k], is_linkage=is_linkage)
             if c_val is not None:
                 canon_dict[k] = c_val
         return canon_dict if canon_dict else None
     return None
 
 
-def compute_sense_fallback_ref(raw_sense: dict[str, Any]) -> str:
-    """Compute cosmetic-stable fallback sense source_ref fingerprint (A4)."""
+def compute_sense_fallback_projection_payload(
+    raw_sense: dict[str, Any],
+) -> tuple[str, bytes]:
+    """Compute fallback version and canonical projection UTF-8 payload bytes."""
     projection: dict[str, Any] = {}
+    has_surviving_linkage = False
     for f in INCLUDED_SENSE_DISTINCTION_FIELDS:
         if f in raw_sense and raw_sense[f] is not None:
-            c = canonicalize_projection_value(raw_sense[f])
+            is_linkage = f in LINKAGE_FIELDS
+            c = canonicalize_projection_value(raw_sense[f], is_linkage=is_linkage)
             if c is not None:
                 projection[f] = c
+                if is_linkage:
+                    has_surviving_linkage = True
     payload = json.dumps(
         projection, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
-    return f"fingerprint:v1:{hashlib.sha256(payload).hexdigest()}"
+    version = "v2" if has_surviving_linkage else "v1"
+    return version, payload
 
 
-def compute_sense_source_ref(raw_sense: dict[str, Any]) -> str:
-    """Compute stable sense source_ref from senseid, wikidata, or fallback fingerprint (A4)."""
-    # 1. Prefer usable upstream senseid values
+def compute_sense_fallback_ref(raw_sense: dict[str, Any]) -> str:
+    """Compute cosmetic-stable fallback sense source_ref fingerprint (A4 / Failure-2 amendment)."""
+    version, payload = compute_sense_fallback_projection_payload(raw_sense)
+    digest = hashlib.sha256(payload).hexdigest()
+    return f"fingerprint:{version}:{digest}"
+
+
+def deduplicate_record_senses(senses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Coalesce same-record canonical-equivalent fallback senses (Failure-3 amendment).
+
+    Preserves the first occurrence in raw source order and skips later canonical-equivalent
+    fallback senses whose canonical projection bytes are identical under the existing
+    fallback fingerprint implementation.
+    Explicit senseid/wikidata senses are never coalesced.
+    """
+    retained: list[dict[str, Any]] = []
+    seen_fallback_keys: set[tuple[str, bytes]] = set()
+
+    for sense in senses:
+        source_ref = compute_sense_source_ref(sense)
+        if source_ref.startswith("fingerprint:v1:") or source_ref.startswith("fingerprint:v2:"):
+            version, payload = compute_sense_fallback_projection_payload(sense)
+            key = (version, payload)
+            if key in seen_fallback_keys:
+                continue
+            seen_fallback_keys.add(key)
+        retained.append(sense)
+
+    return retained
+
+
+def compute_senseid_candidate(raw_sense: dict[str, Any]) -> str | None:
+    """Compute the cleaned senseid candidate source_ref for one raw sense (A4).
+
+    Returns None when the sense has no usable senseid. Multiple usable IDs in
+    one raw sense serialize deterministically as senseids:v1:<sha256>.
+    """
     senseids_raw = raw_sense.get("senseid")
     if senseids_raw is None:
         senseids_raw = raw_sense.get("senseids")
-    if senseids_raw is not None:
-        if isinstance(senseids_raw, str):
-            senseids_list = [senseids_raw]
-        elif isinstance(senseids_raw, list):
-            senseids_list = [s for s in senseids_raw if isinstance(s, str)]
-        else:
-            senseids_list = []
-        clean_senseids: list[str] = []
-        for s in senseids_list:
-            s_norm = unicodedata.normalize("NFC", s).strip()
-            if s_norm and s_norm not in clean_senseids:
-                clean_senseids.append(s_norm)
-        if len(clean_senseids) == 1:
-            return f"senseid:{clean_senseids[0]}"
-        elif len(clean_senseids) > 1:
-            sorted_senseids = sorted(clean_senseids)
-            payload = json.dumps(
-                sorted_senseids, ensure_ascii=False, separators=(",", ":")
-            ).encode("utf-8")
-            return f"senseids:v1:{hashlib.sha256(payload).hexdigest()}"
+    if senseids_raw is None:
+        return None
+    if isinstance(senseids_raw, str):
+        senseids_list = [senseids_raw]
+    elif isinstance(senseids_raw, list):
+        senseids_list = [s for s in senseids_raw if isinstance(s, str)]
+    else:
+        senseids_list = []
+    clean_senseids: list[str] = []
+    for s in senseids_list:
+        s_norm = unicodedata.normalize("NFC", s).strip()
+        if s_norm and s_norm not in clean_senseids:
+            clean_senseids.append(s_norm)
+    if len(clean_senseids) == 1:
+        return f"senseid:{clean_senseids[0]}"
+    if len(clean_senseids) > 1:
+        sorted_senseids = sorted(clean_senseids)
+        payload = json.dumps(
+            sorted_senseids, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        return f"senseids:v1:{hashlib.sha256(payload).hexdigest()}"
+    return None
 
-    # 2. Prefer usable sense-level Wikidata QID(s)
+
+def compute_wikidata_candidate(raw_sense: dict[str, Any]) -> str | None:
+    """Compute the cleaned Wikidata candidate source_ref for one raw sense (A4).
+
+    Returns None when the sense has no usable Wikidata QID. Multiple usable
+    QIDs in one raw sense serialize deterministically as wikidata-set:v1:<sha256>.
+    """
     wikidata_raw = raw_sense.get("wikidata")
-    if wikidata_raw is not None:
-        if isinstance(wikidata_raw, str):
-            qids_list = [wikidata_raw]
-        elif isinstance(wikidata_raw, list):
-            qids_list = [q for q in wikidata_raw if isinstance(q, str)]
-        else:
-            qids_list = []
-        clean_qids: list[str] = []
-        for q in qids_list:
-            q_norm = unicodedata.normalize("NFC", q).strip()
-            if q_norm and q_norm not in clean_qids:
-                clean_qids.append(q_norm)
-        if len(clean_qids) == 1:
-            return f"wikidata:{clean_qids[0]}"
-        elif len(clean_qids) > 1:
-            sorted_qids = sorted(clean_qids)
-            payload = json.dumps(
-                sorted_qids, ensure_ascii=False, separators=(",", ":")
-            ).encode("utf-8")
-            return f"wikidata-set:v1:{hashlib.sha256(payload).hexdigest()}"
+    if wikidata_raw is None:
+        return None
+    if isinstance(wikidata_raw, str):
+        qids_list = [wikidata_raw]
+    elif isinstance(wikidata_raw, list):
+        qids_list = [q for q in wikidata_raw if isinstance(q, str)]
+    else:
+        qids_list = []
+    clean_qids: list[str] = []
+    for q in qids_list:
+        q_norm = unicodedata.normalize("NFC", q).strip()
+        if q_norm and q_norm not in clean_qids:
+            clean_qids.append(q_norm)
+    if len(clean_qids) == 1:
+        return f"wikidata:{clean_qids[0]}"
+    if len(clean_qids) > 1:
+        sorted_qids = sorted(clean_qids)
+        payload = json.dumps(
+            sorted_qids, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        return f"wikidata-set:v1:{hashlib.sha256(payload).hexdigest()}"
+    return None
 
-    # 3. Fallback canonical fingerprint
+
+def compute_sense_source_ref(raw_sense: dict[str, Any]) -> str:
+    """Compute the single-sense source_ref using the A4 priority ladder.
+
+    This greedy helper remains the reference for same-record fallback dedupe
+    routing (Failure-3) and for isolated lookups. Final lemma-identity
+    source_ref assignment uses resolve_sense_source_refs (Failure-4), which
+    demotes explicit identifiers that are ambiguous within the lemma identity.
+    """
+    senseid_candidate = compute_senseid_candidate(raw_sense)
+    if senseid_candidate is not None:
+        return senseid_candidate
+    wikidata_candidate = compute_wikidata_candidate(raw_sense)
+    if wikidata_candidate is not None:
+        return wikidata_candidate
     return compute_sense_fallback_ref(raw_sense)
+
+
+def resolve_sense_source_refs(raw_senses: Sequence[dict[str, Any]]) -> list[str]:
+    """Resolve source_refs for all raw senses at final lemma-identity scope.
+
+    Failure-4 amendment: an explicit upstream identifier (senseid, then
+    Wikidata) is usable for a raw sense only when its canonical candidate ref
+    is unambiguous within the lemma identity. Resolution is set/count based,
+    so the outcome does not depend on source record order.
+
+    Effective priority: unique senseid -> unique Wikidata -> fallback fingerprint.
+    """
+    senseid_candidates = [compute_senseid_candidate(s) for s in raw_senses]
+    wikidata_candidates = [compute_wikidata_candidate(s) for s in raw_senses]
+
+    senseid_counts: Counter[str] = Counter(
+        c for c in senseid_candidates if c is not None
+    )
+
+    resolved: list[str | None] = [None] * len(raw_senses)
+
+    # Senseid pass: a candidate occurring exactly once is usable.
+    for i, candidate in enumerate(senseid_candidates):
+        if candidate is not None and senseid_counts[candidate] == 1:
+            resolved[i] = candidate
+
+    # Wikidata pass: only senses without a unique usable senseid participate.
+    wikidata_stage = [i for i in range(len(raw_senses)) if resolved[i] is None]
+    wikidata_counts: Counter[str] = Counter()
+    for i in wikidata_stage:
+        candidate = wikidata_candidates[i]
+        if candidate is not None:
+            wikidata_counts[candidate] += 1
+    for i in wikidata_stage:
+        candidate = wikidata_candidates[i]
+        if candidate is not None and wikidata_counts[candidate] == 1:
+            resolved[i] = candidate
+
+    # Fallback pass.
+    final_refs: list[str] = []
+    for i, ref in enumerate(resolved):
+        if ref is None:
+            final_refs.append(compute_sense_fallback_ref(raw_senses[i]))
+        else:
+            final_refs.append(ref)
+    return final_refs
 
 
 def compute_sense_semantic_ref(
@@ -421,15 +560,14 @@ def process_jsonl_file(
 
             # Participating record: validate participating fields (C8)
             # 1. Tags and Gender / Plural-none
-            gender: str | None = None
             has_no_plural_tag = False
+            found_genders: set[str] = set()
             if "tags" in record and record["tags"] is not None:
                 tags = record["tags"]
                 _validate_type(tags, list, "tags", file_path, line_no)
                 for tag in tags:
                     _validate_type(tag, str, "tags[]", file_path, line_no)
 
-                found_genders: set[str] = set()
                 if "masculine" in tags:
                     found_genders.add("der")
                 if "feminine" in tags:
@@ -437,39 +575,45 @@ def process_jsonl_file(
                 if "neuter" in tags:
                     found_genders.add("das")
 
-                if len(found_genders) > 1:
-                    raise BuildDictError(
-                        f"Conflicting gender tags {sorted(found_genders)} for '{word}' in "
-                        f"{file_path}:{line_no}"
-                    )
-                if found_genders:
-                    gender = next(iter(found_genders))
-
                 if "no-plural" in tags:
                     has_no_plural_tag = True
 
-            canonical_pos = canonicalize_pos(pos)
-            lemma_key = (word, canonical_pos, gender)
+            target_genders: list[str | None]
+            if found_genders:
+                target_genders = [g for g in GENDER_CANONICAL_ORDER if g in found_genders]
+            else:
+                target_genders = [None]
 
-            if lemma_key not in accumulators:
-                accumulators[lemma_key] = LemmaAccumulator(
-                    word=word, pos=canonical_pos, gender=gender
-                )
-            acc = accumulators[lemma_key]
-            if has_no_plural_tag:
-                acc.plural_none = True
+            canonical_pos = canonicalize_pos(pos)
+            target_accs: list[LemmaAccumulator] = []
+            for g in target_genders:
+                lemma_key = (word, canonical_pos, g)
+                if lemma_key not in accumulators:
+                    accumulators[lemma_key] = LemmaAccumulator(
+                        word=word, pos=canonical_pos, gender=g
+                    )
+                acc = accumulators[lemma_key]
+                if has_no_plural_tag:
+                    acc.plural_none = True
+                target_accs.append(acc)
 
             # 2. Sounds and IPA
             if "sounds" in record and record["sounds"] is not None:
                 sounds = record["sounds"]
                 _validate_type(sounds, list, "sounds", file_path, line_no)
+                first_ipa: str | None = None
                 for sound in sounds:
                     _validate_type(sound, dict, "sounds[]", file_path, line_no)
                     if "ipa" in sound and sound["ipa"] is not None:
                         ipa_val = sound["ipa"]
                         _validate_type(ipa_val, str, "sounds[].ipa", file_path, line_no)
-                        if ipa_val.strip() and acc.ipa is None:
-                            acc.ipa = ipa_val.strip()
+                        if ipa_val.strip() and first_ipa is None:
+                            first_ipa = ipa_val.strip()
+
+                if first_ipa is not None:
+                    for acc in target_accs:
+                        if acc.ipa is None:
+                            acc.ipa = first_ipa
                             acc.ipa_source = "wiktionary"
 
             # 3. Senses (owned by English edition, C5)
@@ -478,13 +622,17 @@ def process_jsonl_file(
                 _validate_type(senses, list, "senses", file_path, line_no)
                 for sense in senses:
                     _validate_type(sense, dict, "senses[]", file_path, line_no)
-                    if is_en_edition:
-                        acc.raw_senses_en.append(sense)
+                if is_en_edition:
+                    deduped_senses = deduplicate_record_senses(senses)
+                    for acc in target_accs:
+                        for sense in deduped_senses:
+                            acc.raw_senses_en.append(dict(sense))
 
             # 4. Forms (Surface forms and Form-derived fields, C6 & C7)
             if "forms" in record and record["forms"] is not None:
                 forms = record["forms"]
                 _validate_type(forms, list, "forms", file_path, line_no)
+                parsed_forms: list[tuple[str, set[str]]] = []
                 for form_item in forms:
                     _validate_type(form_item, dict, "forms[]", file_path, line_no)
                     form_str = form_item.get("form")
@@ -501,33 +649,37 @@ def process_jsonl_file(
                         clean_form = form_str.strip()
                         if clean_form and clean_form != "-":
                             clean_form = unicodedata.normalize("NFC", clean_form)
-                            if clean_form != word:
-                                acc.surface_forms.add(clean_form)
-
                             tags_set = set(form_tags) if form_tags is not None else set()
-                            if "plural" in tags_set:
-                                acc.plural_candidates.add(clean_form)
-                            if "genitive" in tags_set and "singular" in tags_set:
-                                acc.genitive_sg_candidates.add(clean_form)
-                            if (
-                                "present" in tags_set
-                                and "third-person" in tags_set
-                                and "singular" in tags_set
-                            ):
-                                acc.praesens_3sg_candidates.add(clean_form)
-                            if (
-                                "past" in tags_set
-                                and "third-person" in tags_set
-                                and "singular" in tags_set
-                                and "participle" not in tags_set
-                            ):
-                                acc.praeteritum_3sg_candidates.add(clean_form)
-                            if "past" in tags_set and "participle" in tags_set:
-                                acc.partizip_ii_candidates.add(clean_form)
-                            if "comparative" in tags_set:
-                                acc.comparative_candidates.add(clean_form)
-                            if "superlative" in tags_set:
-                                acc.superlative_candidates.add(clean_form)
+                            parsed_forms.append((clean_form, tags_set))
+
+                for clean_form, tags_set in parsed_forms:
+                    for acc in target_accs:
+                        if clean_form != word:
+                            acc.surface_forms.add(clean_form)
+
+                        if "plural" in tags_set:
+                            acc.plural_candidates.add(clean_form)
+                        if "genitive" in tags_set and "singular" in tags_set:
+                            acc.genitive_sg_candidates.add(clean_form)
+                        if (
+                            "present" in tags_set
+                            and "third-person" in tags_set
+                            and "singular" in tags_set
+                        ):
+                            acc.praesens_3sg_candidates.add(clean_form)
+                        if (
+                            "past" in tags_set
+                            and "third-person" in tags_set
+                            and "singular" in tags_set
+                            and "participle" not in tags_set
+                        ):
+                            acc.praeteritum_3sg_candidates.add(clean_form)
+                        if "past" in tags_set and "participle" in tags_set:
+                            acc.partizip_ii_candidates.add(clean_form)
+                        if "comparative" in tags_set:
+                            acc.comparative_candidates.add(clean_form)
+                        if "superlative" in tags_set:
+                            acc.superlative_candidates.add(clean_form)
 
 
 def build_stage01(
@@ -549,7 +701,10 @@ def build_stage01(
     process_jsonl_file(de_path, is_en_edition=False, accumulators=accumulators)
 
     # Sort lemma identities deterministically before assigning IDs (C4)
-    sorted_keys = sorted(accumulators.keys(), key=lambda k: (k[0], k[1], k[2] or ""))
+    sorted_keys = sorted(
+        accumulators.keys(),
+        key=lambda k: (k[0], k[1], GENDER_ORDER_MAP.get(k[2], 99), k[2] or ""),
+    )
 
     # Prepare temporary sibling file for fail-closed atomic publish (C1 & C8)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -675,11 +830,16 @@ def build_stage01(
                     )
 
                 # Senses and English localized meanings (A6 / A7)
-                retained_senses: list[tuple[dict[str, Any], list[str]]] = []
+                # Resolve source_refs at final lemma-identity scope BEFORE the
+                # A6 learner-meaning cap so identifier ambiguity is set/count
+                # based over every participating raw sense (Failure-4).
+                resolved_source_refs = resolve_sense_source_refs(acc.raw_senses_en)
+
+                retained_senses: list[tuple[dict[str, Any], list[str], str]] = []
                 total_en_meanings = 0
                 seen_gloss_texts: set[str] = set()
 
-                for raw_sense in acc.raw_senses_en:
+                for raw_sense, source_ref in zip(acc.raw_senses_en, resolved_source_refs):
                     retained_glosses_for_this_sense: list[str] = []
                     if "glosses" in raw_sense and raw_sense["glosses"] is not None:
                         for g in raw_sense["glosses"]:
@@ -693,12 +853,11 @@ def build_stage01(
 
                     if retained_glosses_for_this_sense:
                         retained_senses.append(
-                            (raw_sense, retained_glosses_for_this_sense)
+                            (raw_sense, retained_glosses_for_this_sense, source_ref)
                         )
 
-                for ord_idx, (raw_sense, gloss_list) in enumerate(retained_senses):
+                for ord_idx, (raw_sense, gloss_list, source_ref) in enumerate(retained_senses):
                     source_namespace = "wiktextract:enwiktionary"
-                    source_ref = compute_sense_source_ref(raw_sense)
                     sense_semantic_ref = compute_sense_semantic_ref(
                         lemma_semantic_ref, source_namespace, source_ref
                     )
