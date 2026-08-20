@@ -260,3 +260,242 @@ Do not condition any preprocessing on the 200-word textbook list.
 
 If another real-data incompatibility appears, STOP and return it as Failure 2.
 Do not self-retry.
+
+## Failure-2 escalation amendment — fallback sense identity collision
+
+### Attempt-2 evidence
+
+Attempt 2 was the same-tier Failure-1 retry.
+
+The multi-gender repair passed its executable tests and allowed the real
+Stage-01 build to progress beyond the Attempt-1 `April` failure.
+
+The real Stage-01 build then stopped before Gate-2 measurement with:
+
+Duplicate sense semantic_ref
+'sense:v1:e7b80a9fedccd6026102882cf06798f838d9654bcf85624489104b69fc726059'
+for lemma 'Ahnenpasses'
+
+The participating English-edition Wiktextract record contained two distinct
+raw senses:
+
+1. genitive singular of `Ahnenpass`
+   form_of word = `Ahnenpass`
+
+2. genitive singular of `Ahnenpaß`
+   form_of word = `Ahnenpaß`
+
+The existing fallback string canonicalization applies Unicode `casefold()`.
+That maps German `ß` to `ss`, causing both distinct linkage spellings to
+collapse to the same canonical `form_of` value and therefore the same fallback
+source_ref and sense.semantic_ref.
+
+No Gate-2 coverage measurement occurred.
+
+This is WORKFLOW §5 Failure 2.
+
+### Escalation
+
+WORKFLOW §5 now requires escalation one tier.
+
+Attempt 3:
+
+Model: claude-code / T2 / high
+Fallback: codex / T2 / high
+Risk: none
+
+There must not be another T1 implementation attempt.
+
+Why:
+the repair remains inside known Stage-01 architecture but now affects durable
+D47 sense identity canonicalization and must preserve existing stable-ref,
+determinism, provenance, and fail-closed semantics simultaneously.
+
+Why-risk:
+the implementation allowlist still touches maintainer-only build tooling,
+tests, the Gate-2 measurement tool, and its report. It touches no schema or
+migration file, auth/security path, public runtime API path, destructive user
+data transform, or existing mutable data artifact. No WORKFLOW §6 risk row
+matches.
+
+### Binding identity repair for Attempt 3
+
+The duplicate/ambiguity guard MUST remain fail-closed.
+
+Do NOT:
+- ignore duplicate semantic refs;
+- discard either source sense;
+- merge the two senses;
+- select one arbitrarily;
+- use source line number as identity;
+- use source list position / sense ordinal as identity;
+- add a collision counter;
+- hash raw JSON bytes;
+- condition identity on the Gate-2 textbook word list.
+
+Those approaches create unstable or order-dependent cross-version identities
+and violate D47.
+
+The upstream source-ref selection priority remains unchanged:
+
+1. usable senseid;
+2. usable sense-level Wikidata;
+3. fallback canonical fingerprint.
+
+`senseid:` and `wikidata:` source-ref behavior is unchanged.
+
+#### Fallback versioning
+
+Preserve the existing `fingerprint:v1:` algorithm unchanged for fallback
+senses whose included projection contains none of these identity-bearing
+linkage fields:
+
+- form_of
+- alt_of
+- compound_of
+- taxonomic
+
+This minimizes unnecessary stable-ref churn for ordinary fallback senses.
+
+When at least one of those identity-bearing linkage fields survives projection,
+use a new deterministic:
+
+`fingerprint:v2:<lowercase 64-char sha256>`
+
+Do NOT rewrite already-defined `fingerprint:v1` semantics.
+
+#### fingerprint:v2 projection fields
+
+Use the same allowed top-level distinction fields as the accepted A4 contract:
+
+- glosses
+- tags
+- topics
+- form_of
+- alt_of
+- compound_of
+- qualifier
+- taxonomic
+
+No new raw-data field is added merely to rescue a collision.
+
+Excluded fields remain excluded as under A4.
+
+#### fingerprint:v2 canonicalization
+
+Container canonicalization remains deterministic:
+
+- dictionary keys sorted lexically;
+- lists canonicalized element-by-element;
+- canonical empties removed;
+- duplicate canonical elements removed;
+- remaining list elements sorted by canonical JSON encoding;
+- final projection serialized using:
+  json.dumps(
+      projection,
+      ensure_ascii=False,
+      sort_keys=True,
+      separators=(",", ":"),
+  )
+- UTF-8;
+- no trailing newline.
+
+For the NON-linkage fields:
+
+- glosses
+- tags
+- topics
+- qualifier
+
+retain the existing A4 cosmetic string normalization:
+
+1. NFC;
+2. casefold();
+3. Unicode punctuation-category characters -> ASCII space;
+4. collapse whitespace;
+5. strip.
+
+For the identity-bearing linkage fields:
+
+- form_of
+- alt_of
+- compound_of
+- taxonomic
+
+canonicalize all contained strings conservatively:
+
+1. NFC;
+2. collapse whitespace runs to one ASCII space;
+3. strip leading/trailing whitespace;
+4. preserve lexical case;
+5. preserve punctuation/code-point spelling;
+6. DO NOT casefold.
+
+This means, for example:
+
+`Ahnenpass` != `Ahnenpaß`
+
+inside `form_of`.
+
+The goal is to preserve source-backed lexical linkage distinctions while still
+making container representation deterministic.
+
+#### Required invariants
+
+- compute_sense_semantic_ref remains unchanged.
+- lemma.semantic_ref remains unchanged.
+- source_namespace remains unchanged.
+- numeric IDs remain local-only.
+- source/license behavior remains unchanged.
+- malformed/ambiguous duplicate refs still fail closed.
+- if two genuinely different source senses STILL produce the same final
+  source_ref under the new contract, the real build must STOP rather than guess.
+
+### Required Attempt-3 tests
+
+Attempt 3 must add executable regression coverage proving:
+
+1. Existing `fingerprint:v1` cosmetic-stability tests remain passing for
+   fallback senses without identity-bearing linkage fields.
+
+2. A fallback sense containing `form_of` uses `fingerprint:v2:`.
+
+3. These two source senses generate different source_ref values:
+
+   {"glosses":["genitive singular of Ahnenpass"],
+    "tags":["form-of","genitive","singular"],
+    "form_of":[{"word":"Ahnenpass"}]}
+
+   {"glosses":["genitive singular of Ahnenpaß"],
+    "tags":["form-of","genitive","singular"],
+    "form_of":[{"word":"Ahnenpaß"}]}
+
+4. Their sense.semantic_ref values are also distinct for the same lemma.
+
+5. A real-shape `Ahnenpasses` record containing both senses builds successfully
+   and persists two distinct senses when both survive the existing learner-
+   meaning cap.
+
+6. Reordering keys/list metadata does not change either v2 ref.
+
+7. NFC-equivalent linkage spelling gives the same v2 ref.
+
+8. Linkage lexical spelling differences are not erased by casefold or
+   punctuation removal.
+
+9. Existing duplicate-ref fail-closed test remains; do not weaken or delete it.
+
+10. Multi-gender regression from Failure 1 remains passing.
+
+### Real-data retry rule
+
+Attempt 3 must rerun the real Stage-01 build using exactly the same owner-supplied
+Gate-2 inputs.
+
+It must not edit or preprocess those local JSONL files.
+
+If another real-data incompatibility occurs:
+STOP and return exact evidence.
+Do not invent another repair inside the worker.
+
+Gate-2 threshold branches remain unchanged and have still not been reached.
