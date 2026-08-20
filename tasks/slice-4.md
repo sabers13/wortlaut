@@ -1217,3 +1217,330 @@ REMEDY_REQUIRED
 CONTINUE
 
 The design reset itself is NOT a Gate-2 threshold result.
+
+## One-time Gate-2 remedy amendment — deterministic lexical-piece coverage
+
+### Baseline evidence
+
+The accepted baseline measurement is:
+
+- total: 200
+- hits: 189
+- misses: 11
+- coverage ratio: 0.945
+- display coverage: 94.50%
+- Decision: REMEDY_REQUIRED
+
+Baseline commit:
+
+2a6183e00d29791fe4ef439e9c5870f358001c84
+
+This is ADR-0002 §6 order-5 Gate-2 branching, not a WORKFLOW §5 failure.
+
+The baseline measurement remains historical and reproducible.
+
+Do not rewrite its result.
+
+### Read-only diagnostic evidence
+
+A read-only diagnostic was run against the exact preserved Stage-01 asset and
+the 11 baseline misses.
+
+It did NOT edit files, implement a remedy, rebuild Stage 01, or rerun the Gate-2
+measurement.
+
+Candidate rule tested:
+
+- first perform the existing whole-entry resolution;
+- only after whole-entry failure, split the already-normalized term on:
+  - one or more Unicode whitespace characters;
+  - one or more literal ASCII hyphens `-`;
+- resolve every resulting non-empty lexical piece independently through
+  canonical `app.resolve.resolve_word`;
+- treat the original entry as covered only if every lexical piece resolves with
+  status `resolved` or `derived_compound`.
+
+The diagnostic recovered exactly these 9 baseline misses:
+
+- Bis morgen
+- Bis nächste Woche
+- Bis Samstag
+- der PIN-Code
+- während der Woche
+- jede Woche
+- am Wochenende
+- diese Woche
+- nächste Woche
+
+It did NOT recover:
+
+- hundertundeins
+- das Nebenfach
+
+Projected result:
+
+- hits: 198
+- misses: 2
+- coverage: 99.00%
+
+A diagnostic variant that dropped standalone German articles recovered no
+additional entries, so article dropping is NOT authorized.
+
+### Authorized remedy
+
+Exactly one remedy is authorized.
+
+The remedy is a deterministic Gate-2 measurement-layer lexical splitter.
+
+It must be OPT-IN.
+
+The existing baseline behavior remains the default.
+
+Add an explicit CLI option:
+
+  --lexical-split-remedy
+
+Without that flag:
+
+- behavior remains exactly the accepted baseline behavior;
+- C3 remains unchanged;
+- no whitespace/hyphen splitting occurs.
+
+With that flag:
+
+1. Apply the existing `normalize_entry(entry)` first.
+
+2. Call the canonical resolver on the complete normalized term first:
+
+   resolve_word(term, dictionary, gender=gender_hint)
+
+3. If the whole term is a hit under the existing definition, the entry is a
+   hit immediately.
+
+4. Only if whole-term resolution is a miss, split `term` using exactly:
+
+   one-or-more Unicode whitespace OR
+   one-or-more literal ASCII `-`
+
+5. Preserve lexical piece text/case otherwise.
+
+6. Discard empty split fragments.
+
+7. The lexical remedy is eligible only when at least TWO non-empty pieces
+   result.
+
+8. Resolve each piece independently with:
+
+   resolve_word(piece, dictionary)
+
+   No gender hint is propagated from the original phrase to lexical pieces.
+
+9. A piece is successful only if at least one returned ref has status:
+
+   - resolved
+   - derived_compound
+
+10. The ORIGINAL textbook entry becomes a remedy hit only if EVERY lexical
+    piece succeeds.
+
+11. If any lexical piece misses, the original textbook entry remains a miss.
+
+### Critical boundaries
+
+Do NOT:
+
+- fuzzy-match;
+- stem;
+- spell-correct;
+- translate;
+- lowercase manually;
+- strip arbitrary punctuation;
+- split slash, apostrophe, dot, comma, underscore, colon, semicolon, Unicode
+  dash variants, or any delimiter other than whitespace and ASCII `-`;
+- drop articles;
+- drop prepositions;
+- ignore unresolved pieces;
+- use direct dictionary lookup instead of `resolve_word`;
+- modify `app/resolve.py`;
+- modify `app/dictionary.py`;
+- modify Stage-01;
+- special-case any of the 11 textbook entries;
+- add vocabulary-specific rules.
+
+This is lexical coverage of a textbook expression, NOT construction of a D46
+compound identity.
+
+The runtime resolver remains unchanged.
+
+### Why opt-in is mandatory
+
+The baseline command and baseline result must remain reproducible.
+
+Therefore the new splitter must not silently become default Gate-2 semantics.
+
+The remedy rerun command will explicitly supply:
+
+  --lexical-split-remedy
+
+### Remedy implementation allowlist
+
+The remedy implementation worker may modify only:
+
+- tools/gate2_coverage.py
+- tests/test_gate2_coverage.py
+- tasks/slice-4.report.md
+
+No `app/` file is allowed.
+
+No dictionary-build file is allowed.
+
+No schema/dependency/governance file is allowed.
+
+### Risk
+
+Risk: none
+
+Why-risk:
+
+The remedy modifies only a maintainer-only measurement CLI, its tests, and its
+report. It does not touch schema/migration files, authentication/security,
+externally callable runtime APIs, destructive transforms, user data, or the
+persistent Stage-01 asset.
+
+### Remedy routing
+
+Model:
+
+gemini-flash / T1 / low
+
+Fallback:
+
+codex-low / T1 / low
+
+Why:
+
+The remedy is now fully specified, mechanically testable, tightly allowlisted,
+opt-in, and its expected real-data effect has already been measured read-only.
+
+This is the ONE Gate-2 remedy implementation/rerun cycle.
+
+It is not a WORKFLOW §5 retry of the baseline implementation.
+
+If implementation of this specified remedy fails, normal WORKFLOW §5 rules
+apply to the remedy implementation task itself.
+
+### Required tests
+
+The remedy implementation must prove at minimum:
+
+1. Existing behavior with the flag absent is unchanged.
+
+2. A whole-entry exact/surface/compound hit remains a hit without consulting
+   lexical-piece recovery.
+
+3. A whitespace expression missed as a whole becomes a remedy hit only when
+   all pieces resolve.
+
+4. If one whitespace-separated piece misses, the entire original entry remains
+   a miss.
+
+5. An ASCII-hyphen expression missed as a whole is recoverable when all pieces
+   resolve.
+
+6. A single-token miss is not changed by remedy mode.
+
+7. At least two non-empty pieces are required.
+
+8. Interior articles are NOT dropped.
+
+9. Gender hint from an initial baseline article is not propagated to pieces.
+
+10. Piece success accepts `resolved`.
+
+11. Piece success accepts `derived_compound`.
+
+12. A `needs_gloss` piece causes the original entry to remain a miss.
+
+13. Other punctuation is not split.
+
+14. Default CLI subprocess behavior remains baseline-compatible.
+
+15. CLI subprocess with `--lexical-split-remedy` works without PYTHONPATH.
+
+16. Threshold arithmetic itself remains unchanged.
+
+### Preserved Stage-01 asset
+
+The real remedy rerun MUST reuse:
+
+build/gate2/stage01.sqlite
+
+Expected SHA-256:
+
+06c98d098691f7cdfff7d87d11d802fee2b73933f4e7e3e9e332a95aca997547
+
+Do NOT rebuild Stage 01.
+
+### One-time rerun
+
+Preserve the baseline misses artifact:
+
+build/gate2/gate2-misses.txt
+
+Do not overwrite or delete it.
+
+The one authorized remedy rerun must use a NEW output:
+
+build/gate2/gate2-remedy-misses.txt
+
+After tests and `make gate` pass, run exactly once:
+
+PATH=.venv/bin:$PATH python tools/gate2_coverage.py \
+  --dictionary build/gate2/stage01.sqlite \
+  --words "$GATE2_WORDS_FILE" \
+  --misses-out build/gate2/gate2-remedy-misses.txt \
+  --lexical-split-remedy
+
+Do not rerun that real remedy measurement.
+
+### Post-remedy Gate-2 decision
+
+This is the sole remedy cycle.
+
+After the rerun:
+
+- result below 85%:
+    GOVERNANCE_REDESIGN_REQUIRED;
+    Stage 02 forbidden.
+
+- result at least 85%:
+    Gate 2 continues after slice acceptance/closure.
+
+There is NO second Gate-2 remedy cycle.
+
+If the normal CLI threshold output is `CONTINUE`, record that directly.
+
+If a hypothetical rerun remained 85–<95, record that the one remedy cycle has
+been exhausted and Gate 2 nevertheless continues under the post-remedy
+ADR-0002/C10 rule; do not dispatch another remedy.
+
+### Report requirement
+
+Do not replace the baseline report.
+
+Append a clearly separated remedy/rerun section recording:
+
+- exact remedy contract;
+- exact rerun command;
+- Stage-01 SHA;
+- rerun total;
+- rerun hits;
+- rerun misses;
+- rerun ratio;
+- display percentage;
+- CLI decision;
+- final post-remedy Gate-2 disposition;
+- exact remedy misses list;
+- baseline vs rerun delta;
+- tests/gate evidence;
+- statement that there is no second remedy cycle.
