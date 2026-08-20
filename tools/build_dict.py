@@ -1026,14 +1026,6 @@ class Stage02LookupOracle(LookupProtocol):
         )
 
     @staticmethod
-    def _sort_key(m: LemmaRecord) -> tuple[int, int, str, int, str, str]:
-        f_flag = 1 if m.freq_rank is None else 0
-        f_val = m.freq_rank if m.freq_rank is not None else 0
-        g_flag = 1 if m.gender is None else 0
-        g_val = m.gender if m.gender is not None else ""
-        return (f_flag, f_val, m.pos, g_flag, g_val, m.semantic_ref or "")
-
-    @staticmethod
     def _record(row: tuple[Any, ...]) -> LemmaRecord:
         return LemmaRecord(
             id=row[0], lemma=row[1], pos=row[2], gender=row[3],
@@ -1042,29 +1034,33 @@ class Stage02LookupOracle(LookupProtocol):
 
     @lru_cache(maxsize=_CACHE_SIZE)
     def _exact_records(self, lemma: str) -> tuple[LemmaRecord, ...]:
-        # `resolve_token` normally supplies spaCy's canonical lemma.  Query its
-        # exact spelling and Python's Unicode lowercase spelling, preserving the
-        # existing oracle's case-insensitive fallback without a full-table scan.
-        candidates = tuple(dict.fromkeys((lemma, lemma.lower())))
-        placeholders = ",".join("?" for _ in candidates)
         rows = self._conn.execute(
             "SELECT id, lemma, pos, gender, semantic_ref, freq_rank FROM lemma "
-            f"WHERE lemma IN ({placeholders})", candidates
+            "WHERE (lemma = ? OR lower(lemma) = ?) "
+            "ORDER BY freq_rank ASC NULLS LAST, pos ASC, gender ASC NULLS LAST, "
+            "semantic_ref ASC",
+            (lemma, lemma.lower()),
         ).fetchall()
-        records = {record.id: record for record in map(self._record, rows)}
-        return tuple(sorted(records.values(), key=self._sort_key))
+        return tuple(map(self._record, rows))
 
     @lru_cache(maxsize=_CACHE_SIZE)
     def _surface_records(self, form: str) -> tuple[LemmaRecord, ...]:
-        candidates = tuple(dict.fromkeys((form, form.lower())))
-        placeholders = ",".join("?" for _ in candidates)
         rows = self._conn.execute(
             "SELECT l.id, l.lemma, l.pos, l.gender, l.semantic_ref, l.freq_rank "
             "FROM surface_form sf JOIN lemma l ON l.id = sf.lemma_id "
-            f"WHERE sf.form IN ({placeholders})", candidates
+            "WHERE (sf.form = ? OR lower(sf.form) = ?) "
+            "ORDER BY l.freq_rank ASC NULLS LAST, l.pos ASC, l.gender ASC NULLS LAST, "
+            "l.semantic_ref ASC",
+            (form, form.lower()),
         ).fetchall()
-        records = {record.id: record for record in map(self._record, rows)}
-        return tuple(sorted(records.values(), key=self._sort_key))
+        seen: set[int | None] = set()
+        records: list[LemmaRecord] = []
+        for row in rows:
+            record = self._record(row)
+            if record.id not in seen:
+                seen.add(record.id)
+                records.append(record)
+        return tuple(records)
 
     def lookup_exact(
         self, lemma: str, pos: str | None = None, gender: str | None = None

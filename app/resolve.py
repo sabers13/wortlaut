@@ -310,9 +310,7 @@ def resolve_word(
     surface_matches = oracle.lookup_surface_form(cleaned)
     if surface_matches:
         if pos is not None:
-            pos_filtered = [m for m in surface_matches if m.pos == pos]
-            if pos_filtered:
-                surface_matches = pos_filtered
+            surface_matches = [m for m in surface_matches if m.pos == pos]
         seen_surface: set[tuple[str, str, str | None, int | None]] = set()
         deduped_surface: list[Ref] = []
         for m in surface_matches:

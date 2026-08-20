@@ -5,14 +5,18 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from app.dictionary import Dictionary
+from app.resolve import TokenLike, resolve_token
 from tools.build_dict import (
     BuildDictError,
+    Stage02LookupOracle,
     build_stage01,
     build_stage02,
     compute_stage02_cache_key,
@@ -28,6 +32,82 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 EN_FIXTURE_PATH = FIXTURES_DIR / "wiktextract_stage01_en.jsonl"
 DE_FIXTURE_PATH = FIXTURES_DIR / "wiktextract_stage01_de.jsonl"
 DEFAULT_LICENSE = "CC BY 2.0 FR"
+
+
+@dataclass
+class OracleParityToken:
+    """Minimal canonical-resolver token for lookup-oracle parity tests."""
+
+    text: str
+    lemma_: str
+    pos_: str
+    dep_: str = ""
+
+    @property
+    def head(self) -> TokenLike:
+        return self
+
+    @property
+    def children(self) -> Iterable[TokenLike]:
+        return ()
+
+
+def _lemma_tuple(record: Any) -> tuple[Any, ...]:
+    return (
+        record.id,
+        record.lemma,
+        record.pos,
+        record.gender,
+        record.semantic_ref,
+        record.freq_rank,
+    )
+
+
+def _sense_tuple(record: Any) -> tuple[Any, ...]:
+    return (record.id, record.lemma_id, record.ord, record.semantic_ref)
+
+
+@pytest.fixture
+def oracle_parity_db(tmp_path: Path, part_a_schema: str) -> Path:
+    """Create one Stage-01-compatible asset shared by both lookup oracles."""
+    db_path = tmp_path / "oracle-parity.sqlite"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(part_a_schema)
+        conn.executemany(
+            "INSERT INTO lemma "
+            "(id, semantic_ref, lemma, pos, gender, freq_rank) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (1, "lemma:v1:haus-upper", "Haus", "NOUN", "das", 2),
+                (2, "lemma:v1:haus-lower", "haus", "NOUN", "das", 1),
+                (3, "lemma:v1:bank-null", "Bank", "NOUN", "die", None),
+                (4, "lemma:v1:bank-der", "Bank", "NOUN", "der", 3),
+                (5, "lemma:v1:bank-verb", "Bank", "VERB", None, 3),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO surface_form (form, lemma_id) VALUES (?, ?)",
+            [
+                ("Banken", 3),
+                ("BANKEN", 3),
+                ("Banken", 4),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO sense "
+            "(id, lemma_id, semantic_ref, source_namespace, source_ref, ord) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (11, 1, "sense:v1:haus-ord1", "synthetic", "11", 1),
+                (12, 1, "sense:v1:haus-ord0-z", "synthetic", "12", 0),
+                (13, 1, "sense:v1:haus-ord0-a", "synthetic", "13", 0),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
 
 
 @pytest.fixture
@@ -93,6 +173,86 @@ def sample_tsv_projections(tmp_path: Path) -> tuple[Path, Path, Path]:
     links_path.write_text(links_content, encoding="utf-8")
 
     return de_path, en_path, links_path
+
+
+# ======================================================================
+# Stage-02 LookupProtocol parity with runtime Dictionary
+# ======================================================================
+
+
+def test_stage02_lookup_exact_matches_runtime_dictionary(
+    oracle_parity_db: Path,
+) -> None:
+    """Exact lookup has the runtime SQL case, filter, and ordering semantics."""
+    runtime = Dictionary(oracle_parity_db)
+    stage02 = Stage02LookupOracle(oracle_parity_db)
+    try:
+        for args in [
+            ("Haus", None, None),
+            ("haus", None, None),
+            ("Bank", "NOUN", None),
+            ("Bank", "NOUN", "der"),
+            ("Bank", "NOUN", "die"),
+            ("Bank", "VERB", None),
+        ]:
+            assert [_lemma_tuple(row) for row in stage02.lookup_exact(*args)] == [
+                _lemma_tuple(row) for row in runtime.lookup_exact(*args)
+            ]
+
+        assert [row.id for row in stage02.lookup_exact("Haus")] == [2, 1]
+        assert [row.id for row in stage02.lookup_exact("Bank")] == [4, 5, 3]
+    finally:
+        stage02.close()
+        runtime.close()
+
+
+def test_stage02_lookup_surface_form_matches_runtime_dictionary(
+    oracle_parity_db: Path,
+) -> None:
+    """Surface lookup preserves runtime case fallback, order, and ID de-duplication."""
+    runtime = Dictionary(oracle_parity_db)
+    stage02 = Stage02LookupOracle(oracle_parity_db)
+    try:
+        for form in ("Banken", "banken"):
+            assert [_lemma_tuple(row) for row in stage02.lookup_surface_form(form)] == [
+                _lemma_tuple(row) for row in runtime.lookup_surface_form(form)
+            ]
+
+        records = stage02.lookup_surface_form("banken")
+        assert [row.id for row in records] == [4, 3]
+        assert len({row.id for row in records}) == len(records)
+    finally:
+        stage02.close()
+        runtime.close()
+
+
+def test_stage02_lookup_senses_and_canonical_resolver_match_runtime_dictionary(
+    oracle_parity_db: Path,
+) -> None:
+    """Sense ordering and canonical token resolution agree on one shared asset."""
+    runtime = Dictionary(oracle_parity_db)
+    stage02 = Stage02LookupOracle(oracle_parity_db)
+    try:
+        assert [_sense_tuple(row) for row in stage02.lookup_senses(1)] == [
+            _sense_tuple(row) for row in runtime.lookup_senses(1)
+        ]
+        assert [row.id for row in stage02.lookup_senses(1)] == [13, 12, 11]
+
+        token = OracleParityToken("Banken", "unavailable", "NOUN")
+        runtime_ids = {
+            ref.lemma_id
+            for ref in resolve_token(token, runtime)
+            if ref.lemma_id is not None
+        }
+        stage02_ids = {
+            ref.lemma_id
+            for ref in resolve_token(token, stage02)
+            if ref.lemma_id is not None
+        }
+        assert stage02_ids == runtime_ids == {3, 4}
+    finally:
+        stage02.close()
+        runtime.close()
 
 
 # ======================================================================
