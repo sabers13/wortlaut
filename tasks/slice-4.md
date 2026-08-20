@@ -121,3 +121,142 @@ None or exact condition.
 ```
 
 Populate from executable evidence only.
+
+## Failure-1 retry amendment — real Wiktextract multi-gender records
+
+### Attempt-1 evidence
+
+Attempt 1 reached the required real Stage-01 build and failed before Gate-2
+measurement with:
+
+Error during stage 01 build: Conflicting gender tags ['der', 'die'] for 'April'
+
+The participating real German-edition Wiktextract record had:
+
+- word: April
+- pos: name
+- tags containing both feminine and masculine
+
+Attempt 1 otherwise had:
+
+- Gate-2 implementation tests: 18 passed
+- full make gate: PASS
+- 124 total pytest tests passed
+- no app/schema/governance modification
+- no Gate-2 measurement occurred
+
+This is WORKFLOW §5 Failure 1, not an ADR-0002 Gate-2 threshold branch.
+
+### Retry contract
+
+For Attempt 2 only, extend the implementation allowlist to:
+
+- tools/gate2_coverage.py
+- tests/test_gate2_coverage.py
+- tasks/slice-4.report.md
+- tools/build_dict.py
+- tests/test_build_dict_stage01.py
+
+The historical slice-3 brief remains unchanged.
+
+The following slice-3 Stage-01 behavior is superseded for the current
+implementation:
+
+Old behavior:
+multiple supported entry-level gender tags are a hard record error.
+
+New required behavior:
+a participating Wiktextract record containing more than one distinct supported
+gender tag must deterministically expand into one lemma identity per supported
+gender.
+
+Supported mapping remains exactly:
+
+- masculine -> der
+- feminine -> die
+- neuter -> das
+
+Rules:
+
+1. Zero supported gender tags:
+   retain the existing single identity with gender NULL.
+
+2. Exactly one supported gender:
+   retain the existing single identity with that gender.
+
+3. Multiple distinct supported genders:
+   create/merge one accumulator identity for each distinct gender.
+
+4. Canonical expansion order, whenever iteration order matters:
+   der, die, das.
+
+5. Identity remains:
+   (word, canonical_pos, gender)
+
+6. The same source-backed record data applies to every expanded identity:
+   - IPA
+   - no-plural evidence
+   - forms
+   - form-derived fields
+   - English-edition senses/meanings
+   - source/license attribution
+
+7. Do not synthesize any value absent from the source record.
+
+8. Do not discard or skip a real record merely because it has multiple supported
+   gender tags.
+
+9. Existing merge semantics still apply if another source record resolves to the
+   same (word, canonical_pos, gender) identity.
+
+10. All other Stage-01 fail-closed behavior remains unchanged:
+    malformed JSON, invalid participating field types, output collision,
+    contradictory plural evidence, invalid derivation data, etc.
+
+### Required regression tests
+
+Attempt 2 must replace the obsolete conflicting-gender-fails test with executable
+coverage proving:
+
+- a real-shape record:
+    word="April"
+    pos="name"
+    lang_code="de"
+    tags=["feminine", "masculine", "noun"]
+  builds successfully;
+
+- the resulting dictionary has exactly two April/PROPN lemma identities:
+    gender der
+    gender die
+
+- both identities preserve the applicable source-backed record data;
+
+- deterministic output is preserved;
+
+- no NULL-gender duplicate is created for that record;
+
+- existing single-gender and zero-gender behavior remains unchanged.
+
+### Retry classification
+
+Attempt 2 remains:
+
+Model: gemini-flash / T1 / low
+Fallback: codex-low / T1 / low
+Risk: none
+
+Why-risk:
+tools/build_dict.py remains maintainer-only offline build tooling. It creates a
+new output, refuses overwrite, does not modify source dumps or user data, does
+not touch schema/migrations/auth/public runtime API, and therefore matches no
+WORKFLOW §6 risk row.
+
+Attempt 2 must rerun the fresh real Stage-01 build from the same supplied real
+Gate-2 inputs.
+
+Do not filter the source JSONL to remove multi-gender records.
+
+Do not condition any preprocessing on the 200-word textbook list.
+
+If another real-data incompatibility appears, STOP and return it as Failure 2.
+Do not self-retry.
