@@ -979,3 +979,241 @@ Gate-2 threshold behavior remains unchanged:
 - <85 -> GOVERNANCE_REDESIGN_REQUIRED
 - 85..<95 -> REMEDY_REQUIRED
 - >=95 -> CONTINUE
+
+## T3-ceiling design reset — executable Gate-2 CLI
+
+### Ceiling result
+
+The original slice-4 implementation ladder exhausted:
+
+- Attempt 1: T1 Failure 1
+- Attempt 2: T1 Failure 2
+- Attempt 3: T2 Failure 1
+- Attempt 4: T2 Failure 2
+- Attempt 5: T3 ceiling failure
+
+Per WORKFLOW §5 this is not followed by Attempt 6.
+
+The prior task is classified as misspecified and has returned to design.
+
+The redesigned task is re-dispatched from Failure 1 with a new attempt ladder.
+
+### What succeeded before the design reset
+
+Attempt 5 successfully completed all Stage-01 real-data hardening.
+
+Before the terminal measurement failure:
+
+- `tests/test_build_dict_stage01.py`: 46 passed
+- `tests/test_gate2_coverage.py`: 18 passed
+- `make gate`: 147 passed
+- real Stage-01 build: PASS
+
+The real local Stage-01 artifact has:
+
+- bytes: 767926272
+- lemma rows: 1118636
+- sense rows: 480221
+- sense_meaning rows: 577141
+- SQLite quick_check: PASS
+
+Record the exact locally-computed:
+
+Stage-01 SHA-256:
+06c98d098691f7cdfff7d87d11d802fee2b73933f4e7e3e9e332a95aca997547
+
+Also record carried implementation hashes:
+
+tools/build_dict.py SHA-256:
+6a16ea098d01950bc22402c415a27d70aebeb8f9cb2976795e38cf058b6a8a4f
+
+tests/test_build_dict_stage01.py SHA-256:
+9ddafb293e48248bb51fba1cb1f9749788ff02d137db8588cc988075ba160f28
+
+These two Stage-01 implementation files are completed carried work.
+
+The redesigned CLI subtask MUST NOT modify them.
+
+### Terminal failure
+
+The exact required C1 command was invoked from repository root:
+
+python tools/gate2_coverage.py \
+  --dictionary build/gate2/stage01.sqlite \
+  --words "$GATE2_WORDS_FILE" \
+  --misses-out build/gate2/gate2-misses.txt
+
+It failed before measurement logic with:
+
+ModuleNotFoundError: No module named 'app'
+
+The misses file was not created.
+
+### Root cause
+
+When Python directly executes:
+
+python tools/gate2_coverage.py
+
+the script directory `tools/` is the import-root entry used for that direct
+script execution.
+
+The repository root is therefore not guaranteed to be available for:
+
+from app.dictionary import Dictionary
+from app.resolve import resolve_word
+
+The previous tests exercised the Gate-2 module/in-process behavior but did not
+prove the exact C1 direct-script subprocess contract.
+
+C1 already required the direct command.
+
+The architecture and Gate-2 semantics are unchanged.
+
+### Redesigned task
+
+The remaining design-reset subtask is ONLY:
+
+Make the existing C1 command executable directly from repository root without
+requiring caller-supplied PYTHONPATH, module invocation, installation, network,
+or wrapper script.
+
+The implementation may modify only:
+
+- tools/gate2_coverage.py
+- tests/test_gate2_coverage.py
+- tasks/slice-4.report.md
+
+The carried Stage-01 files:
+
+- tools/build_dict.py
+- tests/test_build_dict_stage01.py
+
+MUST remain byte-for-byte unchanged from the hashes recorded above during the
+redesigned implementation.
+
+At final successful slice commit, those carried Stage-01 files are included in
+the commit together with the redesigned Gate-2 files and report, but they are
+not reopened for modification.
+
+### Required implementation behavior
+
+`tools/gate2_coverage.py` must establish repository-local imports when executed
+as a direct script.
+
+The implementation must:
+
+1. work for the exact C1 command from repository root;
+
+2. make the repository root importable before importing `app.dictionary` and
+   `app.resolve`;
+
+3. derive the root from `Path(__file__).resolve()` rather than current working
+   directory assumptions;
+
+4. add no dependency;
+
+5. perform no network access;
+
+6. not require PYTHONPATH;
+
+7. not require installation of the flashcard package;
+
+8. preserve ordinary module import behavior used by pytest;
+
+9. preserve every existing Gate-2 measurement semantic and threshold.
+
+A conventional direct-script bootstrap using the resolved parent of `tools/`
+and `sys.path` is explicitly permitted.
+
+Do not change the required command to `python -m`.
+
+### Missing acceptance test
+
+Add a true subprocess regression test invoking the exact script form.
+
+The test must:
+
+- use the active test interpreter (`sys.executable`);
+- execute repository `tools/gate2_coverage.py`;
+- use a real pytest temporary Stage-01-compatible SQLite fixture;
+- use a valid temporary 200-entry words file;
+- use a nonexistent temporary misses output;
+- require exit code 0;
+- parse the emitted JSON;
+- prove the output/misses contract;
+- NOT set PYTHONPATH;
+- NOT call `main()` directly as a substitute for this test.
+
+Also add a focused subprocess assertion proving direct-script startup reaches
+normal argument/validation handling rather than failing on `import app`.
+
+Existing in-process tests remain.
+
+### Stage-01 artifact reuse
+
+The successful Attempt-5 Stage-01 asset is preserved and reused for the
+redesigned Gate-2 measurement.
+
+DO NOT rebuild it in the redesigned implementation attempt.
+
+Before measurement, the worker must verify:
+
+- exact recorded Stage-01 SHA-256;
+- exact 767926272 byte size;
+- SQLite quick_check=ok;
+- exact row counts above;
+- tools/build_dict.py and its test still match their recorded carried hashes.
+
+This reuse is intentional because:
+
+- the real Stage-01 build already succeeded;
+- the redesigned task does not alter dictionary-build code;
+- rerunning the multi-GB build would add no new evidence.
+
+### Redesigned attempt routing
+
+The new ladder begins at:
+
+Design-reset Attempt 1
+
+Model:
+gemini-flash / T1 / low
+
+Fallback:
+codex-low / T1 / low
+
+Risk:
+none
+
+Why:
+the redesigned task is now fully specified, limited to one maintainer CLI and
+its executable subprocess test/report, and failures are automatically detected.
+
+This attempt count is separate from and follows the recorded exhausted
+pre-design ladder. Do not call it Attempt 6.
+
+### Measurement after repair
+
+After tests and `make gate` pass:
+
+1. verify the preserved Stage-01 artifact as specified;
+2. verify `gate2-misses.txt` does not exist;
+3. invoke the exact C1 command exactly once;
+4. use the resulting mechanical Gate-2 threshold;
+5. write the complete report;
+6. final gate/diff/scope verification;
+7. commit and push.
+
+Threshold behavior remains unchanged:
+
+<85%:
+GOVERNANCE_REDESIGN_REQUIRED
+
+85% <= coverage <95%:
+REMEDY_REQUIRED
+
+>=95%:
+CONTINUE
+
+The design reset itself is NOT a Gate-2 threshold result.
