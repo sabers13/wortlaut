@@ -190,3 +190,108 @@ None.
 The required real cache-MISS and exact-key cache-HIT remain intentionally
 unrun pending explicit orchestrator authorization. Frequency and Stage 03+ are
 unchanged and deferred.
+
+## Design-reset Attempt 2 — final real-data acceptance execution
+
+This section supersedes the historical execution results above. The original
+Attempt-3 `Push: pending implementation/report commits` line is retained as
+historical state only; the successful current branch push is recorded below.
+
+### Identity
+
+Base implementation HEAD: `3e479305402230460eeceb78b038cc0b1cf497d8`
+
+Stage-01 SHA-256: `06c98d098691f7cdfff7d87d11d802fee2b73933f4e7e3e9e332a95aca997547`
+
+German projection SHA-256: `093c75b568e6bc10b637a903c2e253e54670144ad25ab527490fb1278f08744c`
+
+English projection SHA-256: `9ed0e241964b6ab28b1961192fc014eac9ba12dc851462a8264dce276246f139`
+
+Links projection SHA-256: `4ce5d9123141d3c93ef6c104ef498198067d594028d81446cc47712074ca0d97`
+
+Export: Tatoeba weekly export 2026-08-15
+
+License: CC BY 2.0 FR
+
+Resolver SHA-256: `0e7663bf351d177bbc3ac176f1508c549e396bed67e5c3c0928f8d8ad3cbda08`
+
+spaCy: `de_core_news_md`
+
+n_process: `1`
+
+Cache key: `stage02:v1:af120b460e5373f35cd39fa4bc71007e4330d392f4abac0af38ea6e9095080f8`
+
+### Real MISS
+
+```text
+German input sentences: 777664
+English input sentences: 2033977
+Links: 583244
+Persisted examples: 777295
+Examples with EN: 494687
+Examples without EN: 282608
+example_lemma rows: 6504849
+Distinct indexed lemmas: 99537
+Token-count sum: 7292286
+Output SHA-256: 75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97
+Output bytes: 945410048
+Incomplete attribution: 0
+Orphans: 0
+Cache result: MISS
+PRAGMA validation: PASS
+```
+
+### Exact-key HIT
+
+```text
+Cache result: HIT
+Cache key: stage02:v1:af120b460e5373f35cd39fa4bc71007e4330d392f4abac0af38ea6e9095080f8
+Output SHA-256: 75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97
+Output bytes: 945410048
+PRAGMA validation: PASS
+Byte identity: PASS
+Logical equality: PASS
+```
+
+### 90-example acceptance sanity
+
+The deterministic first/middle/last source-ref ordered sample recomputed its
+expected numeric lemma IDs from the accepted Stage-01 asset, `de_core_news_md`,
+and canonical `resolve_token` through `Stage02LookupOracle`; persisted
+`example_lemma` rows were compared only as the actual result.
+
+```text
+Sample size: 90
+Expected associations: 745
+Actual associations: 745
+Mismatches: 0
+Missing expected IDs: 0
+Unexpected persisted IDs: 0
+Mean expected unique IDs/example: 8.277778
+Median expected unique IDs/example: 7
+Maximum expected unique IDs/example: 48
+Punctuation ? forensic result: PASS (no numeric IDs)
+AUX haben forensic result: PASS (no wrong-POS surface IDs)
+Runtime/Stage02 token-by-token parity: PASS
+Disposition: PASS
+```
+
+### Final verification
+
+```text
+Stage-02 targeted tests: 54 passed
+Resolver tests: 25 passed
+Stage-01 regression tests: 46 passed
+make gate: PASS — 223 passed
+AGENTS executable checks: PASS (R1, R3, R7)
+git diff --check: PASS
+```
+
+### Stop-and-ask
+
+None.
+
+### Work left undone
+
+No Stage-02 implementation work remains. Frequency and Stage 03+ remain
+deferred. Accepted real assets await normal slice closure; no cleanup occurred.
