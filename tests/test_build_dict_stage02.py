@@ -255,6 +255,26 @@ def test_stage02_lookup_senses_and_canonical_resolver_match_runtime_dictionary(
         runtime.close()
 
 
+def test_stage02_lookup_accelerator_uses_indexed_lookup_and_cleans_up(
+    oracle_parity_db: Path, tmp_path: Path
+) -> None:
+    """The Stage-02-only accelerator avoids source lemma/surface scans."""
+    accelerator = tmp_path / "stage02-lookup.sqlite"
+    stage02 = Stage02LookupOracle(oracle_parity_db, accelerator)
+    try:
+        exact_plan, surface_plan = stage02.lookup_query_plans("Bank", "Banken")
+
+        assert "SEARCH exact_lookup" in exact_plan
+        assert "SCAN lemma" not in exact_plan
+        assert "SEARCH sl" in surface_plan
+        assert "SCAN surface_form" not in surface_plan
+        assert accelerator.is_file()
+    finally:
+        stage02.close()
+
+    assert not accelerator.exists()
+
+
 # ======================================================================
 # 1 & 2. Valid strict German and English sentence projections
 # ======================================================================

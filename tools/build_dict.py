@@ -1012,17 +1012,109 @@ def compute_stage02_cache_key(
 class Stage02LookupOracle(LookupProtocol):
     """Bounded-memory, read-only dictionary lookup oracle for Stage 02.
 
-    The first implementation loaded every lemma, surface form, and sense into
-    Python dictionaries before the NLP pass.  The accepted asset is large
-    enough for that to push the real build over the machine memory limit.  This
-    oracle instead uses the Stage-01 indexes and bounded LRU result caches.
+    Stage 01 deliberately has no expression indexes for the runtime's
+    ``lower(lemma)`` and ``lower(surface_form)`` predicates.  Build a temporary
+    Stage-02-only accelerator once, using SQLite's own ``lower`` implementation,
+    then use indexed equality lookups throughout the NLP pass.  Keeping SQLite
+    responsible for case folding is essential: it preserves the runtime
+    Dictionary's exact SQLite/Python case behaviour without materialising the
+    dictionary in Python memory.
     """
 
     _CACHE_SIZE: Final[int] = 100_000
 
-    def __init__(self, db_path: Path | str) -> None:
-        self._conn = sqlite3.connect(
-            f"file:{Path(db_path).resolve()}?mode=ro", uri=True
+    def __init__(
+        self, db_path: Path | str, accelerator_path: Path | str | None = None
+    ) -> None:
+        self._source_path = Path(db_path).resolve()
+        self._owns_accelerator = accelerator_path is None
+        if accelerator_path is None:
+            temp_file = tempfile.NamedTemporaryFile(
+                prefix="stage02-lookup-", suffix=".sqlite", delete=False
+            )
+            self._accelerator_path = Path(temp_file.name)
+            temp_file.close()
+            self._accelerator_path.unlink()
+        else:
+            self._accelerator_path = Path(accelerator_path)
+            if self._accelerator_path.exists():
+                raise BuildDictError(
+                    f"Stage-02 lookup accelerator already exists: {self._accelerator_path}"
+                )
+
+        self._conn: sqlite3.Connection | None = None
+        try:
+            self._conn = sqlite3.connect(self._accelerator_path)
+            self._conn.execute(
+                "ATTACH DATABASE ? AS source",
+                (f"file:{self._source_path}?mode=ro",),
+            )
+            self._conn.executescript(
+                """
+                CREATE TABLE exact_lookup (
+                    lookup_key TEXT NOT NULL,
+                    id INTEGER NOT NULL,
+                    lemma TEXT NOT NULL,
+                    pos TEXT NOT NULL,
+                    gender TEXT,
+                    semantic_ref TEXT NOT NULL,
+                    freq_rank INTEGER,
+                    PRIMARY KEY (lookup_key, id)
+                ) WITHOUT ROWID;
+                CREATE TABLE surface_lookup (
+                    lookup_key TEXT NOT NULL,
+                    lemma_id INTEGER NOT NULL,
+                    PRIMARY KEY (lookup_key, lemma_id)
+                ) WITHOUT ROWID;
+
+                INSERT INTO exact_lookup
+                SELECT lemma, id, lemma, pos, gender, semantic_ref, freq_rank
+                FROM source.lemma;
+                INSERT OR IGNORE INTO exact_lookup
+                SELECT lower(lemma), id, lemma, pos, gender, semantic_ref, freq_rank
+                FROM source.lemma;
+
+                INSERT INTO surface_lookup
+                SELECT form, lemma_id FROM source.surface_form;
+                INSERT OR IGNORE INTO surface_lookup
+                SELECT lower(form), lemma_id FROM source.surface_form;
+                """
+            )
+        except Exception:
+            if self._conn is not None:
+                self._conn.close()
+            self._accelerator_path.unlink(missing_ok=True)
+            raise
+
+    @property
+    def accelerator_path(self) -> Path:
+        """Return the ephemeral accelerator path for execution instrumentation."""
+        return self._accelerator_path
+
+    def lookup_query_plans(self, lemma: str, form: str) -> tuple[str, str]:
+        """Return query plans proving lookup queries avoid source-table scans."""
+        if self._conn is None:
+            raise BuildDictError("Stage-02 lookup oracle is closed")
+        exact_plan = self._conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT id, lemma, pos, gender, semantic_ref, freq_rank "
+            "FROM exact_lookup WHERE lookup_key IN (?, ?) GROUP BY id "
+            "ORDER BY freq_rank ASC NULLS LAST, pos ASC, gender ASC NULLS LAST, "
+            "semantic_ref ASC",
+            (lemma, lemma.lower()),
+        ).fetchall()
+        surface_plan = self._conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT l.id, l.lemma, l.pos, l.gender, l.semantic_ref, l.freq_rank "
+            "FROM surface_lookup sl JOIN source.lemma l ON l.id = sl.lemma_id "
+            "WHERE sl.lookup_key IN (?, ?) "
+            "ORDER BY l.freq_rank ASC NULLS LAST, l.pos ASC, l.gender ASC NULLS LAST, "
+            "l.semantic_ref ASC",
+            (form, form.lower()),
+        ).fetchall()
+        return (
+            "\n".join(str(row[-1]) for row in exact_plan),
+            "\n".join(str(row[-1]) for row in surface_plan),
         )
 
     @staticmethod
@@ -1034,9 +1126,11 @@ class Stage02LookupOracle(LookupProtocol):
 
     @lru_cache(maxsize=_CACHE_SIZE)
     def _exact_records(self, lemma: str) -> tuple[LemmaRecord, ...]:
+        if self._conn is None:
+            raise BuildDictError("Stage-02 lookup oracle is closed")
         rows = self._conn.execute(
-            "SELECT id, lemma, pos, gender, semantic_ref, freq_rank FROM lemma "
-            "WHERE (lemma = ? OR lower(lemma) = ?) "
+            "SELECT id, lemma, pos, gender, semantic_ref, freq_rank FROM exact_lookup "
+            "WHERE lookup_key IN (?, ?) GROUP BY id "
             "ORDER BY freq_rank ASC NULLS LAST, pos ASC, gender ASC NULLS LAST, "
             "semantic_ref ASC",
             (lemma, lemma.lower()),
@@ -1045,10 +1139,12 @@ class Stage02LookupOracle(LookupProtocol):
 
     @lru_cache(maxsize=_CACHE_SIZE)
     def _surface_records(self, form: str) -> tuple[LemmaRecord, ...]:
+        if self._conn is None:
+            raise BuildDictError("Stage-02 lookup oracle is closed")
         rows = self._conn.execute(
             "SELECT l.id, l.lemma, l.pos, l.gender, l.semantic_ref, l.freq_rank "
-            "FROM surface_form sf JOIN lemma l ON l.id = sf.lemma_id "
-            "WHERE (sf.form = ? OR lower(sf.form) = ?) "
+            "FROM surface_lookup sl JOIN source.lemma l ON l.id = sl.lemma_id "
+            "WHERE sl.lookup_key IN (?, ?) "
             "ORDER BY l.freq_rank ASC NULLS LAST, l.pos ASC, l.gender ASC NULLS LAST, "
             "l.semantic_ref ASC",
             (form, form.lower()),
@@ -1077,15 +1173,20 @@ class Stage02LookupOracle(LookupProtocol):
 
     @lru_cache(maxsize=_CACHE_SIZE)
     def lookup_senses(self, lemma_id: int) -> Sequence[SenseRecord]:
+        if self._conn is None:
+            raise BuildDictError("Stage-02 lookup oracle is closed")
         rows = self._conn.execute(
-            "SELECT id, lemma_id, ord, semantic_ref FROM sense "
+            "SELECT id, lemma_id, ord, semantic_ref FROM source.sense "
             "WHERE lemma_id = ? ORDER BY ord ASC, semantic_ref ASC, id ASC",
             (lemma_id,),
         ).fetchall()
         return tuple(SenseRecord(*row) for row in rows)
 
     def close(self) -> None:
-        self._conn.close()
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+        self._accelerator_path.unlink(missing_ok=True)
 
 
 def parse_sentence_tsv(tsv_path: Path, lang_name: str) -> dict[int, str]:
@@ -1509,6 +1610,15 @@ def build_stage02(
     )
     projection_path = Path(projection_temp.name)
     projection_temp.close()
+    lookup_temp = tempfile.NamedTemporaryFile(
+        dir=output.parent,
+        prefix=f".{output.name}.stage02-lookup-",
+        suffix=".sqlite.tmp",
+        delete=False,
+    )
+    lookup_path = Path(lookup_temp.name)
+    lookup_temp.close()
+    lookup_path.unlink()
     try:
         # Validate inputs into a disk-backed store before opening the output.
         # This keeps the multi-million-row projections out of Python memory.
@@ -1524,8 +1634,9 @@ def build_stage02(
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.executescript(STAGE02_EXAMPLE_SCHEMA_SQL)
 
-        # Load bounded-memory lookup oracle.
-        oracle = Stage02LookupOracle(stage01)
+        # Build a bounded-memory, disk-backed lookup accelerator alongside the
+        # other Stage-02 temporary artifacts.  It is deleted in ``finally``.
+        oracle = Stage02LookupOracle(stage01, lookup_path)
 
         # Load spaCy
         try:
@@ -1644,6 +1755,7 @@ def build_stage02(
             projection_store.close()
         else:
             projection_path.unlink(missing_ok=True)
+        lookup_path.unlink(missing_ok=True)
         if conn is not None:
             conn.close()
         if temp_out_path.exists():

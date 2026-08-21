@@ -87,3 +87,106 @@ None.
 ### Work left undone
 
 None. Frequency and Stage 03+ remain explicitly deferred by the slice contract.
+
+## Design-reset Attempt 2 — performance repair preflight
+
+Base HEAD: `0c2ee4ebac8161a85c9a2091027e0d0ac7fbda09`
+
+### Failure-1 cause and implementation
+
+Design-reset Attempt 1's Phase-B lookup adapter performed per-token full scans
+of the accepted Stage-01 `lemma` and `surface_form` relations through SQLite
+`lower(...)` predicates, so it made zero first-batch commits before the
+orchestrator-authorized SIGTERM (exit 143).
+
+This retry preserves the accepted resolver semantics and lookup-oracle parity.
+`Stage02LookupOracle` builds a bounded-memory, Stage-02-only temporary SQLite
+accelerator once. `exact_lookup` and `surface_lookup` materialize the source
+values and SQLite's own `lower(...)` values, so indexed equality lookups retain
+the runtime Dictionary's SQLite/Python case behavior. The accelerator is
+deleted by normal oracle cleanup and is neither a Stage-01 mutation nor durable
+state.
+
+`app/resolve.py` remained frozen at SHA-256
+`0e7663bf351d177bbc3ac176f1508c549e396bed67e5c3c0928f8d8ad3cbda08`.
+
+### Inputs and semantic evidence
+
+Stage-01 SHA-256: `06c98d098691f7cdfff7d87d11d802fee2b73933f4e7e3e9e332a95aca997547`
+
+Optimized lookup parity: PASS — the Stage-02 and runtime Dictionary lookup
+tests cover exact, surface, sense, ordering, case, POS/gender filtering,
+deduplication, and canonical `resolve_token` numeric-ID parity.
+
+Real forensic parity: PASS — token-by-token numeric-ID sets agreed for `Was
+ist das?` and `Die Großeltern haben Geschenke für ihre Enkelkinder
+mitgebracht.`; `?` produced no numeric IDs, and `haben` tagged `AUX` produced
+zero numeric IDs rather than wrong-POS surface matches.
+
+Source-table query plans: PASS
+
+```text
+exact:   SEARCH exact_lookup USING PRIMARY KEY (lookup_key=?)
+surface: SEARCH sl USING PRIMARY KEY (lookup_key=?)
+         SEARCH l USING INTEGER PRIMARY KEY (rowid=?)
+```
+
+Neither plan scans source `lemma` or `surface_form`. The one-time permitted
+source scan occurs only while materializing the accelerator.
+
+Representative cold lookup timings:
+
+```text
+haben  exact 0.222 ms (3 rows)      surface 60.498 ms (15168 rows)
+die    exact 0.096 ms (4 rows)      surface 1.060 ms (12 rows)
+Haus   exact 0.059 ms (4 rows)      surface 0.070 ms (7 rows)
+was    exact 0.031 ms (6 rows)      surface 0.033 ms (4 rows)
+gehen  exact 0.024 ms (3 rows)      surface 0.015 ms (0 rows)
+```
+
+### Bounded real-data throughput preflight
+
+The German projection was verified strictly ascending by numeric Tatoeba ID;
+the first 5,000 rows were processed through `de_core_news_md`, `n_process=1`,
+canonical `resolve_token`, and the optimized adapter. No Stage-02 output or
+cache was published.
+
+```text
+Accelerator setup:                 27.230 s; 385,794,048 bytes
+spaCy model load:                   1.064 s
+Prefix sentences:                   5,000
+Non-space tokens:                   43,120
+NLP/resolver wall time:             4.731 s
+Sentences/second:                   1,056.963
+Tokens/second:                      9,115.249
+Peak RSS:                           878,920 kB
+Raw numeric associations:           39,596
+Deduplicated sentence-local IDs:    37,754
+Projected 777,664-sentence NLP loop: 735.8 s / 0.204 h
+Performance disposition: PASS (<= 4.0 h)
+```
+
+Full real Stage-02 MISS: NOT RUN — orchestrator authorization required.
+
+### Verification
+
+Stage-02 targeted tests: 54 passed
+Resolver tests: 25 passed
+Stage-01 regression tests: 46 passed
+make gate: PASS — 223 passed; AGENTS R3 PASS
+git diff --check: PASS
+Changed paths:
+
+- `tools/build_dict.py`
+- `tests/test_build_dict_stage02.py`
+- `tasks/slice-5.report.md`
+
+### Stop-and-ask
+
+None.
+
+### Work left undone
+
+The required real cache-MISS and exact-key cache-HIT remain intentionally
+unrun pending explicit orchestrator authorization. Frequency and Stage 03+ are
+unchanged and deferred.
