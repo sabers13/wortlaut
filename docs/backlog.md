@@ -37,15 +37,18 @@ them. REJECTED items are listed so they do not resurface.
   not file flashcard ADRs into it before then (ADR-0002 §3).
 - **Build stages 03–04 (source-first Persian plus generated DE/EN enrichment)** —
   time-bound, not automatically runnable: API credit expires **mid-September
-  2026**, but ADR-0006 is `NEEDS COLD REVIEW` and the paid production run is
-  blocked. First ingest exact source-backed DE→FA coverage; use EN→FA only when
-  its semantic bridge is proven; issue a deterministic missing-FA report and
-  STOP for the owner. No Persian LLM jobs are automatic. Preserve suitable
-  source-backed German learner meanings; generate only the remaining DE/EN work,
-  one semantic item per request, using conditional provider Batch transport for
-  independent records. Current model support/cost is verified immediately before
-  paid production, not encoded as architecture. The versioned generated marker,
-  non-masquerade and clean-reversibility rules remain binding (AGENTS R11).
+  2026**, and ADR-0006 acceptance is the governance unblock condition. No
+  architecture-changing Slice-6 work or paid production runs while it remains
+  `NEEDS COLD REVIEW`. On acceptance, direct Persian evidence on the exact
+  English-edition canonical source sense is primary; German-Wiktionary is
+  optional fallback through an exact bridge only. Source-acceptance packet and
+  owner acceptance are required before coverage acceptance. Preserve only
+  positively eligible source-backed German wording; uncertainty generates one
+  isolated DE item. Generated DE/EN work remains one semantic item per request;
+  future production requires bounded deterministic Batch manifests, durable
+  correlation and exact-one ambiguous reconciliation. Current provider
+  capabilities/limits/cost are execution-time facts. The versioned generated
+  marker, non-masquerade and clean-reversibility rules remain binding (AGENTS R11).
 - **`reference/smoke_test.py` is path-broken as filed** — it does
   `sys.path.insert(0, dirname(__file__))` then imports `app.*` and opens
   `schema.sql` beside itself, i.e. it expects `reference/app/` and

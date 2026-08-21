@@ -46,13 +46,13 @@ memory of a conversation.
   remain preserved. Slice-6 owns only the Piper image-build/runtime
   prerequisite; slice-7 owns runtime pronunciation; slice-8 owns pronunciation
   E2E smoke.
-* **ADR-0006 cold review #1 is BLOCKED with O1–O7 recorded.** `NEEDS COLD REVIEW`
-  remains. The blockers cover the actual Stage-01 source-sense lineage for
-  DE→FA, pre-acceptance authority, FA multi-translation cardinality/order,
-  deterministic DE source-row eligibility, ambiguous Batch-create recovery,
-  bounded multi-manifest Batch partitioning, and ownership/failure handling for
-  the Persian human-review sample. A separate ADR revision session must resolve
-  them before fresh cold review #2.
+* **ADR-0006 Cold Review #1 O1–O7 are resolved in the 2026-08-21 revision.**
+  ADR-0006 remains `NEEDS COLD REVIEW`; ADR-0004 remains `ACCEPTED / FROZEN`.
+  Slice-6 implementation remains governance-blocked, and no paid production work
+  is authorized. The revision establishes direct canonical English-edition
+  source relations, optional fail-closed German bridges, deterministic FA sets,
+  conservative DE eligibility, correlated bounded manifests, and owner source
+  acceptance for focused remedy verification.
 * **Two-authority workflow remains binding.** Local Git/terminal is authoritative
   for working-tree/runtime/gate/local-asset facts; private `origin` is the
   persistent authoritative mirror for committed and pushed state.
@@ -103,9 +103,10 @@ memory of a conversation.
 ## Blocked
 
 * **ADR-0006 / Slice-6 source-first enrichment is governance-blocked.** Cold
-  review #1 recorded O1–O7. Do not dispatch architecture-changing Slice-6 work
-  from the pending ADR. The next action is a separate ADR-0006 revision session,
-  followed by fresh cold review #2 under WORKFLOW §7 / AGENTS G7.
+  Review #1 O1–O7 are resolved, but ADR-0006 remains `NEEDS COLD REVIEW` and
+  ADR-0004 remains binding. Do not dispatch architecture-changing Slice-6 work;
+  no paid production work is authorized. The next action is fresh ADR-0006 Cold
+  Review #2 — FOCUSED REMEDY VERIFICATION under WORKFLOW §7 / AGENTS G7.
 * **ADR-0004 PART-B/runtime schema remains intentionally deferred to slice-7.**
   Remaining work includes note-local multilingual meaning state, durable
   dictionary bindings, active dictionary version+SHA state and D47 runtime
@@ -125,12 +126,8 @@ memory of a conversation.
 
 ## Next three actions
 
-1. **Open a separate ADR-0006 revision session.** Read O1–O7 from
-   `docs/adr/0006-source-first-persian-and-batch-enrichment.md`; preserve the
-   objection text; resolve each objection explicitly in the ADR and required
-   cross-file governance contracts without implementing Slice-6.
-2. **After revision, open fresh cold review #2 — FOCUSED REMEDY VERIFICATION.**
-   Verify O1–O7 remedies plus direct knock-on contradictions only; optional
+1. fresh ADR-0006 Cold Review #2 — FOCUSED REMEDY VERIFICATION
+2. Verify O1–O7 remedies plus direct knock-on contradictions only; optional
    redesign/refinement is not a blocker under WORKFLOW §7.
 3. **Only after ADR-0006 acceptance**, resume Slice-6 from formal startup/local
    verification against the accepted Stage-02 asset and fresh `make gate`

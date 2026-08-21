@@ -70,8 +70,12 @@ The binding architecture is:
 - ADR-0001 §12, except where superseded;
 - ADR-0002 §6 order 7;
 - ADR-0004 D33–D38, D45 and §§3–8;
-- pending ADR-0006 D57–D71, whose forward contract controls every conflict with
-  ADR-0004's historical Persian generation path until its cold review resolves;
+- ADR-0004 remains binding while ADR-0006 is `NEEDS COLD REVIEW`. Pending
+  ADR-0006 is planning/investigation evidence only and does not supersede
+  ADR-0004 or authorize architecture-changing Slice-6 implementation. Do not
+  dispatch that implementation until ADR-0006 is accepted; on acceptance, its
+  supersession record becomes the Slice-6 architecture where it explicitly
+  supersedes ADR-0004;
 - ADR-0005 D56 (Piper build/runtime prerequisite);
 - AGENTS R1 and R11;
 - docs/plan.md slice-6 row;
@@ -160,19 +164,26 @@ deterministic local enrichment queue.
 
 The queue is the bridge from source-backed dictionary state to ADR-0004 Stage 04.
 
-Before final generated-job materialization, stage 03 must run the ADR-0006
-Persian source-ingestion boundary. It accepts an exact DE→FA source input and an
-optional accepted EN→FA source input, each with recorded source identity,
-SHA-256, revision/date, license, deterministic extractor/mapping version, and
-per-row provenance. Mapping is exact-sense and fail-closed; ambiguity creates no
-FA row. It emits the deterministic missing-FA coverage report/sample, then stops
-for the owner decision. It never creates an automatic Persian LLM job.
+On ADR-0006 acceptance, stage 03 must first use the direct exact FA relation on
+the persisted English-edition canonical source sense, then optional
+German-Wiktionary fallback only through the exact cross-edition bridge and only
+when the primary accepted set is empty. Exact mapping is fail-closed; one exact
+source sense may yield zero/one/many independently validated FA rows. It must
+deduplicate/order/provenance those rows deterministically, issue the
+source-acceptance packet and coverage report, and STOP for owner acceptance. It
+never creates an automatic Persian LLM job.
 
 After that boundary, the final generated queue represents only:
 
 A. missing English meaning;
 B. German learner meaning creation/simplification only where a conservative
    source-first eligibility predicate finds no suitable source-backed German row.
+
+That predicate is a positive mechanical filter, not a semantic/CEFR judgment:
+exact source attachment and explicit synonym or definition/gloss relation are
+required; the ADR-0006 token/scalar/punctuation bounds and versioned forbidden
+meta-pattern table must pass; any uncertainty, markup/control, or unresolved
+mapping makes exactly one isolated `de_learner_meaning` request.
 
 The historical `fa_translation` queue class and its identities are retired
 evidence and must not be reused.
@@ -235,10 +246,14 @@ German learner meanings follow ADR-0004 D33:
 3. aim roughly at A2–B1 comprehension where practical;
 4. never simplify into a semantically different sense.
 
-English remains source-first. Persian is source-backed: exact DE→FA wins, exact
-EN→FA is a secondary fallback only after an evidenced semantic bridge, and all
-other senses remain reported gaps. Source-backed FA rows retain their actual
-source/license and are never labeled `llm_generated_vN`.
+English remains source-first. Persian is source-backed: the direct exact relation
+on the persisted English-edition canonical source sense is primary; optional
+German-Wiktionary is fallback-only through an exact cross-edition bridge and is
+consulted only when primary accepted count is zero. Exact mapping may retain
+zero/one/many FA rows; dedupe is duplicate-only and ordering/provenance are
+deterministic. A source-acceptance packet requires owner/orchestrator acceptance
+before coverage acceptance. Source-backed FA rows retain actual source/license
+and are never labeled `llm_generated_vN`.
 
 Persian is stored as plain Unicode. Its source-ingestion validation checks
 provenance, artifact digest, exact mapping evidence, license, script, Unicode,
@@ -378,15 +393,23 @@ reuse explicitly includes:
 Do not make transport batch size part of durable semantic identity unless batch
 size itself changes the prompt/result semantics.
 
-Before submitting a Batch manifest, atomically persist its deterministic identity,
-SHA-256, exact custom IDs/item IDs, model role, pipeline/prompt version,
-response-schema version, generated-output classification, and `PREPARED` state.
-After a known successful submission persist the provider batch ID. At minimum
-represent `PREPARED`, `SUBMISSION_AMBIGUOUS`, `SUBMITTED`, `PROCESSING`,
-`COMPLETED`, `FAILED`, and provider-exposed `EXPIRED/CANCELLED` states. An
-ambiguous submission is a STOP: never automatically resubmit its compatible
-manifest. Persist returned records independently as completed/rejected so one
-failed record cannot discard valid records from the same Batch.
+Before submission, deterministically partition bytewise-sorted stable item IDs
+using current provider request-count/input-byte limits verified at execution
+time and exact serialized JSONL bytes including newlines. Persist the complete
+partition plan and each independent manifest; transport grouping never changes
+semantic item identity. A manifest-first upload persists identity/SHA-256, exact
+IDs/content/compatibility, provider limits, provider `input_file_id`, exact-byte
+SHA-256, and `batchcorr:v1:<manifest-sha256>` before create. Create with supported
+correlation metadata. At minimum represent `PREPARED`, `UPLOADED`,
+`SUBMISSION_AMBIGUOUS`, `SUBMITTED`, `PROCESSING`, `COMPLETED`, `FAILED`, and
+provider-exposed `EXPIRED/CANCELLED` states.
+
+An ambiguous submission is a STOP: never automatically resubmit it. Only an
+explicit owner/orchestrator reconciliation may list/retrieve and recover exactly
+one match on input file ID, correlation/manifest SHA, endpoint, and compatible
+run identity; zero/multiple/contradictory matches fail closed. Completed manifests
+are never resubmitted, and independently durable per-manifest/per-item results
+survive later failures.
 
 The generation version is explicit.
 
@@ -689,6 +712,13 @@ Stage 03:
 - deterministic missing-FA coverage report/sample and owner STOP;
 - missing-EN classification;
 - source-first German retention and DE learner-meaning fallback classification;
+- direct canonical-source FA mapping, optional bridge acceptance/rejection,
+  multi-translation retention, duplicate collapse/deterministic `ord`, and
+  secondary fallback-only precedence;
+- positive DE source predicate and uncertainty-to-generation fallback;
+- source-acceptance packet STOP behavior;
+- deterministic manifest boundaries, restart preserving completed manifests, and
+  exactly-one ambiguous Batch recovery with zero/multiple fail-closed;
 - zero automatic FA job classification and old FA queue/checkpoint identity rejection;
 - stable refs rather than numeric IDs as durable queue identity;
 - no network;
@@ -832,11 +862,12 @@ change is required.
 #### Source coverage and German canary gate
 
 Before any paid production run, the rebuilt deterministic Persian source coverage
-report must be complete, the owner must have seen the missing-FA count and made
-any required gap decision, and the source-first German queue size must be
-measured. A small German canary must pass manual semantic inspection and the
-selective QA path. The configured production model/endpoint must be confirmed to
-support the required current Batch contract and a cost estimate must be reported.
+report and every used source-acceptance packet must be owner/orchestrator
+accepted, the owner must have seen the missing-FA count and made any required gap
+decision, and the source-first German queue size must be measured. A small German
+canary and selective QA path must be accepted. The configured production
+model/endpoint/correlation/limit facilities must be verified, the deterministic
+partition plan/manifests prepared, and a current cost estimate reported.
 
 The historic Persian model-comparison canary is no longer a prerequisite. It
 remains preserved/retired evidence. Persian generation stays zero unless a later
@@ -846,19 +877,16 @@ owner decision separately authorizes it.
 
 The production run remains strictly prohibited until ALL of the following are true:
 
-1. Repaired implementation accepted;
-2. All repaired A13 tests green;
-3. rebuilt Persian source coverage report is accepted and the owner has seen its
-   remaining-gap count;
-4. any required owner Persian-gap decision is recorded;
-5. German source-first queue size is measured;
-6. small live German canary and semantic inspection pass without unresolved paid
-   state;
-7. selective QA actually executes successfully;
-8. current production model/endpoint Batch support is confirmed;
-9. generated-output classification, credential handling, and cost estimate are
-   accepted;
-10. explicit orchestrator authorization for the full Batch run is issued.
+1. ADR-0006 is accepted/frozen and repaired implementation/A13 evidence is accepted;
+2. all used source-acceptance packets and deterministic Persian coverage/gap
+   report are accepted, with any required gap decision recorded;
+3. German source-first queue is measured, bounded canary accepted, and selective
+   QA path accepted;
+4. current production model/endpoint Batch correlation and limit facilities are
+   verified, with partition plan/manifests prepared;
+5. generated-output classification, credential handling, and current cost estimate
+   are accepted; and
+6. explicit orchestrator authorization for the full Batch run is issued.
 
 No worker may infer full-run authorization merely because a canary passes.
 
