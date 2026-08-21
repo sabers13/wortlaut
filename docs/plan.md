@@ -18,7 +18,7 @@ and `tasks/<NEXT>.md` naming key on the slice ID, never the order number.
 | slice-3 | 4 | — | Stage 01 output carries the schema/attribution contract Gate 2 consumes, including the accepted ADR-0004 PART-A alignment. Order 4 closes normally after its required migration-risk full-diff review passes, then Gate 2 may begin. |
 | slice-4 | 5 | — | §6 order 5's thresholds govern verbatim. A design gate, not a §5 retry ladder: `<85%` returns to governance. |
 | slice-5 | 6 | — | Stage 02 imports `app/resolve.py`; cache keys include its SHA-256 (AGENTS R2/R3). |
-| slice-6 | 7 | — | **BLOCKED while ADR-0006 is `NEEDS COLD REVIEW`. ADR-0004 remains binding, but architecture-changing Slice-6 implementation is not dispatched until ADR-0006 is accepted.** On acceptance, Stages 03–05 use direct exact Persian evidence on the persisted English-edition canonical source sense, optional German-Wiktionary fallback only through an exact bridge, source acceptance/coverage STOP, conservative DE source eligibility with generation on uncertainty, and bounded correlated Batch manifests. The Piper image-build prerequisite remains separately scoped; no paid production run proceeds until all ADR gates are met. |
+| slice-6 | 7 | — | **ADR-0006 is `ACCEPTED / FROZEN`; its §10 supersession record is active.** ADR-0004 remains frozen and binding except where §10 explicitly supersedes it. Stages 03–05 use direct exact Persian evidence on the persisted English-edition canonical source sense, optional German-Wiktionary fallback only through an exact bridge, source acceptance/coverage STOP, conservative DE source eligibility with generation on uncertainty, and bounded correlated Batch manifests. The Piper image-build prerequisite remains separately scoped; no paid production run proceeds until all ADR gates are met. |
 | slice-7 | 8 | — | ADR-0003 review/mastery semantics and AGENTS R12/R13 land before browser integration; render/API supports note's selected DE/EN/FA meaning set, Persian RTL, tri-state noun plural on back (ADR-0004 §10), PART-B durable bindings, D47 atomic dictionary activation/relink, and stale-picker HTTP 409 before UI/browser completion; owns runtime pronunciation feature (note-local custom record/upload persistence, stable pronunciation identity, human-media policy and exact-id discovery, precedence, human/Piper cache, crash-safe replacement and API/render integration). |
 | slice-8 | 9 | — | `reference/smoke_test.py` path defect repaired; assertions match ADR-0002 §4/§5, ADR-0003 §5, and ADR-0004 D47 replacement/stale-picker scenarios; owns end-to-end pronunciation smoke (override/revert, browser-local unsaved preview, unsafe media, identity/replacement cases, human-cache integrity corruption, offline/remote failure and Piper fallback). |
 | slice-9 | 10 | Lecture app Phase 4 decomposition complete | Read-only, out-of-ladder donor inspection (WORKFLOW §12 / AGENTS G6) writes `tasks/adr-0002-donor-notes.md` first; any contradiction returns to governance. Compose work starts only if donor evidence agrees and the host blocker is gone. |
@@ -76,10 +76,11 @@ one blocking condition and three scope notes; the sequence is unchanged.
 
 - **slice-5 is unchanged**: build stage 02 / Tatoeba index, importing
   `app/resolve.py` and keying its cache on the resolver SHA-256 (AGENTS R2/R3).
-- **slice-6 / order 7:** Stages 03–05 and ADR-0004 multilingual enrichment
-  remain unchanged. The first Docker/runtime foundation additionally installs
-  and verifies the pinned Piper engine plus selected German voice/model at
-  image-build time and records their separate distribution classifications/required
+- **slice-6 / order 7:** This ADR-0004 amendment originally left Stages 03–05
+  multilingual enrichment unchanged. Accepted ADR-0006 now supersedes ADR-0004
+  only as listed in ADR-0006 §10. The first Docker/runtime foundation additionally
+  installs and verifies the pinned Piper engine plus selected German voice/model
+  at image-build time and records their separate distribution classifications/required
   notices. This is prerequisite only: no pronunciation API/cache/custom
   media/human discovery/UI and no bulk audio generation/database. The
   mid-September 2026 API-credit constraint on stage 04 is unchanged.
@@ -117,16 +118,17 @@ The pronunciation scope assignments are active:
 - **slice-7** owns the runtime pronunciation feature;
 - **slice-8** owns end-to-end pronunciation smoke.
 
-Stage-04 multilingual meaning-generation scope and the mid-September 2026
-API-credit expiry boundary remain unchanged.
+ADR-0005 does not change Stage-04 multilingual meaning-generation scope or
+the mid-September 2026 API-credit expiry boundary; accepted ADR-0006 separately
+governs the Persian/source-first and Batch amendments recorded below.
 
-## Pending planning/investigation constraint — ADR-0006 (2026-08-21)
+## Governance activation — ADR-0006 (2026-08-21)
 
-ADR-0006 is a new `NEEDS COLD REVIEW` lineage. It does not reopen ADR-0004.
-While pending, it constrains planning/investigation only: it grants no
-implementation authority and activates only on ADR acceptance.
+ADR-0006 is `ACCEPTED / FROZEN` after Cold Review #2 — FOCUSED REMEDY
+VERIFICATION. It does not reopen ADR-0004. Its §10 supersession record is active;
+ADR-0004 remains binding everywhere not explicitly superseded there.
 
-- On acceptance, Persian is ingested source-first from the direct exact
+- Persian is ingested source-first from the direct exact
   English-edition canonical source relation; German-Wiktionary is optional
   fallback only through a proven exact cross-edition bridge, then coverage report
   and owner STOP.
@@ -136,7 +138,7 @@ implementation authority and activates only on ADR acceptance.
   ingestion occurs before final generated DE/EN queue materialization.
 - Existing suitable source-backed German learner meanings are preserved; only
   unsuitable/missing learner wording produces one isolated German request.
-- Every generated item stays one model request. On acceptance, production Batch
+- Every generated item stays one model request. Production Batch
   is bounded deterministic transport with manifest-first upload/correlation,
   per-manifest durability, exact-one ambiguous reconciliation, and fail-closed
   output joining. Current provider/model support, limits, and cost are checked

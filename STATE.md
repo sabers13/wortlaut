@@ -46,13 +46,15 @@ memory of a conversation.
   remain preserved. Slice-6 owns only the Piper image-build/runtime
   prerequisite; slice-7 owns runtime pronunciation; slice-8 owns pronunciation
   E2E smoke.
-* **ADR-0006 Cold Review #1 O1–O7 are resolved in the 2026-08-21 revision.**
-  ADR-0006 remains `NEEDS COLD REVIEW`; ADR-0004 remains `ACCEPTED / FROZEN`.
-  Slice-6 implementation remains governance-blocked, and no paid production work
-  is authorized. The revision establishes direct canonical English-edition
-  source relations, optional fail-closed German bridges, deterministic FA sets,
-  conservative DE eligibility, correlated bounded manifests, and owner source
-  acceptance for focused remedy verification.
+* **ADR-0006 is ACCEPTED / FROZEN.** Cold Review #2 — FOCUSED REMEDY
+  VERIFICATION — verified O1–O7 remedies, checked their direct knock-on
+  contradictions, and found no qualifying blocker. Its §10 supersession of the
+  listed ADR-0004 provisions is active; ADR-0004 remains frozen and binding
+  elsewhere. Direct canonical English-edition FA evidence is primary,
+  German-Wiktionary is optional/fail-closed fallback, FA sets are deterministic,
+  DE eligibility is conservative, Batch manifests are bounded/correlated, and
+  owner source acceptance remains a hard gate. ADR acceptance itself authorizes
+  no paid production work.
 * **Two-authority workflow remains binding.** Local Git/terminal is authoritative
   for working-tree/runtime/gate/local-asset facts; private `origin` is the
   persistent authoritative mirror for committed and pushed state.
@@ -75,13 +77,11 @@ memory of a conversation.
   - `git diff --check`: PASS.
 * The slice-6 brief persistence worker reran `make gate` successfully before
   committing `tasks/slice-6.md`.
-* **ADR-0006 cold-review close did not establish a new authoritative local
-  `make gate` result in this session.** The connected GitHub mirror is
-  authoritative for the committed governance result, but WORKFLOW's authority
-  split does not permit remote repository state to stand in for a fresh local
-  gate or local working-tree cleanliness. Fresh local gate evidence is therefore
-  required at the next supervised/local execution checkpoint before any
-  implementation dispatch.
+* **ADR-0006 Cold Review #2 governance persistence uses fresh local gate
+  evidence.** Its acceptance commit is valid only with the supervised worker's
+  pre-mutation, pre-commit and post-commit `make gate` PASS evidence plus
+  clean-tree/push equality returned in the review receipt; the GitHub mirror is
+  not substituted for local execution evidence.
 
 ## Escalation status
 
@@ -102,11 +102,12 @@ memory of a conversation.
 
 ## Blocked
 
-* **ADR-0006 / Slice-6 source-first enrichment is governance-blocked.** Cold
-  Review #1 O1–O7 are resolved, but ADR-0006 remains `NEEDS COLD REVIEW` and
-  ADR-0004 remains binding. Do not dispatch architecture-changing Slice-6 work;
-  no paid production work is authorized. The next action is fresh ADR-0006 Cold
-  Review #2 — FOCUSED REMEDY VERIFICATION under WORKFLOW §7 / AGENTS G7.
+* **Slice-6 paid production remains blocked by ADR-0006 D71 owner gates,
+  not by ADR governance.** Architecture-changing Slice-6 implementation may begin
+  only after formal startup/local verification on accepted main. No paid
+  production submission is authorized until the source-acceptance, coverage/gap,
+  DE queue/canary/QA, current Batch capability/limit, manifest/cost, and explicit
+  orchestrator-authorization gates are satisfied.
 * **ADR-0004 PART-B/runtime schema remains intentionally deferred to slice-7.**
   Remaining work includes note-local multilingual meaning state, durable
   dictionary bindings, active dictionary version+SHA state and D47 runtime
@@ -117,18 +118,20 @@ memory of a conversation.
   repair plus D47 replacement/stale-picker smoke verification.
 * **Compose integration remains independently blocked** by the lecture app's
   Phase-4 decomposition and required donor evidence; slice-9 owns that boundary.
-* **Build Stage 04 remains time-bound to mid-September 2026.** The governance
-  blocker now precedes any paid canary or production run; no paid Persian or
-  DE/EN production work is authorized while ADR-0006 remains unaccepted.
+* **Build Stage 04 remains time-bound to mid-September 2026.** ADR-0006
+  governance is closed, but paid canary/production work remains subject to its
+  explicit owner gates; acceptance itself authorizes no paid run.
 * **Non-blocking slice-3 review debt remains in `docs/backlog.md`.** T3 N1 is the
   synthetic fixture `genitive_sg` bind defect; T3 N2 is future fallback
   fingerprint hardening for potentially volatile upstream numeric bookkeeping.
 
 ## Next three actions
 
-1. fresh ADR-0006 Cold Review #2 — FOCUSED REMEDY VERIFICATION
-2. Verify O1–O7 remedies plus direct knock-on contradictions only; optional
-   redesign/refinement is not a blocker under WORKFLOW §7.
-3. **Only after ADR-0006 acceptance**, resume Slice-6 from formal startup/local
-   verification against the accepted Stage-02 asset and fresh `make gate`
-   evidence. No paid API run is authorized by the governance review itself.
+1. Open the formal Slice-6 orchestrator/startup session against the accepted
+   ADR-0006 governance commit on `main`.
+2. Verify the authoritative local checkout, origin synchronization, accepted
+   Stage-02 asset SHA/bytes/integrity/counts, dependencies, and a fresh
+   `make gate` before any Slice-6 dispatch.
+3. Only if startup passes, dispatch Slice-6 Attempt 1 under `tasks/slice-6.md`.
+   ADR acceptance authorizes no paid canary or production run; those remain
+   behind the explicit Slice-6 / ADR-0006 gates.

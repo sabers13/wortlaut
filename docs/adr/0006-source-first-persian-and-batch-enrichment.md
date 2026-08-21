@@ -1,14 +1,15 @@
 # ADR-0006 — Source-first Persian and quality-preserving batch enrichment
 
-**Status:** NEEDS COLD REVIEW.
+**Status:** ACCEPTED / FROZEN.
 
 **Lineage:** This is a genuinely new architectural decision made after
 ADR-0004 was accepted and frozen. It begins a new cold-review lineage; it does
 not reopen, reset, or consume another review in ADR-0004's exhausted lineage.
 
-**Amends on acceptance:** ADR-0004 D35, D37, D38, §5, §7 and §8 as specified in
-§12 below. Until this ADR is accepted, ADR-0004 remains the binding historical
-architecture. ADR-0005 is not amended.
+**Amends:** ADR-0004 D35, D37, D38, §5, §7 and §8 as specified in
+§10 below. ADR-0006's §10 supersession record is active. ADR-0004 remains
+`ACCEPTED / FROZEN`; provisions not explicitly superseded by §10 remain binding.
+ADR-0005 is not amended.
 
 ## 1. Context
 
@@ -382,10 +383,10 @@ The owning slice must prove, with bounded fixtures before source acceptance:
 - preservation of the legacy canary; and
 - no paid full run before the D71 authorization gate.
 
-## 10. Pending supersession record
+## 10. Supersession record — ACTIVE
 
-This record activates only if ADR-0006 is accepted. It does not rewrite the
-historical body of ADR-0004.
+ADR-0006 is accepted/frozen, so this supersession record is active. It does not
+rewrite the historical body of ADR-0004.
 
 | ADR-0004 provision | Accepted ADR-0006 replacement |
 |---|---|
@@ -549,3 +550,20 @@ provenance, extraction versions and the deterministic sample. Any material
 sense-alignment, extraction or provenance defect rejects source acceptance and
 STOPs the affected source-backed FA build until a corrected mapping/extractor is
 re-evidenced and explicitly accepted. No arbitrary pass percentage is used.
+
+### Cold review #2 — FOCUSED REMEDY VERIFICATION
+
+**Reviewer:** fresh cold orchestrator session, 2026-08-21. Repository-only
+focused remedy verification under WORKFLOW §7 / AGENTS G7.
+
+**Verdict: APPROVED.** O1–O7 remedies were verified against the accepted
+Stage-01 source-sense identity and the converged forward contract. Direct
+knock-on contradictions introduced by those remedies were checked. No qualifying
+blocking correctness, executability, persistent-state, integrity, or architecture
+defect remains.
+
+ADR-0006 is approved and frozen. Its §10 supersession record is now active.
+ADR-0004 remains `ACCEPTED / FROZEN` and binding everywhere not explicitly
+superseded by that record. The stale header cross-reference from `§12` to the
+actual `§10` supersession record was corrected administratively during
+activation; this does not alter the reviewed architecture.

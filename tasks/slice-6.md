@@ -2,7 +2,7 @@
 
 Task:        Implement the maintainer-operated offline dictionary stages 03–05
              required by ADR-0001 §12, ADR-0002 §6 order 7, ADR-0004
-             D33–D38/D45, pending ADR-0006 D57–D71, and ADR-0005 D56:
+             D33–D38/D45, accepted ADR-0006 D57–D71, and ADR-0005 D56:
              deterministic source-first Persian ingestion plus generated
              DE/EN enrichment queue construction, validation/QA, final
              versioned dictionary packaging,
@@ -69,13 +69,11 @@ The binding architecture is:
 
 - ADR-0001 §12, except where superseded;
 - ADR-0002 §6 order 7;
-- ADR-0004 D33–D38, D45 and §§3–8;
-- ADR-0004 remains binding while ADR-0006 is `NEEDS COLD REVIEW`. Pending
-  ADR-0006 is planning/investigation evidence only and does not supersede
-  ADR-0004 or authorize architecture-changing Slice-6 implementation. Do not
-  dispatch that implementation until ADR-0006 is accepted; on acceptance, its
-  supersession record becomes the Slice-6 architecture where it explicitly
-  supersedes ADR-0004;
+- ADR-0004 D33–D38, D45 and §§3–8 except where accepted ADR-0006 §10
+  explicitly supersedes them;
+- ADR-0006 D57–D71 is `ACCEPTED / FROZEN`; its §10 supersession record is active
+  and is the Slice-6 architecture for the listed conflicts with ADR-0004.
+  ADR-0004 remains binding everywhere else;
 - ADR-0005 D56 (Piper build/runtime prerequisite);
 - AGENTS R1 and R11;
 - docs/plan.md slice-6 row;
@@ -164,7 +162,7 @@ deterministic local enrichment queue.
 
 The queue is the bridge from source-backed dictionary state to ADR-0004 Stage 04.
 
-On ADR-0006 acceptance, stage 03 must first use the direct exact FA relation on
+Under accepted ADR-0006, stage 03 must first use the direct exact FA relation on
 the persisted English-edition canonical source sense, then optional
 German-Wiktionary fallback only through the exact cross-edition bridge and only
 when the primary accepted set is empty. Exact mapping is fail-closed; one exact
@@ -956,8 +954,9 @@ STOP and return to the slice-6 orchestrator if:
 - satisfying the task requires modifying `app/`, runtime/user schema, ADRs,
   `reference/schema.sql`, AGENTS, WORKFLOW, STATE, or another path outside the
   allowlist;
-- Stage-03 queue semantics cannot be reconciled with accepted ADR-0004 without a
-  new architecture decision;
+- Stage-03 queue semantics cannot be reconciled with accepted ADR-0006 and
+  the unsuperseded portions of accepted ADR-0004 without a new architecture
+  decision;
 - a proposed DE→FA/EN→FA source lacks explicit license, reproducible identity,
   deterministic extraction, or exact-sense mapping proof;
 - any Persian mapping is ambiguous, except that the candidate is rejected and

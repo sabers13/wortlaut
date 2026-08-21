@@ -35,11 +35,11 @@ them. REJECTED items are listed so they do not resurface.
   `tasks/adr-0002-donor-notes.md`; any contradiction returns to governance. When
   that repo decomposes Phase 4, add one line to *its* backlog pointing here; do
   not file flashcard ADRs into it before then (ADR-0002 §3).
-- **Build stages 03–04 (source-first Persian plus generated DE/EN enrichment)** —
-  time-bound, not automatically runnable: API credit expires **mid-September
-  2026**, and ADR-0006 acceptance is the governance unblock condition. No
-  architecture-changing Slice-6 work or paid production runs while it remains
-  `NEEDS COLD REVIEW`. On acceptance, direct Persian evidence on the exact
+- **Paid Stage-04 production remains owner-gated under accepted ADR-0006 D71.**
+  ADR-0006 is `ACCEPTED / FROZEN`; architecture-changing Slice-6 implementation
+  is governance-unblocked but still requires formal Slice-6 startup/local
+  verification. API credit expires **mid-September 2026**. ADR acceptance alone
+  authorizes no paid production run. Direct Persian evidence on the exact
   English-edition canonical source sense is primary; German-Wiktionary is
   optional fallback through an exact bridge only. Source-acceptance packet and
   owner acceptance are required before coverage acceptance. Preserve only
