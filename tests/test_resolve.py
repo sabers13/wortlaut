@@ -150,6 +150,49 @@ def test_surface_form_separable_inflection(populated_oracle: InMemoryLookupOracl
     assert res[0].lemma_id == 11
 
 
+def test_surface_form_wrong_pos_only_continues_to_fallback() -> None:
+    """A surface row with another POS cannot satisfy a requested POS."""
+    oracle = InMemoryLookupOracle()
+    wrong = oracle.add_lemma("etwas", "NOUN", "das", lemma_id=101)
+    oracle.add_surface_form("fremd", wrong)
+
+    resolved = resolve_word("fremd", oracle, pos="AUX")
+
+    assert resolved == [
+        Ref(
+            lemma="fremd",
+            pos="AUX",
+            status="needs_gloss",
+            lemma_id=None,
+        )
+    ]
+
+
+def test_surface_form_mixed_pos_returns_only_requested_pos() -> None:
+    """Surface-form resolution strictly contains numeric hits to the requested POS."""
+    oracle = InMemoryLookupOracle()
+    noun = oracle.add_lemma("Haus", "NOUN", "das", lemma_id=102)
+    aux = oracle.add_lemma("haben", "AUX", lemma_id=103)
+    oracle.add_surface_form("hat", noun)
+    oracle.add_surface_form("hat", aux)
+
+    resolved = resolve_word("hat", oracle, pos="AUX")
+
+    assert [(ref.lemma_id, ref.pos) for ref in resolved] == [(103, "AUX")]
+
+
+def test_surface_form_punctuation_cannot_return_other_pos_ids() -> None:
+    """Punctuation with only unrelated surface rows falls through without IDs."""
+    oracle = InMemoryLookupOracle()
+    noun = oracle.add_lemma("Frage", "NOUN", "die", lemma_id=104)
+    oracle.add_surface_form("?", noun)
+
+    resolved = resolve_word("?", oracle, pos="PUNCT")
+
+    assert all(ref.lemma_id is None for ref in resolved)
+    assert resolved[0].status == "needs_gloss"
+
+
 # --- Step 3: Compound Splitter with D46 Component Bindings ---
 
 

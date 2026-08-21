@@ -12,14 +12,29 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import sqlite3
 import sys
 import tempfile
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Final, Sequence
+
+# Ensure repository root is on sys.path for direct script execution
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from app.resolve import (  # noqa: E402
+    LemmaRecord,
+    LookupProtocol,
+    SenseRecord,
+    resolve_token,
+)
+from tools.resolver_hash import get_resolver_hash  # noqa: E402
 
 POS_MAP: Final[dict[str, str]] = {
     "noun": "NOUN",
@@ -120,6 +135,26 @@ CREATE TABLE IF NOT EXISTS sense_meaning_derivation (
   CHECK (generated_meaning_id <> source_meaning_id)
 ) WITHOUT ROWID;
 """
+
+STAGE02_EXAMPLE_SCHEMA_SQL: Final[str] = """
+CREATE TABLE IF NOT EXISTS example (
+  id           INTEGER PRIMARY KEY,
+  de           TEXT NOT NULL,
+  en           TEXT,
+  source       TEXT,
+  source_ref   TEXT,
+  license      TEXT,
+  token_count  INTEGER,
+  has_proper   INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS example_lemma (
+  lemma_id   INTEGER NOT NULL REFERENCES lemma(id),
+  example_id INTEGER NOT NULL REFERENCES example(id),
+  PRIMARY KEY (lemma_id, example_id)
+) WITHOUT ROWID;
+"""
+
 
 INCLUDED_SENSE_DISTINCTION_FIELDS: Final[tuple[str, ...]] = (
     "glosses",
@@ -929,6 +964,804 @@ def build_stage01(
         raise
 
 
+def sha256_file(path: Path | str) -> str:
+    """Compute SHA-256 hex digest of file raw bytes."""
+    p = Path(path)
+    if not p.is_file():
+        raise BuildDictError(f"File not found for SHA-256 calculation: {p}")
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def compute_stage02_cache_key(
+    stage01_path: Path | str,
+    de_tsv_path: Path | str,
+    en_tsv_path: Path | str,
+    links_tsv_path: Path | str,
+    license_label: str,
+    spacy_model: str,
+) -> str:
+    """Compute deterministic Stage-02 cache key including canonical resolver hash (A8)."""
+    resolver_sha = get_resolver_hash()
+    stage01_sha = sha256_file(stage01_path)
+    de_sha = sha256_file(de_tsv_path)
+    en_sha = sha256_file(en_tsv_path)
+    links_sha = sha256_file(links_tsv_path)
+
+    payload = json.dumps(
+        {
+            "format": "stage02:v1",
+            "resolver_sha256": resolver_sha,
+            "stage01_sha256": stage01_sha,
+            "de_tsv_sha256": de_sha,
+            "en_tsv_sha256": en_sha,
+            "links_tsv_sha256": links_sha,
+            "spacy_model": spacy_model,
+            "license": license_label,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"stage02:v1:{hashlib.sha256(payload).hexdigest()}"
+
+
+class Stage02LookupOracle(LookupProtocol):
+    """Bounded-memory, read-only dictionary lookup oracle for Stage 02.
+
+    Stage 01 deliberately has no expression indexes for the runtime's
+    ``lower(lemma)`` and ``lower(surface_form)`` predicates.  Build a temporary
+    Stage-02-only accelerator once, using SQLite's own ``lower`` implementation,
+    then use indexed equality lookups throughout the NLP pass.  Keeping SQLite
+    responsible for case folding is essential: it preserves the runtime
+    Dictionary's exact SQLite/Python case behaviour without materialising the
+    dictionary in Python memory.
+    """
+
+    _CACHE_SIZE: Final[int] = 100_000
+
+    def __init__(
+        self, db_path: Path | str, accelerator_path: Path | str | None = None
+    ) -> None:
+        self._source_path = Path(db_path).resolve()
+        self._owns_accelerator = accelerator_path is None
+        if accelerator_path is None:
+            temp_file = tempfile.NamedTemporaryFile(
+                prefix="stage02-lookup-", suffix=".sqlite", delete=False
+            )
+            self._accelerator_path = Path(temp_file.name)
+            temp_file.close()
+            self._accelerator_path.unlink()
+        else:
+            self._accelerator_path = Path(accelerator_path)
+            if self._accelerator_path.exists():
+                raise BuildDictError(
+                    f"Stage-02 lookup accelerator already exists: {self._accelerator_path}"
+                )
+
+        self._conn: sqlite3.Connection | None = None
+        try:
+            self._conn = sqlite3.connect(self._accelerator_path)
+            self._conn.execute(
+                "ATTACH DATABASE ? AS source",
+                (f"file:{self._source_path}?mode=ro",),
+            )
+            self._conn.executescript(
+                """
+                CREATE TABLE exact_lookup (
+                    lookup_key TEXT NOT NULL,
+                    id INTEGER NOT NULL,
+                    lemma TEXT NOT NULL,
+                    pos TEXT NOT NULL,
+                    gender TEXT,
+                    semantic_ref TEXT NOT NULL,
+                    freq_rank INTEGER,
+                    PRIMARY KEY (lookup_key, id)
+                ) WITHOUT ROWID;
+                CREATE TABLE surface_lookup (
+                    lookup_key TEXT NOT NULL,
+                    lemma_id INTEGER NOT NULL,
+                    PRIMARY KEY (lookup_key, lemma_id)
+                ) WITHOUT ROWID;
+
+                INSERT INTO exact_lookup
+                SELECT lemma, id, lemma, pos, gender, semantic_ref, freq_rank
+                FROM source.lemma;
+                INSERT OR IGNORE INTO exact_lookup
+                SELECT lower(lemma), id, lemma, pos, gender, semantic_ref, freq_rank
+                FROM source.lemma;
+
+                INSERT INTO surface_lookup
+                SELECT form, lemma_id FROM source.surface_form;
+                INSERT OR IGNORE INTO surface_lookup
+                SELECT lower(form), lemma_id FROM source.surface_form;
+                """
+            )
+        except Exception:
+            if self._conn is not None:
+                self._conn.close()
+            self._accelerator_path.unlink(missing_ok=True)
+            raise
+
+    @property
+    def accelerator_path(self) -> Path:
+        """Return the ephemeral accelerator path for execution instrumentation."""
+        return self._accelerator_path
+
+    def lookup_query_plans(self, lemma: str, form: str) -> tuple[str, str]:
+        """Return query plans proving lookup queries avoid source-table scans."""
+        if self._conn is None:
+            raise BuildDictError("Stage-02 lookup oracle is closed")
+        exact_plan = self._conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT id, lemma, pos, gender, semantic_ref, freq_rank "
+            "FROM exact_lookup WHERE lookup_key IN (?, ?) GROUP BY id "
+            "ORDER BY freq_rank ASC NULLS LAST, pos ASC, gender ASC NULLS LAST, "
+            "semantic_ref ASC",
+            (lemma, lemma.lower()),
+        ).fetchall()
+        surface_plan = self._conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT l.id, l.lemma, l.pos, l.gender, l.semantic_ref, l.freq_rank "
+            "FROM surface_lookup sl JOIN source.lemma l ON l.id = sl.lemma_id "
+            "WHERE sl.lookup_key IN (?, ?) "
+            "ORDER BY l.freq_rank ASC NULLS LAST, l.pos ASC, l.gender ASC NULLS LAST, "
+            "l.semantic_ref ASC",
+            (form, form.lower()),
+        ).fetchall()
+        return (
+            "\n".join(str(row[-1]) for row in exact_plan),
+            "\n".join(str(row[-1]) for row in surface_plan),
+        )
+
+    @staticmethod
+    def _record(row: tuple[Any, ...]) -> LemmaRecord:
+        return LemmaRecord(
+            id=row[0], lemma=row[1], pos=row[2], gender=row[3],
+            semantic_ref=row[4], freq_rank=row[5],
+        )
+
+    @lru_cache(maxsize=_CACHE_SIZE)
+    def _exact_records(self, lemma: str) -> tuple[LemmaRecord, ...]:
+        if self._conn is None:
+            raise BuildDictError("Stage-02 lookup oracle is closed")
+        rows = self._conn.execute(
+            "SELECT id, lemma, pos, gender, semantic_ref, freq_rank FROM exact_lookup "
+            "WHERE lookup_key IN (?, ?) GROUP BY id "
+            "ORDER BY freq_rank ASC NULLS LAST, pos ASC, gender ASC NULLS LAST, "
+            "semantic_ref ASC",
+            (lemma, lemma.lower()),
+        ).fetchall()
+        return tuple(map(self._record, rows))
+
+    @lru_cache(maxsize=_CACHE_SIZE)
+    def _surface_records(self, form: str) -> tuple[LemmaRecord, ...]:
+        if self._conn is None:
+            raise BuildDictError("Stage-02 lookup oracle is closed")
+        rows = self._conn.execute(
+            "SELECT l.id, l.lemma, l.pos, l.gender, l.semantic_ref, l.freq_rank "
+            "FROM surface_lookup sl JOIN source.lemma l ON l.id = sl.lemma_id "
+            "WHERE sl.lookup_key IN (?, ?) "
+            "ORDER BY l.freq_rank ASC NULLS LAST, l.pos ASC, l.gender ASC NULLS LAST, "
+            "l.semantic_ref ASC",
+            (form, form.lower()),
+        ).fetchall()
+        seen: set[int | None] = set()
+        records: list[LemmaRecord] = []
+        for row in rows:
+            record = self._record(row)
+            if record.id not in seen:
+                seen.add(record.id)
+                records.append(record)
+        return tuple(records)
+
+    def lookup_exact(
+        self, lemma: str, pos: str | None = None, gender: str | None = None
+    ) -> Sequence[LemmaRecord]:
+        matches = list(self._exact_records(lemma))
+        if pos is not None:
+            matches = [m for m in matches if m.pos == pos]
+        if gender is not None:
+            matches = [m for m in matches if m.gender == gender]
+        return matches
+
+    def lookup_surface_form(self, form: str) -> Sequence[LemmaRecord]:
+        return self._surface_records(form)
+
+    @lru_cache(maxsize=_CACHE_SIZE)
+    def lookup_senses(self, lemma_id: int) -> Sequence[SenseRecord]:
+        if self._conn is None:
+            raise BuildDictError("Stage-02 lookup oracle is closed")
+        rows = self._conn.execute(
+            "SELECT id, lemma_id, ord, semantic_ref FROM source.sense "
+            "WHERE lemma_id = ? ORDER BY ord ASC, semantic_ref ASC, id ASC",
+            (lemma_id,),
+        ).fetchall()
+        return tuple(SenseRecord(*row) for row in rows)
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+        self._accelerator_path.unlink(missing_ok=True)
+
+
+def parse_sentence_tsv(tsv_path: Path, lang_name: str) -> dict[int, str]:
+    """Parse and strictly validate Tatoeba sentence projection TSV (A3)."""
+    if not tsv_path.is_file():
+        raise BuildDictError(f"{lang_name} projection file not found: {tsv_path}")
+    sentences: dict[int, str] = {}
+    with tsv_path.open("r", encoding="utf-8") as f:
+        for line_no, raw_line in enumerate(f, 1):
+            line = raw_line.rstrip("\r\n")
+            parts = line.split("\t")
+            if len(parts) != 2:
+                raise BuildDictError(
+                    f"Malformed sentence row in {tsv_path}:{line_no}: "
+                    f"expected exactly 2 tab-separated fields, got {len(parts)}"
+                )
+            id_str, text = parts
+            if not id_str.isdigit() or int(id_str) <= 0:
+                raise BuildDictError(
+                    f"Invalid sentence id '{id_str}' in {tsv_path}:{line_no}: "
+                    f"must be a positive integer"
+                )
+            if not text.strip():
+                raise BuildDictError(
+                    f"Blank sentence text in {tsv_path}:{line_no}"
+                )
+            sid = int(id_str)
+            if sid in sentences:
+                raise BuildDictError(
+                    f"Duplicate {lang_name} sentence id {sid} in {tsv_path}:{line_no}"
+                )
+            sentences[sid] = text
+    return sentences
+
+
+def parse_links_tsv(
+    links_path: Path,
+    de_sentence_ids: set[int],
+    en_sentence_ids: set[int],
+) -> dict[int, list[int]]:
+    """Parse and strictly validate Tatoeba DE->EN link projection TSV (A3)."""
+    if not links_path.is_file():
+        raise BuildDictError(f"Links projection file not found: {links_path}")
+    links_by_de: dict[int, list[int]] = {}
+    seen_pairs: set[tuple[int, int]] = set()
+    with links_path.open("r", encoding="utf-8") as f:
+        for line_no, raw_line in enumerate(f, 1):
+            line = raw_line.rstrip("\r\n")
+            parts = line.split("\t")
+            if len(parts) != 2:
+                raise BuildDictError(
+                    f"Malformed link row in {links_path}:{line_no}: "
+                    f"expected exactly 2 tab-separated fields, got {len(parts)}"
+                )
+            de_id_str, en_id_str = parts
+            if not de_id_str.isdigit() or int(de_id_str) <= 0:
+                raise BuildDictError(
+                    f"Invalid German sentence id '{de_id_str}' in links {links_path}:{line_no}"
+                )
+            if not en_id_str.isdigit() or int(en_id_str) <= 0:
+                raise BuildDictError(
+                    f"Invalid English sentence id '{en_id_str}' in links {links_path}:{line_no}"
+                )
+            de_id = int(de_id_str)
+            en_id = int(en_id_str)
+            pair = (de_id, en_id)
+            if pair in seen_pairs:
+                raise BuildDictError(
+                    f"Duplicate link pair ({de_id}, {en_id}) in {links_path}:{line_no}"
+                )
+            seen_pairs.add(pair)
+            if de_id not in de_sentence_ids:
+                raise BuildDictError(
+                    f"Dangling German sentence id {de_id} in {links_path}:{line_no}"
+                )
+            if en_id not in en_sentence_ids:
+                raise BuildDictError(
+                    f"Dangling English sentence id {en_id} in {links_path}:{line_no}"
+                )
+            links_by_de.setdefault(de_id, []).append(en_id)
+    return links_by_de
+
+
+class Stage02ProjectionStore:
+    """Disk-backed validated Tatoeba projections for the real Stage-02 pass.
+
+    The public parsing helpers intentionally return dictionaries for concise
+    unit tests.  Real projections are substantially larger, so the build uses
+    this temporary SQLite store to validate uniqueness and referential
+    integrity without retaining the sentence corpora or link graph in memory.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.conn = sqlite3.connect(path)
+        self.conn.executescript(
+            """
+            CREATE TABLE de_sentence (
+                id INTEGER PRIMARY KEY,
+                text TEXT NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TABLE en_sentence (
+                id INTEGER PRIMARY KEY,
+                text TEXT NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TABLE de_en_link (
+                de_id INTEGER NOT NULL,
+                en_id INTEGER NOT NULL,
+                PRIMARY KEY (de_id, en_id)
+            ) WITHOUT ROWID;
+            """
+        )
+
+    @staticmethod
+    def _parse_sentence_rows(
+        path: Path, table: str, language: str, conn: sqlite3.Connection
+    ) -> None:
+        if not path.is_file():
+            raise BuildDictError(f"{language} projection file not found: {path}")
+        batch: list[tuple[int, str]] = []
+        try:
+            with path.open("r", encoding="utf-8") as source:
+                for line_no, raw_line in enumerate(source, 1):
+                    parts = raw_line.rstrip("\r\n").split("\t")
+                    if len(parts) != 2:
+                        raise BuildDictError(
+                            f"Malformed sentence row in {path}:{line_no}: "
+                            f"expected exactly 2 tab-separated fields, got {len(parts)}"
+                        )
+                    id_str, text = parts
+                    if not id_str.isdigit() or int(id_str) <= 0:
+                        raise BuildDictError(
+                            f"Invalid sentence id '{id_str}' in {path}:{line_no}: "
+                            "must be a positive integer"
+                        )
+                    if not text.strip():
+                        raise BuildDictError(f"Blank sentence text in {path}:{line_no}")
+                    batch.append((int(id_str), text))
+                    if len(batch) == 10_000:
+                        conn.executemany(
+                            f"INSERT INTO {table} (id, text) VALUES (?, ?)", batch
+                        )
+                        batch.clear()
+                if batch:
+                    conn.executemany(
+                        f"INSERT INTO {table} (id, text) VALUES (?, ?)", batch
+                    )
+        except sqlite3.IntegrityError as exc:
+            raise BuildDictError(
+                f"Duplicate {language} sentence id in {path}"
+            ) from exc
+
+    @staticmethod
+    def _parse_links(path: Path, conn: sqlite3.Connection) -> None:
+        if not path.is_file():
+            raise BuildDictError(f"Links projection file not found: {path}")
+        batch: list[tuple[int, int]] = []
+        try:
+            with path.open("r", encoding="utf-8") as source:
+                for line_no, raw_line in enumerate(source, 1):
+                    parts = raw_line.rstrip("\r\n").split("\t")
+                    if len(parts) != 2:
+                        raise BuildDictError(
+                            f"Malformed link row in {path}:{line_no}: "
+                            f"expected exactly 2 tab-separated fields, got {len(parts)}"
+                        )
+                    de_id_str, en_id_str = parts
+                    if not de_id_str.isdigit() or int(de_id_str) <= 0:
+                        raise BuildDictError(
+                            f"Invalid German sentence id '{de_id_str}' in links {path}:{line_no}"
+                        )
+                    if not en_id_str.isdigit() or int(en_id_str) <= 0:
+                        raise BuildDictError(
+                            f"Invalid English sentence id '{en_id_str}' in links {path}:{line_no}"
+                        )
+                    batch.append((int(de_id_str), int(en_id_str)))
+                    if len(batch) == 10_000:
+                        conn.executemany(
+                            "INSERT INTO de_en_link (de_id, en_id) VALUES (?, ?)", batch
+                        )
+                        batch.clear()
+                if batch:
+                    conn.executemany(
+                        "INSERT INTO de_en_link (de_id, en_id) VALUES (?, ?)", batch
+                    )
+        except sqlite3.IntegrityError as exc:
+            raise BuildDictError(f"Duplicate link pair in {path}") from exc
+
+    @classmethod
+    def create(
+        cls, path: Path, de_tsv: Path, en_tsv: Path, links_tsv: Path
+    ) -> "Stage02ProjectionStore":
+        store = cls(path)
+        try:
+            with store.conn:
+                store._parse_sentence_rows(de_tsv, "de_sentence", "German", store.conn)
+                store._parse_sentence_rows(en_tsv, "en_sentence", "English", store.conn)
+                store._parse_links(links_tsv, store.conn)
+                dangling_de = store.conn.execute(
+                    "SELECT de_id FROM de_en_link "
+                    "WHERE de_id NOT IN (SELECT id FROM de_sentence) LIMIT 1"
+                ).fetchone()
+                if dangling_de:
+                    raise BuildDictError(
+                        f"Dangling German sentence id {dangling_de[0]} in {links_tsv}"
+                    )
+                dangling_en = store.conn.execute(
+                    "SELECT en_id FROM de_en_link "
+                    "WHERE en_id NOT IN (SELECT id FROM en_sentence) LIMIT 1"
+                ).fetchone()
+                if dangling_en:
+                    raise BuildDictError(
+                        f"Dangling English sentence id {dangling_en[0]} in {links_tsv}"
+                    )
+        except Exception:
+            store.close()
+            raise
+        return store
+
+    def german_rows(self) -> Any:
+        return self.conn.execute(
+            """
+            SELECT d.id, d.text, e.text
+            FROM de_sentence d
+            LEFT JOIN (
+                SELECT de_id, MIN(en_id) AS en_id
+                FROM de_en_link GROUP BY de_id
+            ) chosen ON chosen.de_id = d.id
+            LEFT JOIN en_sentence e ON e.id = chosen.en_id
+            ORDER BY d.id ASC
+            """
+        )
+
+    def close(self) -> None:
+        self.conn.close()
+        self.path.unlink(missing_ok=True)
+
+
+def validate_stage01_database(stage01_path: Path) -> None:
+    """Validate Stage-01 database input read-only before copying (A2)."""
+    if not stage01_path.is_file():
+        raise BuildDictError(f"Stage 01 database file not found: {stage01_path}")
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"file:{stage01_path.resolve()}?mode=ro", uri=True)
+        check = conn.execute("PRAGMA quick_check").fetchall()
+        if check != [("ok",)]:
+            raise BuildDictError(f"Stage 01 database PRAGMA quick_check failed: {check}")
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        required_tables = {
+            "lemma",
+            "surface_form",
+            "sense",
+            "sense_meaning",
+            "sense_meaning_derivation",
+        }
+        missing = required_tables - tables
+        if missing:
+            raise BuildDictError(f"Stage 01 database missing required tables: {sorted(missing)}")
+        if "example" in tables:
+            tatoeba_count = conn.execute(
+                "SELECT count(*) FROM example WHERE source = 'tatoeba'"
+            ).fetchone()[0]
+            if tatoeba_count > 0:
+                raise BuildDictError(
+                    f"Stage 01 database contains {tatoeba_count} pre-existing Tatoeba examples"
+                )
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def validate_stage02_database(stage02_path: Path) -> None:
+    """Validate Stage-02 database structure, attribution, and integrity (A2, A6, A7)."""
+    if not stage02_path.is_file():
+        raise BuildDictError(f"Stage 02 database file not found: {stage02_path}")
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"file:{stage02_path.resolve()}?mode=ro", uri=True)
+        check = conn.execute("PRAGMA quick_check").fetchall()
+        if check != [("ok",)]:
+            raise BuildDictError(f"Stage 02 database PRAGMA quick_check failed: {check}")
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        required_tables = {
+            "lemma",
+            "surface_form",
+            "sense",
+            "sense_meaning",
+            "sense_meaning_derivation",
+            "example",
+            "example_lemma",
+        }
+        missing = required_tables - tables
+        if missing:
+            raise BuildDictError(f"Stage 02 database missing required tables: {sorted(missing)}")
+
+        bad_attribution = conn.execute(
+            "SELECT count(*) FROM example "
+            "WHERE source='tatoeba' AND "
+            "(source_ref IS NULL OR trim(source_ref)='' OR license IS NULL OR trim(license)='')"
+        ).fetchone()[0]
+        if bad_attribution > 0:
+            raise BuildDictError(f"Stage 02 database has {bad_attribution} bad attribution rows")
+
+        orphan_index = conn.execute(
+            "SELECT count(*) FROM example_lemma el "
+            "LEFT JOIN lemma l ON l.id=el.lemma_id "
+            "LEFT JOIN example e ON e.id=el.example_id "
+            "WHERE l.id IS NULL OR e.id IS NULL"
+        ).fetchone()[0]
+        if orphan_index > 0:
+            raise BuildDictError(f"Stage 02 database has {orphan_index} orphan example_lemma rows")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def build_stage02(
+    stage01_path: Path | str,
+    de_tsv_path: Path | str,
+    en_tsv_path: Path | str,
+    links_tsv_path: Path | str,
+    output_path: Path | str,
+    cache_dir: Path | str,
+    license_label: str,
+    spacy_model: str = "de_core_news_md",
+    n_process: int = 8,
+) -> None:
+    """Execute build stage 02 deterministic Tatoeba example indexing with caching."""
+    stage01 = Path(stage01_path).resolve()
+    de_tsv = Path(de_tsv_path).resolve()
+    en_tsv = Path(en_tsv_path).resolve()
+    links_tsv = Path(links_tsv_path).resolve()
+    output = Path(output_path)
+    cache_root = Path(cache_dir).resolve()
+
+    if not license_label or not license_label.strip():
+        raise BuildDictError("License label must be nonblank")
+
+    if output.exists():
+        raise BuildDictError(f"Output path already exists: {output}")
+
+    # Validate Stage 01 read-only before copying
+    validate_stage01_database(stage01)
+
+    # Compute cache key (calls canonical get_resolver_hash)
+    cache_key = compute_stage02_cache_key(
+        stage01_path=stage01,
+        de_tsv_path=de_tsv,
+        en_tsv_path=en_tsv,
+        links_tsv_path=links_tsv,
+        license_label=license_label,
+        spacy_model=spacy_model,
+    )
+    cache_file = cache_root / f"{cache_key.replace(':', '_')}.sqlite"
+
+    # Check cache HIT
+    if cache_file.is_file():
+        # Validate cached asset fail-closed
+        try:
+            validate_stage02_database(cache_file)
+        except Exception as e:
+            raise BuildDictError(f"Corrupt matching cache artifact '{cache_file}': {e}") from e
+
+        sys.stdout.write(f"Cache key: {cache_key}\n")
+        sys.stdout.write("Cache result: HIT\n")
+
+        # Atomically publish copy to output
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temp_file = tempfile.NamedTemporaryFile(
+            dir=output.parent,
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            delete=False,
+        )
+        temp_out_path = Path(temp_file.name)
+        temp_file.close()
+        try:
+            shutil.copyfile(cache_file, temp_out_path)
+            if output.exists():
+                raise BuildDictError(f"Output path already exists: {output}")
+            temp_out_path.replace(output)
+            return
+        finally:
+            if temp_out_path.exists():
+                temp_out_path.unlink(missing_ok=True)
+
+    # Cache MISS
+    sys.stdout.write(f"Cache key: {cache_key}\n")
+    sys.stdout.write("Cache result: MISS\n")
+
+    # Build Stage 02 in a temporary sibling file
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = tempfile.NamedTemporaryFile(
+        dir=output.parent,
+        prefix=f".{output.name}.",
+        suffix=".tmp",
+        delete=False,
+    )
+    temp_out_path = Path(temp_file.name)
+    temp_file.close()
+
+    conn: sqlite3.Connection | None = None
+    projection_store: Stage02ProjectionStore | None = None
+    oracle: Stage02LookupOracle | None = None
+    projection_temp = tempfile.NamedTemporaryFile(
+        dir=output.parent,
+        prefix=f".{output.name}.stage02-projections.",
+        suffix=".sqlite.tmp",
+        delete=False,
+    )
+    projection_path = Path(projection_temp.name)
+    projection_temp.close()
+    lookup_temp = tempfile.NamedTemporaryFile(
+        dir=output.parent,
+        prefix=f".{output.name}.stage02-lookup-",
+        suffix=".sqlite.tmp",
+        delete=False,
+    )
+    lookup_path = Path(lookup_temp.name)
+    lookup_temp.close()
+    lookup_path.unlink()
+    try:
+        # Validate inputs into a disk-backed store before opening the output.
+        # This keeps the multi-million-row projections out of Python memory.
+        projection_store = Stage02ProjectionStore.create(
+            projection_path, de_tsv, en_tsv, links_tsv
+        )
+
+        # Copy Stage 01 to temp_out_path
+        shutil.copyfile(stage01, temp_out_path)
+
+        # Connect to temp output DB and ensure example / example_lemma schemas
+        conn = sqlite3.connect(temp_out_path)
+        conn.execute("PRAGMA foreign_keys = ON;")
+        conn.executescript(STAGE02_EXAMPLE_SCHEMA_SQL)
+
+        # Build a bounded-memory, disk-backed lookup accelerator alongside the
+        # other Stage-02 temporary artifacts.  It is deleted in ``finally``.
+        oracle = Stage02LookupOracle(stage01, lookup_path)
+
+        # Load spaCy
+        try:
+            import spacy
+            nlp = spacy.load(spacy_model)
+        except Exception as e:
+            raise BuildDictError(f"Failed to load spaCy model '{spacy_model}': {e}") from e
+
+        example_id_counter = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM example"
+        ).fetchone()[0]
+        example_batch: list[tuple[Any, ...]] = []
+        index_batch: list[tuple[int, int]] = []
+        BATCH_SIZE = 25000
+
+        def flush_batches() -> None:
+            if not example_batch:
+                return
+            if conn is None:
+                raise BuildDictError("Stage 02 output connection unexpectedly closed")
+            output_conn = conn
+            output_conn.executemany(
+                """
+                INSERT INTO example (
+                    id, de, en, source, source_ref, license, token_count, has_proper
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                example_batch,
+            )
+            output_conn.executemany(
+                "INSERT INTO example_lemma (lemma_id, example_id) VALUES (?, ?)",
+                index_batch,
+            )
+            output_conn.commit()
+            example_batch.clear()
+            index_batch.clear()
+
+        projection_items = (
+            (de_text, (de_id, de_text, en_text))
+            for de_id, de_text, en_text in projection_store.german_rows()
+        )
+        for doc, (de_id, de_text, en_text) in nlp.pipe(
+            projection_items,
+            as_tuples=True,
+            n_process=n_process,
+            batch_size=2000,
+        ):
+            non_space_tokens = [tok for tok in doc if not tok.is_space]
+            token_count = len(non_space_tokens)
+            has_proper = 1 if any(tok.pos_ == "PROPN" for tok in non_space_tokens) else 0
+
+            resolved_lemma_ids: set[int] = set()
+            for tok in doc:
+                refs = resolve_token(tok, oracle)
+                for ref in refs:
+                    if ref.lemma_id is not None:
+                        resolved_lemma_ids.add(ref.lemma_id)
+
+            if not resolved_lemma_ids:
+                continue
+
+            example_id = example_id_counter
+            example_id_counter += 1
+
+            example_batch.append((
+                example_id,
+                de_text,
+                en_text,
+                "tatoeba",
+                str(de_id),
+                license_label,
+                token_count,
+                has_proper,
+            ))
+
+            for lid in sorted(resolved_lemma_ids):
+                index_batch.append((lid, example_id))
+
+            if len(example_batch) >= BATCH_SIZE:
+                flush_batches()
+
+        flush_batches()
+
+        conn.close()
+        conn = None
+
+        # Validate built database
+        validate_stage02_database(temp_out_path)
+
+        # Atomically publish to cache directory
+        cache_root.mkdir(parents=True, exist_ok=True)
+        temp_cache = tempfile.NamedTemporaryFile(
+            dir=cache_root,
+            prefix=f".{cache_file.name}.",
+            suffix=".tmp",
+            delete=False,
+        )
+        temp_cache_path = Path(temp_cache.name)
+        temp_cache.close()
+        try:
+            shutil.copyfile(temp_out_path, temp_cache_path)
+            temp_cache_path.replace(cache_file)
+        finally:
+            if temp_cache_path.exists():
+                temp_cache_path.unlink(missing_ok=True)
+
+        # Atomically publish to output_path
+        if output.exists():
+            raise BuildDictError(f"Output path already exists: {output}")
+        temp_out_path.replace(output)
+
+    finally:
+        if oracle is not None:
+            oracle.close()
+        if projection_store is not None:
+            projection_store.close()
+        else:
+            projection_path.unlink(missing_ok=True)
+        lookup_path.unlink(missing_ok=True)
+        if conn is not None:
+            conn.close()
+        if temp_out_path.exists():
+            temp_out_path.unlink(missing_ok=True)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entrypoint for dictionary build tools."""
     parser = argparse.ArgumentParser(description="German Flashcards Dictionary Build Tool")
@@ -957,6 +1790,65 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Path to target output SQLite database file",
     )
 
+    stage02_parser = subparsers.add_parser(
+        "stage02",
+        help="Stage 02: Deterministic Tatoeba example indexing",
+    )
+    stage02_parser.add_argument(
+        "--stage01",
+        type=Path,
+        required=True,
+        help="Path to accepted Stage-01 SQLite dictionary database",
+    )
+    stage02_parser.add_argument(
+        "--de-tsv",
+        type=Path,
+        required=True,
+        help="Path to German Tatoeba sentence projection TSV",
+    )
+    stage02_parser.add_argument(
+        "--en-tsv",
+        type=Path,
+        required=True,
+        help="Path to English Tatoeba sentence projection TSV",
+    )
+    stage02_parser.add_argument(
+        "--links-tsv",
+        type=Path,
+        required=True,
+        help="Path to DE->EN Tatoeba links projection TSV",
+    )
+    stage02_parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Path to target output SQLite database file",
+    )
+    stage02_parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        required=True,
+        help="Path to Stage-02 cache directory",
+    )
+    stage02_parser.add_argument(
+        "--license",
+        type=str,
+        required=True,
+        help="Verified Tatoeba license label",
+    )
+    stage02_parser.add_argument(
+        "--spacy-model",
+        type=str,
+        default="de_core_news_md",
+        help="spaCy model for German sentence processing (default: de_core_news_md)",
+    )
+    stage02_parser.add_argument(
+        "--n-process",
+        type=int,
+        default=8,
+        help="Number of worker processes for spaCy nlp.pipe (default: 8)",
+    )
+
     args = parser.parse_args(sys.argv[1:] if argv is None else list(argv))
 
     if args.command == "stage01":
@@ -969,6 +1861,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         except Exception as e:
             sys.stderr.write(f"Error during stage 01 build: {e}\n")
+            return 1
+
+    if args.command == "stage02":
+        try:
+            build_stage02(
+                stage01_path=args.stage01,
+                de_tsv_path=args.de_tsv,
+                en_tsv_path=args.en_tsv,
+                links_tsv_path=args.links_tsv,
+                output_path=args.output,
+                cache_dir=args.cache_dir,
+                license_label=args.license,
+                spacy_model=args.spacy_model,
+                n_process=args.n_process,
+            )
+            return 0
+        except Exception as e:
+            sys.stderr.write(f"Error during stage 02 build: {e}\n")
             return 1
 
     return 1

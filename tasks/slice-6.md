@@ -1,0 +1,658 @@
+# Slice 6 — build stages 03–05: multilingual offline enrichment and packaging
+
+Task:        Implement the maintainer-operated offline dictionary stages 03–05
+             required by ADR-0001 §12, ADR-0002 §6 order 7, and ADR-0004
+             D33–D38/D45: deterministic enrichment queue construction,
+             multilingual build-time meaning generation/validation/QA, final
+             versioned dictionary packaging, and the first standalone Dockerfile.
+             Phase A ends before any paid full Stage-04 generation run.
+
+Depends:     slice-5
+
+## Entry condition
+
+slice-5 must be ACCEPTED, merged, closed, and pushed before implementation
+dispatch.
+
+The accepted local Stage-02 asset is a required uncommitted input.
+
+The slice-5 acceptance asset had:
+
+- SHA-256:
+  `75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97`
+- bytes:
+  `945410048`
+- Tatoeba examples:
+  `777295`
+- examples with English translation:
+  `494687`
+- examples without English translation:
+  `282608`
+- `example_lemma` associations:
+  `6504849`
+- distinct indexed lemmas:
+  `99537`
+- Tatoeba token-count sum:
+  `7292286`
+- incomplete Tatoeba attribution:
+  `0`
+- orphan `example_lemma` rows:
+  `0`
+
+The slice-6 orchestrator supplies:
+
+`STAGE06_STAGE02=<accepted Stage-02 SQLite asset>`
+
+before Attempt 1.
+
+That asset must be verified executable/read-only with:
+
+- exact SHA-256 above;
+- exact byte count above;
+- `PRAGMA quick_check = ok`;
+- expected row counts above;
+- required PART-A + Stage-02 tables;
+- no mutation of the accepted input during stages 03–05.
+
+If the accepted local Stage-02 asset is absent or differs, STOP. Do not silently
+substitute a different dictionary build.
+
+Real Stage-04 API credentials are maintainer-local inputs and are never committed,
+printed, copied into reports, written into Docker images, or placed in task files.
+
+## Authority
+
+The binding architecture is:
+
+- ADR-0001 §12, except where superseded;
+- ADR-0002 §6 order 7;
+- ADR-0004 D33–D38, D45 and §§3–8;
+- AGENTS R1 and R11;
+- docs/plan.md slice-6 row;
+- docs/backlog.md Stage-04 credit deadline.
+
+ADR-0004 is ACCEPTED / FROZEN.
+
+No ADR is reopened by this slice.
+
+The target vocabulary language remains German. DE, EN and FA are learner-meaning
+languages only.
+
+Runtime LLM usage remains absolutely forbidden.
+
+## Allowlist
+
+Implementation may modify/create only:
+
+- `tools/build_dict.py`
+- `tests/test_build_dict_stage03.py`
+- `tests/test_build_dict_stage04.py`
+- `tests/test_build_dict_stage05.py`
+- `pyproject.toml`
+- `Dockerfile`
+- `.dockerignore`
+- `tasks/slice-6.report.md`
+
+No other tracked path is allowed.
+
+In particular do NOT modify:
+
+- `app/`
+- `app/resolve.py`
+- `app/dictionary.py`
+- `reference/schema.sql`
+- Stage-01 or Stage-02 accepted semantics
+- existing Stage-01 / Stage-02 tests except through their normal regression runs
+- ADRs
+- `AGENTS.md`
+- `WORKFLOW.md`
+- `PROMPTS.md`
+- `STATE.md`
+- `docs/plan.md`
+- `docs/backlog.md`
+- user-data/runtime schema
+- browser/API/UI code
+- pronunciation/audio runtime architecture
+
+No bulk pronunciation/audio database or LLM pronunciation pipeline belongs in
+this slice.
+
+If a later accepted pronunciation ADR changes the Dockerfile contract before
+slice-6 dispatch, the slice-6 orchestrator must amend this brief before Attempt 1.
+The worker must not silently anticipate that ADR.
+
+## Acceptance
+
+### A1 — CLI stages
+
+Extend the existing maintainer build CLI with separate commands for:
+
+- Stage 03 — deterministic enrichment queue construction;
+- Stage 04 — maintainer-only multilingual enrichment;
+- Stage 05 — final dictionary packaging.
+
+The exact argument naming is implementation-owned, but the commands must have
+clear `--help`, refuse unsafe overwrite, produce nonzero exit on validation
+failure, and never mutate their supplied input SQLite asset in place.
+
+Stages must be independently resumable/checkpointable.
+
+No automatic source-data download is introduced.
+
+### A2 — Stage 03 is deterministic and network-free
+
+Stage 03 reads the accepted Stage-02 dictionary asset read-only and produces a
+deterministic local enrichment queue.
+
+The queue is the bridge from source-backed dictionary state to ADR-0004 Stage 04.
+
+It must represent at least the Stage-04 job classes:
+
+A. missing English meaning;
+B. German learner meaning creation/simplification candidate;
+C. Persian translation candidate.
+
+The queue is sense-aware.
+
+Every queue record must carry enough stable semantic identity to survive local
+numeric-ID renumbering:
+
+- `lemma.semantic_ref`;
+- `sense.semantic_ref`;
+- target language;
+- generation job class;
+- source-backed semantic/context fields needed by ADR-0004;
+- identities/provenance of any localized source rows offered as derivation input.
+
+Numeric lemma/sense/meaning IDs may appear only as convenience references to the
+specific input asset.
+
+A deterministic queue/item ID must depend on semantic identity and the actual
+source/context content relevant to that job, not on mtimes or absolute paths.
+
+Queue ordering is deterministic.
+
+Identical logical input produces logically identical queue output.
+
+Stage 03 performs zero network calls and creates no generated meaning rows.
+
+The deferred Tatoeba `FREQ` feature remains deferred. Do not resurrect it as a
+hidden prerequisite.
+
+### A3 — Source-first enrichment
+
+Stage 04 is enrichment over the source-backed dictionary spine.
+
+It must never replace the dictionary with an LLM-generated dictionary.
+
+Existing source-backed `sense`, `sense_meaning`, lemma grammar, IPA, morphology,
+Tatoeba examples, and stable semantic refs remain authoritative and unchanged.
+
+A source-backed localized meaning is never rewritten in place merely to simplify
+it.
+
+When simplifying source-backed German wording, persist a separate generated row
+and preserve the original source row.
+
+### A4 — Multilingual Stage-04 jobs
+
+Stage 04 supports ADR-0004 §8:
+
+A. fill missing English meanings;
+B. create/simplify German learner meanings;
+C. create Persian translations;
+D. deterministic validation of generated localized meanings;
+E. selective stronger-model semantic QA/correction.
+
+German learner meanings follow ADR-0004 D33:
+
+1. prefer one simple/common German synonym when sense-preserving;
+2. otherwise one short learner-friendly German explanation;
+3. aim roughly at A2–B1 comprehension where practical;
+4. never simplify into a semantically different sense.
+
+English remains source-first.
+
+Persian generation is sense-disambiguated and receives deterministic available
+context such as lemma, POS, gender where relevant, semantic sense, English
+source meaning where available, and German source definition where available.
+
+Persian is stored as plain Unicode. Do not inject bidi control characters.
+
+### A5 — Offline-only LLM boundary
+
+AGENTS R1 remains absolute.
+
+No LLM SDK may enter:
+
+- `[project].dependencies`;
+- `app/`;
+- the Docker runtime dependency graph.
+
+If an SDK is useful for the maintainer build, it may be placed only in a
+build-only optional dependency group in `pyproject.toml`.
+
+The only code permitted to read an LLM API credential is the Stage-04 path in
+`tools/build_dict.py`.
+
+The credential is read at execution time from the maintainer environment.
+
+Never:
+
+- print it;
+- persist it;
+- put it in command output/report text;
+- put it in checkpoints;
+- write it to Docker layers;
+- commit it.
+
+Tests use a fake/mock transport and require no credential/network.
+
+Operational model occupants are configuration, not architecture. The current
+non-normative defaults from docs/plan.md are:
+
+- bulk structured generation: GPT-5.6 Luna;
+- selective semantic QA/correction: GPT-5.6 Terra.
+
+Do not encode those product names as immutable data-contract semantics.
+
+### A6 — Structured generation and checkpoint/resume
+
+Paid generation must be resumable.
+
+Every generation item has a stable deterministic identity.
+
+Completed provider responses/results are checkpointed in maintainer-local,
+ignored build storage so interruption does not rebill completed work.
+
+A restart must:
+
+- reuse exactly matching completed work;
+- not duplicate meaning rows;
+- not resubmit completed queue items;
+- fail closed on corrupt/incompatible checkpoint state.
+
+Changing any material generation input — prompt/pipeline semantics, generation
+version, queue content, configured model role occupant where relevant — must not
+silently reuse an incompatible checkpoint.
+
+The generation version is explicit.
+
+First live generated rows use:
+
+`source='llm_generated_v1'`
+
+unless the slice-6 orchestrator explicitly authorizes a successor marker before
+the real run.
+
+### A7 — Generated-row provenance and derivation
+
+Every persisted generated `sense_meaning` row has:
+
+- non-empty `source`;
+- non-empty `license`;
+- correct target language;
+- valid kind;
+- deterministic ordering metadata.
+
+Generated rows must never masquerade as source-backed rows.
+
+For every source-backed localized meaning TEXT actually consumed as generation,
+simplification, or semantic-QA derivation input, write the corresponding
+`sense_meaning_derivation` edge.
+
+Validate that:
+
+- generated side points to a versioned generated row;
+- source side points to a non-generated source-backed localized row;
+- both rows belong to the same sense;
+- generated→generated edges do not exist;
+- duplicate derivation pairs do not exist.
+
+A generated job that consumes only source-backed sense/grammar/context fields
+and no localized source text may legitimately have zero derivation edges.
+
+If the implementation would require generated→generated provenance chains,
+STOP rather than inventing them.
+
+QA/correction occurs before the final generated row is persisted; it does not
+create a generated→generated lineage.
+
+### A8 — Generated output license is explicit
+
+Do not invent a blanket license for generated output.
+
+The live Stage-04 run requires an explicit maintainer-approved generated-output
+license/classification input.
+
+If the build cannot establish a distribution/license classification compatible
+with applicable linked upstream obligations, STOP.
+
+Source-backed localized rows retain their original source/license.
+
+Generated rows retain the generation marker as `source`; they are not relabeled
+as Wiktionary.
+
+### A9 — Deterministic validation precedes semantic QA
+
+Every generated candidate is deterministically validated before stronger-model
+QA selection.
+
+Validation covers at minimum:
+
+- structured response/schema conformance;
+- allowed language/kind;
+- nonblank text;
+- length bounds;
+- duplicate detection;
+- obvious echo-the-lemma failures;
+- Persian-script expectation for FA;
+- German-language plausibility checks for DE;
+- forbidden/control-content checks;
+- derivation/provenance consistency.
+
+The exact safe thresholds/heuristics are implementation-owned and golden-tested.
+
+Validation output deterministically defines the suspicious/flagged set.
+
+Semantic QA receives:
+
+- every deterministically flagged candidate;
+- plus a deterministic small random audit sample.
+
+The random audit selection must be reproducible from recorded deterministic
+seed/input identity.
+
+QA is selective, never every row by default.
+
+Record actual queue size, validation flags, QA sample size and correction counts
+in the report. ADR-0004 deliberately defines no fixed percentage acceptance
+threshold.
+
+### A10 — Clean rollback
+
+Generated data must remain cleanly reversible by generation marker.
+
+Tests must prove that rollback equivalent to:
+
+`DELETE FROM sense_meaning WHERE source='llm_generated_v1'`
+
+removes generated rows and their outgoing derivation edges while preserving all
+source-backed localized meanings.
+
+Source rows referenced by live generated derivation edges must not be silently
+deleted.
+
+### A11 — Stage 05 final packaging
+
+Stage 05 consumes a completed validated enriched dictionary copy and produces a
+new versioned distributable package.
+
+For the first accepted release target, support a semantic dictionary filename
+such as:
+
+`dictionary_v1.sqlite`
+
+Stage 05:
+
+- never overwrites an existing packaged version;
+- never mutates its input asset;
+- validates SQLite `PRAGMA quick_check`;
+- validates required tables;
+- validates stable lemma/sense semantic-ref uniqueness/nonblankness;
+- validates localized-meaning attribution;
+- validates generated derivation integrity;
+- validates zero orphan example/meaning/derivation rows;
+- records output SHA-256 and byte size;
+- emits deterministic machine-readable release metadata containing at least
+  version, filename, SHA-256 and bytes;
+- emits checksum/attribution material sufficient to reconstruct the mixed
+  Wiktionary/Tatoeba/generated provenance represented in the asset.
+
+Do not publish a GitHub Release in Phase A.
+
+Release publication is an operational action requiring separate orchestrator
+authorization after the final real enriched asset is accepted.
+
+Do not commit the packaged SQLite asset.
+
+### A12 — Dockerfile
+
+Create the first standalone `Dockerfile` required by ADR-0002 §6 order 7.
+
+Phase-A Docker acceptance is limited to the currently decided runtime foundation:
+
+- project/runtime Python dependencies install;
+- `de_core_news_md` is present at image-build time;
+- no API key;
+- no Stage-04 generation execution;
+- no LLM SDK in the runtime image dependency graph;
+- no source/Tatoeba/build cache or maintainer credential copied into the image;
+- no user SQLite database baked into the image.
+
+Do not invent pronunciation/audio architecture or bulk audio assets in this
+slice.
+
+A later accepted pronunciation ADR may require an orchestrator-authored brief
+amendment before slice-6 implementation proceeds.
+
+Loopback publication/CORS/API runtime behavior remains owned by later runtime
+slices.
+
+If available in the authoritative local environment, use Podman or Docker to
+prove the image builds.
+
+### A13 — Phase-A tests
+
+Tests cover at minimum:
+
+Stage 03:
+- deterministic queue IDs/order;
+- input-order independence where relevant;
+- missing-EN classification;
+- DE learner-meaning job classification;
+- FA job classification;
+- stable refs rather than numeric IDs as durable queue identity;
+- no network;
+- no input SQLite mutation;
+- overwrite refusal.
+
+Stage 04:
+- fake structured bulk response;
+- fake QA response;
+- no live network in tests;
+- generated source marker;
+- explicit generated license;
+- source-backed rows unchanged;
+- DE/EN/FA row persistence;
+- derivation edges exact;
+- zero-edge valid case;
+- generated→generated rejection;
+- deterministic validation;
+- suspicious-row routing;
+- deterministic audit sample;
+- checkpoint resume;
+- completed-item no-resubmit;
+- corrupt checkpoint fail-closed;
+- rollback preserves source rows;
+- API secret never written/logged.
+
+Stage 05:
+- validation success;
+- malformed/generated provenance rejection;
+- duplicate stable-ref rejection;
+- bad attribution rejection;
+- input asset unchanged;
+- overwrite refusal;
+- metadata/checksum consistency.
+
+Docker:
+- image build succeeds when container tooling is available;
+- runtime dependency inspection proves no LLM SDK.
+
+All prior Stage-01 and Stage-02 regressions remain passing.
+
+`make gate` remains green.
+
+### A14 — Mandatory Phase-A real execution
+
+Attempt 1 does NOT perform the paid full Stage-04 run.
+
+Against the accepted real Stage-02 asset:
+
+1. verify input SHA/bytes/counts/quick_check;
+2. execute real Stage 03;
+3. record total deterministic queue size;
+4. record counts by:
+   - target language;
+   - job class;
+   - availability of source-backed localized derivation text;
+5. record the queue SHA-256 and bytes;
+6. validate that queue output contains no secrets/private paths;
+7. exercise Stage-04 end-to-end only with fake/local deterministic transport;
+8. exercise Stage 05 on a synthetic or fake-enriched fixture, not by pretending
+   the real dictionary has already completed Stage 04;
+9. build/inspect the Dockerfile when local container tooling is available;
+10. run all targeted tests and full `make gate`.
+
+If real Stage-03 queue construction shows a contract ambiguity requiring an ADR
+decision, STOP and return to the orchestrator.
+
+### A15 — Paid-run authorization boundary
+
+After Phase-A implementation and real Stage-03 queue measurement, STOP.
+
+Do NOT:
+
+- submit the full queue to an LLM provider;
+- consume the owner's Stage-04 credits;
+- perform a paid canary;
+- run selective real QA;
+- claim the final real dictionary is Stage-05 complete;
+- publish a release.
+
+The Phase-A worker returns measured queue evidence to the orchestrator.
+
+The orchestrator then decides the exact live Stage-04 execution scope and
+authorizes any paid canary/full run explicitly.
+
+That continuation remains within the same WORKFLOW attempt when no code/design
+change is required.
+
+### A16 — Report
+
+Create `tasks/slice-6.report.md`.
+
+Record only executable evidence.
+
+Phase-A report includes:
+
+- accepted Stage-02 input SHA/bytes/counts;
+- Stage-03 queue SHA/bytes;
+- total queue records;
+- queue counts by language/job class;
+- counts with/without localized derivation inputs;
+- implementation decisions not fixed by ADRs;
+- build-only provider/SDK boundary, if any;
+- deterministic validation rules implemented;
+- checkpoint/resume evidence;
+- rollback evidence;
+- Stage-05 fixture packaging evidence;
+- Docker build/runtime-dependency evidence;
+- targeted test counts;
+- Stage-01 regression count;
+- Stage-02 regression count;
+- full `make gate` count;
+- `git diff --check`;
+- exact changed paths;
+- final branch HEAD;
+- push status;
+- exact Stop-and-ask conditions hit;
+- work left undone.
+
+Do not record:
+
+- API keys;
+- credential fragments;
+- private absolute paths;
+- speculative unmeasured coverage/cost as fact.
+
+## Stop-and-ask
+
+STOP and return to the slice-6 orchestrator if:
+
+- `Depends: slice-5` is not merged/closed;
+- the accepted Stage-02 input is missing or differs;
+- satisfying the task requires modifying `app/`, runtime/user schema, ADRs,
+  `reference/schema.sql`, AGENTS, WORKFLOW, STATE, or another path outside the
+  allowlist;
+- Stage-03 queue semantics cannot be reconciled with accepted ADR-0004 without a
+  new architecture decision;
+- Stage-04 would require runtime LLM/API dependency;
+- a provider secret would need to be committed, printed or written to an image;
+- provenance cannot satisfy D45/R11;
+- output-license classification cannot be established without erasing upstream
+  obligations;
+- generated→generated derivation would be required;
+- deterministic validation cannot fail closed;
+- checkpoint/resume cannot avoid duplicate paid submission;
+- the accepted Stage-02 asset would need in-place mutation;
+- Stage 05 would overwrite an existing dictionary release;
+- pronunciation/audio work becomes necessary;
+- a later accepted ADR changes this slice's Dockerfile/build contract;
+- any mandatory gate/test fails;
+- Phase A reaches the paid-run boundary.
+
+Do not solve a Stop-and-ask condition by changing architecture.
+
+## Risk
+
+Risk: none
+
+## Why-risk
+
+WORKFLOW §6 path lookup: the allowlist contains maintainer-only offline build
+tooling, tests, build-only dependency metadata, a Dockerfile, `.dockerignore`,
+and the slice report. It touches no user-data migration, auth/security path,
+externally callable application API, or destructive transform of an existing
+accepted artifact. Every dictionary stage consumes an accepted asset read-only
+and publishes a new local artifact.
+
+## Model
+
+Model: gpt-5.6-terra / T3 / high
+
+## Why
+
+WORKFLOW §4:
+
+- Stage 04 establishes the project's paid offline structured-generation,
+  deterministic-validation, selective-QA and resumable-checkpoint pattern;
+- provenance/license errors can remain internally self-consistent while being
+  legally or semantically wrong;
+- Stage 05 establishes the reusable final dictionary packaging pattern;
+- multiple cross-cutting accepted ADR constraints must remain aligned.
+
+Novelty and judgment therefore route to T3.
+
+## Fallback
+
+Fallback: opus-5 / T3 / high
+
+No lower-tier fallback is authorized.
+
+## Phase-A disposition
+
+Attempt 1 ends after:
+
+- implementation;
+- real Stage-03 queue measurement;
+- fake-transport Stage-04 verification;
+- fixture Stage-05 packaging;
+- Docker verification;
+- tests/gate;
+- report commit/push.
+
+It does not spend Stage-04 API credits.
+
+The orchestrator must explicitly authorize the next live generation step.
