@@ -15,6 +15,15 @@ A reusable prompt without it is an **incomplete dispatch**. This applies to ever
 prompt type: repository bootstrap, implementation, retry, governance/repair,
 escalation, review/risk, closure, audit, `NEW SLICE OPEN`, and supervised worker dispatches.
 
+**Low-token long-command rule (normative, WORKFLOW.md §15).** Every worker prompt
+inherits this rule: unless the owner/orchestrator explicitly requested monitoring,
+do not monitor, narrate, or repeatedly poll long-running commands (`make gate`,
+builds, tests, indexing). Launch once using the longest practical blocking timeout
+and resume reasoning only on completion, failure, genuine timeout, or an explicit
+decision point. If a background handle requires later retrieval of the final result,
+perform only the minimum technically necessary retrieval calls. Preserve final
+stdout/stderr for evidence. Silence while healthy and running is the default.
+
 ---
 
 ## Orchestrator — NEW SLICE OPEN (canonical; printed by the previous slice's closure)
@@ -173,6 +182,8 @@ Terminal procedure (run exactly; nonzero exit on any check = STOP and report):
   <implementation per brief>
   <gate command>                  # STOP on nonzero exit; record numbers
 
+Obey WORKFLOW.md §15: launch long-running commands (gate, builds, tests) once using the longest practical blocking timeout; do not poll, narrate, or check status while healthy and running. Resume reasoning only on completion, failure, genuine timeout, or a decision point. Preserve final stdout/stderr.
+
 The Allowlist block is exhaustive — anything changed outside it is a scope
 violation. Stop and report on any Stop-and-ask condition rather than resolving
 it yourself. You have no context beyond these files by design; if the brief is
@@ -219,6 +230,7 @@ inside the prompt. The worker decides nothing (WORKFLOW.md §11).
 You are the mechanical closure worker for slice-<ID>. Perform ONLY the steps
 below, in order. Any check that fails means STOP immediately and report the
 step and output — you are not authorized to resolve anything.
+Obey WORKFLOW.md §15: launch long-running commands (e.g. final gate) once with maximum blocking timeout; do not poll or narrate while running.
 
 1  git status --porcelain                      # non-empty -> STOP
 2  test "$(git rev-parse main)" = "<expected main HEAD>"        || STOP  # main moved
@@ -399,7 +411,7 @@ Read WORKFLOW.md, AGENTS.md, STATE.md, docs/adr/, docs/backlog.md, and
 This is an audit session — no dispatch.
 
 Verify: STATE.md's "What landed" against git log; gate numbers against a fresh
-gate run; escalation counts against dispatch history in reports; every NEEDS
+gate run (obey WORKFLOW.md §15: launch once with blocking timeout, no progress polling); escalation counts against dispatch history in reports; every NEEDS
 COLD REVIEW resolved; no cross-file contradictions. File contradictions in
 docs/backlog.md as BLOCKED — do not resolve them in your head.
 
@@ -555,12 +567,22 @@ Run the required verification:
   <REQUIRED_GATE>
 
 --------------------------------------------------
-5. COMMIT AND PUSH AUTHORIZATION
+5. LONG-COMMAND EXECUTION RULE (WORKFLOW.md §15)
+--------------------------------------------------
+Unless the owner/orchestrator explicitly requested monitoring, do not monitor,
+narrate, or repeatedly poll long-running commands (`make gate`, builds, tests,
+indexing). Launch once using the longest practical blocking timeout and resume
+reasoning only on completion, failure, genuine timeout, or an explicit decision
+point. If a tool requires later retrieval of a background result, make only the
+minimum technically necessary retrieval calls. Preserve final stdout/stderr.
+
+--------------------------------------------------
+6. COMMIT AND PUSH AUTHORIZATION
 --------------------------------------------------
 <COMMIT_PUSH_AUTHORIZATION>
 
 --------------------------------------------------
-6. REQUIRED FINAL EVIDENCE
+7. REQUIRED FINAL EVIDENCE
 --------------------------------------------------
 Print the exact evidence block below and stop:
 <REQUIRED_FINAL_EVIDENCE>
@@ -584,6 +606,7 @@ inspection without making mutations.
 Read AGENTS.md, WORKFLOW.md §14, and STATE.md. You are a read-only supervised worker for <startup verification | gate re-run | ref inspection>.
 
 You perform NO edits, NO commits, NO merges, NO branch creation, and NO pushes.
+Obey WORKFLOW.md §15: launch gate check once with maximum blocking timeout; do not poll or narrate while healthy and running.
 
 Perform ONLY the procedure below in order. Any failed check or nonzero exit means
 STOP immediately and report the step and exact output:
@@ -639,6 +662,7 @@ revisions to the local repository.
 Read AGENTS.md and WORKFLOW.md §14. You are a supervised governance worker.
 The orchestrator has specified exact governance/ADR edits. You author nothing
 independently.
+Obey WORKFLOW.md §15: launch pre- and post-commit gate commands once with maximum blocking timeout; do not poll or narrate while healthy and running.
 
 Perform ONLY the steps below, in order. Any failure or unexpected state means STOP:
 

@@ -333,6 +333,7 @@ belong to the owning implementation slice, `docs/backlog.md`, or no action.
 - Do not produce a handoff without successful remote push synchronization (or
   validated fallback ZIP when offline) (§11).
 - Do not let the closure worker resolve anything — STOP-and-report only (§11).
+- Do not proactively monitor, narrate progress, or repeatedly poll healthy long-running commands unless explicitly instructed by the owner/orchestrator (§15).
 
 ---
 
@@ -608,6 +609,9 @@ follow the canonical brief schema (PROMPTS.md §Supervised local worker):
 - **Required checks & gate:** Exact gate commands and pass criteria.
 - **Commit/push authorization:** Explicit declaration of whether the worker is authorized
   to commit and push, with the required commit messages.
+- **Long-command execution rule:** Supervised workers obey the no-monitoring default (§15),
+  launching long-running commands once with maximum blocking wait and remaining silent while
+  healthy and running.
 - **Required final evidence:** Exact formatted output required in the worker's report.
 - **STOP conditions:** Explicit conditions causing immediate halt and report.
 
@@ -667,3 +671,86 @@ The orchestrator may dispatch read-only supervised workers for:
 - closure verification;
 
 without transferring decision authority to the worker.
+
+---
+
+## 15. No-monitoring default for long-running commands
+
+Long-running shell and tool operations do not require continuous LLM attention.
+Unless the owner or orchestrator explicitly requests monitoring or progress updates
+for the current task, workers MUST NOT proactively monitor, narrate, or repeatedly
+poll a running command.
+
+### 15.1 Scope and examples
+
+This rule applies to all supervised workers, terminal workers, closure workers,
+governance workers, and automated execution prompts across the repository.
+Examples of long-running operations subject to this rule include:
+
+- `make gate` and full test suites (`pytest`);
+- Docker and Podman image builds;
+- package installations and dependency resolution;
+- remote downloads and model fetching;
+- dictionary and database builds (e.g. Wiktextract, Tatoeba, multilingual indexing);
+- schema migrations or database indexing jobs;
+- large file hashing, checksum calculation, and integrity validation;
+- any other command or tool execution expected to consume substantial wall-clock time.
+
+### 15.2 Default execution behavior
+
+When executing a long-running command:
+
+1. **Launch once:** Start the command exactly once.
+2. **Maximum blocking timeout:** Use the longest practical blocking execution timeout
+   supported by the execution environment or tool interface.
+3. **Prohibited while running:** While the process is running, workers MUST NOT:
+   - emit "still running", "waiting", "in progress", or similar intermediate progress messages;
+   - repeatedly invoke status, process-list, or task-management tools merely to observe progress;
+   - repeatedly poll the process or check its liveness;
+   - re-read repository files or browse the workspace while waiting;
+   - perform unrelated model reasoning merely because the process has not yet exited;
+   - launch duplicate copies of the same command;
+   - cancel or restart a healthy command simply because it is taking wall-clock time.
+4. **Resume conditions:** Resume model reasoning and execution ONLY when one of the
+   following occurs:
+   - the command completes;
+   - the command fails (nonzero exit or runtime error);
+   - a genuine configured execution timeout or hang threshold is reached;
+   - execution reaches an explicit decision point requiring orchestrator judgment;
+   - the owner or orchestrator explicitly asks for a status check or progress update.
+5. **Preserve evidence:** Preserve final `stdout`, `stderr`, and exit status for the
+   required task evidence and reports.
+6. **Async/background handles and result retrieval:** If the execution interface cannot
+   block until completion and returns an asynchronous/background handle:
+   - prefer a blocking wait primitive configured with the longest practical wait interval;
+   - do not perform frequent polling;
+   - if a subsequent retrieval call is technically required to obtain the final result
+     or status, make only the minimum number of retrieval calls necessary;
+   - technically necessary final-result retrieval is not considered prohibited monitoring.
+7. **No idle narration:** Do not send user-facing progress messages solely because a
+   command remains healthy and unfinished.
+
+### 15.3 Explicit owner override
+
+An explicit instruction from the owner or orchestrator overrides this default for that
+specific task.
+
+Examples of explicit overrides:
+- `"monitor this command"`
+- `"keep me updated"`
+- `"check progress every ..."`
+- `"tell me if it is still running"`
+
+Any such override is **task-local only**. It applies solely to the specific command or
+task requested and does not permanently disable or alter the repository-wide
+no-monitoring default.
+
+### 15.4 Token-efficiency principle and rationale
+
+A running local process consumes wall-clock time, not useful model reasoning. Repeated
+LLM wake-ups that only establish "still running" increase token and model usage and
+consume conversation context without producing new task evidence.
+
+Therefore:
+
+> **SILENCE WHILE HEALTHY AND RUNNING IS THE DEFAULT.**
