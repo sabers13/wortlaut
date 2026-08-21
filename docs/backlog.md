@@ -35,16 +35,17 @@ them. REJECTED items are listed so they do not resurface.
   `tasks/adr-0002-donor-notes.md`; any contradiction returns to governance. When
   that repo decomposes Phase 4, add one line to *its* backlog pointing here; do
   not file flashcard ADRs into it before then (ADR-0002 §3).
-- **Build stage 04 (multilingual offline meaning enrichment; formerly batch
-  gap-gloss)** — time-bound, not blocked: the API credit expires
-  **mid-September 2026**. Gate 1 → stage 01 → Gate 2 → stages 02–03 must land
-  before it. Under ADR-0004 §8 its scope is broadened from
-  English gap-filling to: fill missing English meanings; create/simplify German
-  learner meanings; create Persian translations; deterministically validate every
-  generated localized row; and selectively route flagged rows plus a small random
-  sample to a stronger QA model. Broadening the scope does **not** move the
-  credit deadline, and the versioned `source='llm_generated_v1'` marking,
-  non-masquerade and clean-reversibility rules are unchanged (AGENTS R11).
+- **Build stages 03–04 (source-first Persian plus generated DE/EN enrichment)** —
+  time-bound, not automatically runnable: API credit expires **mid-September
+  2026**, but ADR-0006 is `NEEDS COLD REVIEW` and the paid production run is
+  blocked. First ingest exact source-backed DE→FA coverage; use EN→FA only when
+  its semantic bridge is proven; issue a deterministic missing-FA report and
+  STOP for the owner. No Persian LLM jobs are automatic. Preserve suitable
+  source-backed German learner meanings; generate only the remaining DE/EN work,
+  one semantic item per request, using conditional provider Batch transport for
+  independent records. Current model support/cost is verified immediately before
+  paid production, not encoded as architecture. The versioned generated marker,
+  non-masquerade and clean-reversibility rules remain binding (AGENTS R11).
 - **`reference/smoke_test.py` is path-broken as filed** — it does
   `sys.path.insert(0, dirname(__file__))` then imports `app.*` and opens
   `schema.sql` beside itself, i.e. it expects `reference/app/` and

@@ -18,7 +18,7 @@ and `tasks/<NEXT>.md` naming key on the slice ID, never the order number.
 | slice-3 | 4 | — | Stage 01 output carries the schema/attribution contract Gate 2 consumes, including the accepted ADR-0004 PART-A alignment. Order 4 closes normally after its required migration-risk full-diff review passes, then Gate 2 may begin. |
 | slice-4 | 5 | — | §6 order 5's thresholds govern verbatim. A design gate, not a §5 retry ladder: `<85%` returns to governance. |
 | slice-5 | 6 | — | Stage 02 imports `app/resolve.py`; cache keys include its SHA-256 (AGENTS R2/R3). |
-| slice-6 | 7 | — | Stages 03–05 and ADR-0004 multilingual enrichment remain unchanged; first Docker/runtime foundation additionally installs and verifies pinned Piper engine plus selected German voice/model at image-build time and records separate distribution classifications/required notices (prerequisite only: no pronunciation API/cache/custom media/human discovery/UI and no bulk audio generation/database); stage 04 completes before mid-September 2026 API-credit expiry. |
+| slice-6 | 7 | — | Stages 03–05 follow ADR-0006's pending source-first Persian contract: deterministic DE→FA ingestion, optional proven EN→FA bridge, source-backed FA provenance, coverage report and owner STOP precede final DE/EN generation; generated DE/EN uses one semantic item per request and conditional provider Batch transport with durable manifests. The first Docker/runtime foundation additionally installs and verifies pinned Piper engine plus selected German voice/model at image-build time (prerequisite only: no pronunciation API/cache/custom media/human discovery/UI and no bulk audio generation/database). No paid production run proceeds until ADR-0006 is accepted and its owner gates are met. |
 | slice-7 | 8 | — | ADR-0003 review/mastery semantics and AGENTS R12/R13 land before browser integration; render/API supports note's selected DE/EN/FA meaning set, Persian RTL, tri-state noun plural on back (ADR-0004 §10), PART-B durable bindings, D47 atomic dictionary activation/relink, and stale-picker HTTP 409 before UI/browser completion; owns runtime pronunciation feature (note-local custom record/upload persistence, stable pronunciation identity, human-media policy and exact-id discovery, precedence, human/Piper cache, crash-safe replacement and API/render integration). |
 | slice-8 | 9 | — | `reference/smoke_test.py` path defect repaired; assertions match ADR-0002 §4/§5, ADR-0003 §5, and ADR-0004 D47 replacement/stale-picker scenarios; owns end-to-end pronunciation smoke (override/revert, browser-local unsaved preview, unsafe media, identity/replacement cases, human-cache integrity corruption, offline/remote failure and Piper fallback). |
 | slice-9 | 10 | Lecture app Phase 4 decomposition complete | Read-only, out-of-ladder donor inspection (WORKFLOW §12 / AGENTS G6) writes `tasks/adr-0002-donor-notes.md` first; any contradiction returns to governance. Compose work starts only if donor evidence agrees and the host blocker is gone. |
@@ -119,6 +119,27 @@ The pronunciation scope assignments are active:
 
 Stage-04 multilingual meaning-generation scope and the mid-September 2026
 API-credit expiry boundary remain unchanged.
+
+## Pending governance amendment — ADR-0006 (2026-08-21)
+
+ADR-0006 is a new `NEEDS COLD REVIEW` lineage. It does not reopen ADR-0004.
+Pending acceptance, it is the forward design constraint for slice-6 planning:
+
+- Persian is ingested source-first: exact DE→FA, then only a proven exact
+  EN→FA semantic bridge, then a deterministic coverage report and owner STOP.
+  Persian LLM generation is zero unless a later explicit owner decision permits
+  a separately bounded policy.
+- Stage-03 must not reuse the historical 480,221 Persian LLM jobs. Persian source
+  ingestion occurs before final generated DE/EN queue materialization.
+- Existing suitable source-backed German learner meanings are preserved; only
+  unsuitable/missing learner wording produces one isolated German request.
+- Every generated item stays one model request. Production Batch is only
+  transport for those independent records, with stable `custom_id`, manifest
+  durability, and fail-closed output joining. Current provider/model support and
+  cost are operational checks immediately before paid use, not architecture.
+- The historical Persian canary remains preserved and retired evidence. The
+  former Persian model-comparison prerequisite is historical unless a future
+  owner decision authorizes Persian LLM fallback.
 
 ### Operational defaults for the offline build (non-normative)
 
