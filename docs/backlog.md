@@ -5,6 +5,7 @@ them. REJECTED items are listed so they do not resurface.
 
 ## Blocked
 
+- **ADR-0005 pronunciation audio is `NEEDS COLD REVIEW` and blocks pronunciation implementation.** The draft defines custom-user-audio → validated human recording → Piper-capable automatic fallback precedence; browser recording plus upload; sacred custom media vs disposable automatic caches; D47 stable semantic targeting; per-recording human provenance/license; offline failover; and no LLM/bulk pronunciation pipeline. Planned ownership is slice-7 for runtime/user-data/API/render behavior and slice-8 for end-to-end smoke verification. **slice-6 remains unchanged** unless ADR-0005 cold review explicitly finds a genuine build-time prerequisite requiring a governance sequencing amendment. No pronunciation implementation begins until ADR-0005 is accepted/frozen.
 - **`reference/schema.sql` remains intentionally stale only for ADR-0004
   PART-B/runtime state.** The accepted and T3-reviewed slice-3 alignment resolves
   the PART-A dictionary shape: stable lemma/sense semantic refs,
