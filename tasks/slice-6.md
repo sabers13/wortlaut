@@ -2,9 +2,10 @@
 
 Task:        Implement the maintainer-operated offline dictionary stages 03–05
              required by ADR-0001 §12, ADR-0002 §6 order 7, ADR-0004
-             D33–D38/D45, and ADR-0005 D56: deterministic enrichment queue
-             construction, multilingual build-time meaning
-             generation/validation/QA, final versioned dictionary packaging,
+             D33–D38/D45, pending ADR-0006 D57–D71, and ADR-0005 D56:
+             deterministic source-first Persian ingestion plus generated
+             DE/EN enrichment queue construction, validation/QA, final
+             versioned dictionary packaging,
              and the first standalone Dockerfile with the build-time Piper
              engine+voice prerequisite. Phase A ends before any paid full
              Stage-04 generation run.
@@ -69,6 +70,8 @@ The binding architecture is:
 - ADR-0001 §12, except where superseded;
 - ADR-0002 §6 order 7;
 - ADR-0004 D33–D38, D45 and §§3–8;
+- pending ADR-0006 D57–D71, whose forward contract controls every conflict with
+  ADR-0004's historical Persian generation path until its cold review resolves;
 - ADR-0005 D56 (Piper build/runtime prerequisite);
 - AGENTS R1 and R11;
 - docs/plan.md slice-6 row;
@@ -157,11 +160,22 @@ deterministic local enrichment queue.
 
 The queue is the bridge from source-backed dictionary state to ADR-0004 Stage 04.
 
-It must represent at least the Stage-04 job classes:
+Before final generated-job materialization, stage 03 must run the ADR-0006
+Persian source-ingestion boundary. It accepts an exact DE→FA source input and an
+optional accepted EN→FA source input, each with recorded source identity,
+SHA-256, revision/date, license, deterministic extractor/mapping version, and
+per-row provenance. Mapping is exact-sense and fail-closed; ambiguity creates no
+FA row. It emits the deterministic missing-FA coverage report/sample, then stops
+for the owner decision. It never creates an automatic Persian LLM job.
+
+After that boundary, the final generated queue represents only:
 
 A. missing English meaning;
-B. German learner meaning creation/simplification candidate;
-C. Persian translation candidate.
+B. German learner meaning creation/simplification only where a conservative
+   source-first eligibility predicate finds no suitable source-backed German row.
+
+The historical `fa_translation` queue class and its identities are retired
+evidence and must not be reused.
 
 The queue is sense-aware.
 
@@ -205,15 +219,14 @@ it.
 When simplifying source-backed German wording, persist a separate generated row
 and preserve the original source row.
 
-### A4 — Multilingual Stage-04 jobs and Persian orthography
+### A4 — Source-first Persian and generated DE/EN jobs
 
-Stage 04 supports ADR-0004 §8:
+Stage 04 supports the remaining generated work:
 
 A. fill missing English meanings;
 B. create/simplify German learner meanings;
-C. create Persian translations;
-D. deterministic validation of generated localized meanings;
-E. selective stronger-model semantic QA/correction.
+C. deterministic validation of generated localized meanings;
+D. selective stronger-model semantic QA/correction.
 
 German learner meanings follow ADR-0004 D33:
 
@@ -222,17 +235,18 @@ German learner meanings follow ADR-0004 D33:
 3. aim roughly at A2–B1 comprehension where practical;
 4. never simplify into a semantically different sense.
 
-English remains source-first.
+English remains source-first. Persian is source-backed: exact DE→FA wins, exact
+EN→FA is a secondary fallback only after an evidenced semantic bridge, and all
+other senses remain reported gaps. Source-backed FA rows retain their actual
+source/license and are never labeled `llm_generated_vN`.
 
-Persian generation is sense-disambiguated and receives deterministic available
-context such as lemma, POS, gender where relevant, semantic sense, English
-source meaning where available, and German source definition where available.
-
-Persian is stored as plain Unicode.
+Persian is stored as plain Unicode. Its source-ingestion validation checks
+provenance, artifact digest, exact mapping evidence, license, script, Unicode,
+and ordering; it uses a bounded human-review sample, not LLM semantic QA.
 
 #### Persian Unicode Policy
 
-The generated Persian text must follow standard Persian orthography and must
+Source-backed Persian text must follow standard Persian orthography and must
 never contain bidi direction-manipulation controls.
 
 Ordinary Persian orthography MUST NOT be rejected merely because it contains
@@ -262,21 +276,9 @@ Other Unicode control (`Cc`) and format (`Cf`) characters remain forbidden unles
 the brief explicitly lists an allowed exception. The validator must not be relaxed
 into accepting arbitrary `Cf` characters.
 
-#### Stronger-model Persian QA evaluation
-
-Selective QA for Persian candidates must evaluate:
-
-- semantic fidelity to the source sense;
-- preservation of grammatical/inflectional relationships (e.g. inflected forms,
-  plural forms, degrees of comparison, tense/person/mood);
-- natural idiomatic Persian phrasing;
-- learner usefulness;
-- correct Persian orthography including legitimate `U+200C` ZWNJ;
-- zero forbidden bidi controls.
-
-A structurally valid but unnatural or grammar-losing Persian candidate may be
-corrected by QA when selected. QA returns only the final structured candidate,
-never chain-of-thought.
+Persian source rows are never sent to LLM QA. A later owner-authorized Persian
+LLM policy, if any, needs a separate bounded contract before generated Persian
+or Persian QA can enter this slice.
 
 ### A5 — Offline-only LLM boundary and per-language model roles
 
@@ -307,13 +309,12 @@ Never:
 
 Tests use a fake/mock transport and require no credential/network.
 
-#### Per-language bulk model roles
+#### Generated-work model roles
 
 Stage 04 must allow configuring model occupants separately for at least:
 
 - `bulk DE` (German learner meaning bulk model);
 - `bulk EN` (English translation bulk model);
-- `bulk FA` (Persian translation bulk model);
 - `semantic QA` (selective semantic QA / correction model).
 
 Operational model product names remain operational configuration, NOT
@@ -321,22 +322,34 @@ architecture. The non-normative initial baseline defaults are:
 
 - bulk DE: `gpt-5.6-luna`;
 - bulk EN: `gpt-5.6-luna`;
-- bulk FA: to be decided by canary comparison and explicit approval (A15);
 - semantic QA: `gpt-5.6-terra`.
 
 Checkpoint compatibility must include every configured model role that can
 materially affect its corresponding generated output.
 
-Changing the FA bulk model must invalidate incompatible FA generation state and
-prevent silent reuse of incompatible FA completed results.
-
-Do not hard-code a permanent FA provider/model into the architecture.
+Do not hard-code a permanent provider/model into the architecture. A future
+owner-authorized Persian fallback would define its own role and compatibility
+identity rather than inheriting a dormant FA default.
 
 ### A6 — Structured generation, checkpoint/resume, and paid-response state machine
 
 Paid generation must be resumable.
 
 Every generation item has a stable deterministic identity.
+
+One semantic enrichment item is one independent logical model request. Its
+prompt/context, model role, strict response schema, validation, and QA contract
+must be identical whether sent synchronously or through provider Batch. Do not
+pack unrelated senses into a shared prompt or make one response responsible for
+multiple senses.
+
+For a production long run, use OpenAI Batch only when the configured model and
+required endpoint officially support the current Batch contract. Batch input
+contains one independent record per item, each carrying a stable deterministic
+`custom_id` derived from the item identity. Output order is untrusted; join only
+through `custom_id`, and missing/duplicate/unknown IDs fail closed. If support is
+absent, STOP and report—do not switch models, use giant prompts, or spend the
+synchronous full-run cost without explicit orchestrator authorization.
 
 Completed provider responses/results and rejected paid results are checkpointed in
 maintainer-local, ignored build storage so interruption does not rebill completed
@@ -365,6 +378,16 @@ reuse explicitly includes:
 Do not make transport batch size part of durable semantic identity unless batch
 size itself changes the prompt/result semantics.
 
+Before submitting a Batch manifest, atomically persist its deterministic identity,
+SHA-256, exact custom IDs/item IDs, model role, pipeline/prompt version,
+response-schema version, generated-output classification, and `PREPARED` state.
+After a known successful submission persist the provider batch ID. At minimum
+represent `PREPARED`, `SUBMISSION_AMBIGUOUS`, `SUBMITTED`, `PROCESSING`,
+`COMPLETED`, `FAILED`, and provider-exposed `EXPIRED/CANCELLED` states. An
+ambiguous submission is a STOP: never automatically resubmit its compatible
+manifest. Persist returned records independently as completed/rejected so one
+failed record cannot discard valid records from the same Batch.
+
 The generation version is explicit.
 
 First live generated rows use:
@@ -377,7 +400,8 @@ the real run.
 #### Paid-response state machine and bounded durability
 
 The live Stage-04 transport must expose paid work to the checkpoint layer in
-deterministic bounded units.
+deterministic bounded units or durable Batch manifests; it must never hide
+individual paid work from the checkpoint layer.
 
 It is not acceptable for `run_stage04` to hand the entire remaining real queue
 to an opaque provider transport and checkpoint only after all pending provider
@@ -530,8 +554,7 @@ Validation covers at minimum:
 - length bounds;
 - duplicate detection;
 - obvious echo-the-lemma failures;
-- Persian-script expectation for FA;
-- Persian Unicode validation:
+- source-backed FA script/Unicode validation:
   - ALLOWED: `U+200C` ZERO WIDTH NON-JOINER (ZWNJ) in valid Persian text;
   - FORBIDDEN: bidi controls `U+061C`, `U+200E`, `U+200F`, `U+202A`–`U+202E`,
     `U+2066`–`U+2069`;
@@ -553,16 +576,9 @@ Semantic QA receives:
 The random audit selection must be reproducible from recorded deterministic
 seed/input identity.
 
-QA is selective, never every row by default.
-
-Selective QA prompt for Persian enforces:
-
-- semantic fidelity;
-- preservation of grammatical/inflectional relationships;
-- natural idiomatic Persian phrasing;
-- learner usefulness;
-- correct Persian orthography including legitimate ZWNJ;
-- zero forbidden bidi controls.
+QA is selective, never every generated DE/EN row by default. Source-backed FA
+is excluded from LLM QA and instead has deterministic source checks plus a
+bounded human-review sample.
 
 Record actual queue size, validation flags, QA sample size, correction counts,
 and rejected item counts in the report. ADR-0004 deliberately defines no fixed
@@ -668,9 +684,12 @@ Tests cover at minimum:
 Stage 03:
 - deterministic queue IDs/order;
 - input-order independence where relevant;
+- exact DE→FA mapping and primary precedence;
+- ambiguous DE→FA and EN→FA bridge mapping reject with no FA row;
+- deterministic missing-FA coverage report/sample and owner STOP;
 - missing-EN classification;
-- DE learner-meaning job classification;
-- FA job classification;
+- source-first German retention and DE learner-meaning fallback classification;
+- zero automatic FA job classification and old FA queue/checkpoint identity rejection;
 - stable refs rather than numeric IDs as durable queue identity;
 - no network;
 - no input SQLite mutation;
@@ -683,13 +702,13 @@ Stage 04:
 - generated source marker;
 - explicit generated license;
 - source-backed rows unchanged;
-- DE/EN/FA row persistence;
+- generated DE/EN row persistence plus source-backed FA row preservation;
 - derivation edges exact;
 - zero-edge valid case;
 - generated→generated rejection;
 - deterministic validation;
-- Persian with legitimate `U+200C` ZWNJ passes validation;
-- Persian with prohibited bidi controls (`U+061C`, `U+200E`, `U+200F`, `U+202A`–`U+202E`, `U+2066`–`U+2069`) fails validation;
+- source-backed Persian with legitimate `U+200C` ZWNJ passes validation;
+- source-backed Persian with prohibited bidi controls (`U+061C`, `U+200E`, `U+200F`, `U+202A`–`U+202E`, `U+2066`–`U+2069`) fails validation;
 - ordinary control characters/newlines where forbidden fail validation;
 - complete five-item provider response with four valid + one invalid:
   - four valid candidates become completed;
@@ -701,9 +720,11 @@ Stage 04:
 - explicit retry manifest is required to retry rejected IDs;
 - retry manifest cannot authorize `in_flight` IDs;
 - explicit rejected retry increments durable paid-attempt state;
-- per-language DE/EN/FA model roles participate correctly in checkpoint compatibility;
-- FA model change cannot silently reuse incompatible FA completed state;
-- Persian QA prompt includes naturalness, grammatical/inflectional preservation, and ZWNJ/bidi requirements;
+- DE/EN model roles participate correctly in checkpoint compatibility;
+- one semantic item maps to one logical request and Batch record with stable `custom_id`;
+- Batch output reorders safely by custom ID; missing/duplicate/unknown IDs fail closed;
+- prepared/submitted/ambiguous/terminal Batch manifest state and partial result durability;
+- no LLM QA is constructed for source-backed Persian;
 - legacy first-canary in-flight checkpoint is not silently cleared or migrated;
 - suspicious-row routing;
 - deterministic audit sample;
@@ -768,23 +789,26 @@ Against the accepted real Stage-02 asset:
 
 1. verify input SHA/bytes/counts/quick_check;
 2. execute real Stage 03;
-3. record total deterministic queue size;
-4. record counts by:
+3. ingest/validate the accepted Persian source artifacts and emit the missing-FA
+   coverage report; STOP for the owner before final generated queue materialization;
+4. record total deterministic generated DE/EN queue size;
+5. record counts by:
    - target language;
    - job class;
    - availability of source-backed localized derivation text;
-5. record the queue SHA-256 and bytes;
-6. validate that queue output contains no secrets/private paths;
-7. exercise Stage-04 end-to-end only with fake/local deterministic transport;
-8. exercise Stage 05 on a synthetic or fake-enriched fixture, not by pretending
+6. record the queue SHA-256 and bytes;
+7. validate that queue output contains no secrets/private paths;
+8. exercise Stage-04 end-to-end only with fake/local deterministic transport,
+   including one-item Batch-record semantics and manifest recovery;
+9. exercise Stage 05 on a synthetic or fake-enriched fixture, not by pretending
    the real dictionary has already completed Stage 04;
-9. build/inspect the Dockerfile when local container tooling is available;
-10. run all targeted tests and full `make gate`.
+10. build/inspect the Dockerfile when local container tooling is available;
+11. run all targeted tests and full `make gate`.
 
 If real Stage-03 queue construction shows a contract ambiguity requiring an ADR
 decision, STOP and return to the orchestrator.
 
-### A15 — Paid-run authorization boundary, Persian Quality Gate, and Canary-v2
+### A15 — Paid-run authorization boundary and production Batch gate
 
 After Phase-A implementation and real Stage-03 queue measurement, STOP.
 
@@ -799,80 +823,42 @@ Do NOT:
 
 The Phase-A worker returns measured queue evidence to the orchestrator.
 
-The orchestrator then decides the exact live Stage-04 execution scope and
+The orchestrator then decides the exact live generated DE/EN execution scope and
 authorizes any paid canary/full run explicitly.
 
 That continuation remains within the same WORKFLOW attempt when no code/design
 change is required.
 
-#### Persian full-run quality gate
+#### Source coverage and German canary gate
 
-Before the full Stage-04 run, the orchestrator must explicitly approve the
-Persian bulk model based on live evidence.
+Before any paid production run, the rebuilt deterministic Persian source coverage
+report must be complete, the owner must have seen the missing-FA count and made
+any required gap decision, and the source-first German queue size must be
+measured. A small German canary must pass manual semantic inspection and the
+selective QA path. The configured production model/endpoint must be confirmed to
+support the required current Batch contract and a cost estimate must be reported.
 
-A fresh deterministic canary-v2 must exercise Persian lexical AND
-grammatical/inflectional senses.
-
-The evidence returned for each FA candidate must include:
-
-- lemma;
-- POS;
-- exact source English meaning/context;
-- generated Persian;
-- whether the source meaning represents an inflection/form relation;
-- model role occupant;
-- derivation IDs;
-- whether stronger QA selected/corrected it.
-
-The orchestrator manually evaluates at minimum:
-
-- exact sense preservation;
-- preservation of grammatical/inflectional relationships;
-- natural Persian phrasing;
-- learner usefulness;
-- correct Persian script/orthography;
-- no bidi-control abuse.
-
-The full FA run is blocked until the orchestrator explicitly records:
-
-`PERSIAN BULK MODEL APPROVED: <configured model>`
-
-Neither Luna nor Terra is presumed approved in advance; the canary decides.
-
-Selective QA remains selective as required by A9 (never every row by default).
-
-#### Canary-v2 model comparison
-
-The next live canary must permit a small controlled comparison of candidate FA
-bulk model occupants on the SAME deterministic semantic sample (for example, Luna
-vs a stronger candidate).
-
-This comparison is a separately bounded paid canary, not the production run.
-
-Canary-v2 comparison requirements:
-
-- same semantic inputs;
-- same prompt/pipeline semantics;
-- model occupant recorded per run;
-- outputs shown side-by-side for review;
-- exact request/job caps;
-- no production expansion until manual approval.
+The historic Persian model-comparison canary is no longer a prerequisite. It
+remains preserved/retired evidence. Persian generation stays zero unless a later
+owner decision separately authorizes it.
 
 #### Full-run blockers
 
-The 960,442-job real production run remains strictly prohibited until ALL of the
-following are true:
+The production run remains strictly prohibited until ALL of the following are true:
 
 1. Repaired implementation accepted;
 2. All repaired A13 tests green;
-3. Fresh canary-v2 completes without unresolved paid state;
-4. Persian model comparison reviewed;
-5. Orchestrator explicitly approves the FA bulk model (`PERSIAN BULK MODEL APPROVED: <model>`);
-6. DE/FA semantic sample accepted;
-7. Selective QA actually executes successfully;
-8. Generated-output classification remains approved;
-9. Credential handling remains compliant;
-10. Explicit orchestrator authorization for the full run is issued.
+3. rebuilt Persian source coverage report is accepted and the owner has seen its
+   remaining-gap count;
+4. any required owner Persian-gap decision is recorded;
+5. German source-first queue size is measured;
+6. small live German canary and semantic inspection pass without unresolved paid
+   state;
+7. selective QA actually executes successfully;
+8. current production model/endpoint Batch support is confirmed;
+9. generated-output classification, credential handling, and cost estimate are
+   accepted;
+10. explicit orchestrator authorization for the full Batch run is issued.
 
 No worker may infer full-run authorization merely because a canary passes.
 
@@ -885,6 +871,9 @@ Record only executable evidence.
 Phase-A report includes:
 
 - accepted Stage-02 input SHA/bytes/counts;
+- Persian source candidate/acceptance metadata, source digests/licenses, and
+  exact-mapping evidence;
+- missing-FA coverage report counts and deterministic sample;
 - Stage-03 queue SHA/bytes;
 - total queue records;
 - queue counts by language/job class;
@@ -920,8 +909,9 @@ Phase-A report includes:
 - proof bulk completed, rejected, and QA completion states are independently durable;
 - generated-output classification included in checkpoint compatibility identity;
 - durable rejected state counts, validation error breakdown, and explicit retry manifest verification;
-- per-language bulk model occupants recorded;
-- Persian ZWNJ and bidi-control test results;
+- generated DE/EN model occupants recorded;
+- Batch manifest/checkpoint state and `custom_id` join evidence;
+- source-backed Persian ZWNJ/bidi, provenance, license, and human-sample evidence;
 - verification of legacy first-canary preservation.
 
 Do not record:
@@ -942,6 +932,12 @@ STOP and return to the slice-6 orchestrator if:
   allowlist;
 - Stage-03 queue semantics cannot be reconciled with accepted ADR-0004 without a
   new architecture decision;
+- a proposed DE→FA/EN→FA source lacks explicit license, reproducible identity,
+  deterministic extraction, or exact-sense mapping proof;
+- any Persian mapping is ambiguous, except that the candidate is rejected and
+  reported as a gap without producing an FA row;
+- the missing-FA report is ready but an owner Persian-gap decision required for
+  subsequent work is absent;
 - Stage-04 would require runtime LLM/API dependency;
 - a provider secret would need to be committed, printed or written to an image;
 - provenance cannot satisfy D45/R11;
@@ -964,7 +960,10 @@ STOP if:
 - any candidate in a returned unit is rejected before submitting another paid bounded unit;
 - restart would automatically resubmit rejected IDs without explicit authorization;
 - legacy first-canary `bulk.in_flight` state would be cleared, migrated, or resubmitted;
-- full FA run is attempted before explicit `PERSIAN BULK MODEL APPROVED: <configured model>` record;
+- any automatic Persian LLM fallback or reuse of historical Persian queue/checkpoint
+  identity is attempted;
+- configured production model/endpoint does not support the required Batch
+  contract, or a production Batch submission lacks explicit authorization;
 - arbitrary `Cf` format characters are accepted or forbidden bidi controls are not rejected;
 - successfully billed bulk work can complete without becoming durably
   checkpointed before later paid work;
