@@ -507,3 +507,178 @@ Next required session:
 **Cold review #1 — broad architecture challenge**, per WORKFLOW §7 / AGENTS G7.
 
 No pronunciation implementation may begin while `NEEDS COLD REVIEW` remains.
+
+### Cold review #1 — BROAD ARCHITECTURE CHALLENGE — OBJECTIONS
+
+**Reviewer:** fresh cold-review orchestrator session, 2026-08-21, repo-only
+context per WORKFLOW §7 / AGENTS G7.
+
+**Verdict: OBJECTIONS — `NEEDS COLD REVIEW` stays.** D48's top-level precedence,
+D50's sacred-vs-disposable separation and crash-safety invariant, ADR-0002/R12
+browser guards, opportunistic network fallback, the no-runtime-LLM boundary, and
+the ordinary-export/full-backup distinction are sound. The blockers below are
+concrete executability, persistent-identity, data-lifecycle, licensing, and cache
+integrity defects.
+
+### O1 — BLOCKING. Piper is the accepted offline floor, but no executable slice owns putting the engine/voice into the runtime image.
+
+**Conflicting contract.** ADR-0001 §12 requires the Piper voice to be downloaded
+at image-build time. ADR-0002 D26 makes local Piper the authoritative TTS fallback.
+ADR-0005 D48/D52/D55 again require local Piper to be the always-usable offline
+floor and generate/cache it on demand. Yet `tasks/slice-6.md` owns the project's
+first Dockerfile and A12 limits that Docker foundation to Python/runtime
+requirements plus `de_core_news_md`, says not to invent pronunciation/audio
+architecture, and says a later accepted pronunciation ADR may require a brief
+amendment. D56 instead says slice-6 remains unchanged and assigns pronunciation
+implementation to slice-7/8; `docs/plan.md` likewise gives slice-7 runtime work
+but no explicit Docker/Piper prerequisite.
+
+**Concrete failure mode.** slice-6 can correctly close under its current brief
+with an image containing no Piper engine or voice. slice-7 can then implement the
+pronunciation state machine while the runtime image lacks the capability that
+D26/D48 define as the correctness floor. A worker would have to silently expand a
+closed slice, silently reopen the Docker contract in slice-7, or ship a runtime
+whose offline fallback is false. The separate Piper engine/model/voice licensing
+statement in D53 also has no owner at the point the distributable image must
+choose and carry that artifact.
+
+**Why blocking.** This is a direct accepted-ADR/slice sequencing contradiction and
+makes the offline correctness floor non-executable as currently briefed.
+
+**Required remedy direction.** Assign the build-time Piper prerequisite
+explicitly before pronunciation runtime work. The straightforward repair is to
+amend D56, `docs/plan.md`, `docs/backlog.md`, and `tasks/slice-6.md` so slice-6's
+Dockerfile installs and verifies a pinned Piper engine plus selected voice/model
+at image-build time, with the voice/model license/classification and attribution
+checked for distribution. This is runtime capability only: it must not add a
+bulk pre-generated audio database or pronunciation LLM work. If governance
+instead deliberately assigns the Dockerfile amendment to slice-7, that ownership
+must be explicit in D56/plan/the future slice-7 brief and must land before any
+pronunciation path can claim Piper availability; it may not remain implicit.
+
+### O2 — BLOCKING. D51's lemma-only minimum identity can persistently bind audio to the wrong pronunciation variant.
+
+**Conflicting contract.** D51 makes ADR-0004 D47's stable lemma semantic ref the
+minimum durable pronunciation target and says a stable sense/variant discriminator
+"may" be added when a real pronunciation distinction requires it. D47's
+`lemma.semantic_ref` is derived from German lemma text, POS and gender, while
+`sense.semantic_ref` is the stable sense-level identity. The lemma ref therefore
+does not, by construction, distinguish every pronunciation-bearing sense or
+variant.
+
+**Concrete failure mode.** German can have pronunciation/stress/separability
+distinctions under the same written lemma and POS. If an implementation exercises
+D51's permitted lemma-only identity, custom audio saved for one such target can be
+reused or rebound to a different pronunciation-bearing sense after note reuse or
+dictionary replacement even though numeric IDs were avoided. That is a materially
+wrong persistent association, not merely a UI preference.
+
+**Why blocking.** The ADR's durable identity rule explicitly permits a key that is
+not sufficiently discriminating for the state it persists.
+
+**Required remedy direction.** Define the ownership/key of custom pronunciation
+unambiguously (for example note-local versus reusable target media) and make a
+stable discriminator mandatory whenever more than one real pronunciation can
+share a lemma ref. Use a stable `sense_ref` when sense identity is the distinction,
+or define a deterministic stable pronunciation-variant ref when the distinction
+is not sense-based. Missing/ambiguous discriminators must fail closed; numeric
+variant order and fuzzy/closest rebinding remain forbidden.
+
+### O3 — BLOCKING. Unsaved microphone/upload preview bytes have no lifecycle or storage owner.
+
+**Conflicting contract.** D49 defines `Stop -> Preview -> Save`, says stopping is
+not saving, and says upload and microphone recording share backend validation and
+persistence semantics. D50/§5 classify saved custom media as sacred and automatic
+human/Piper media as disposable, but the unsaved preview is in neither domain.
+The ADR states that Retake may replace the preview, but does not say whether that
+preview is browser-only, server-staged, persisted across restart, backed up, or
+cleaned after abandonment/crash.
+
+**Concrete failure mode.** A conforming backend can stage microphone/upload bytes
+on disk for preview yet have no rule that removes an abandoned take after Retake,
+page close, validation failure, process restart, or crash. Private user recordings
+can accumulate indefinitely or be deleted/retained inconsistently because they
+are neither sacred saved media nor an owned disposable cache.
+
+**Why blocking.** This is an unowned user-content lifecycle at the microphone /
+upload privacy boundary.
+
+**Required remedy direction.** Classify unsaved preview explicitly. Either keep it
+browser-local until Save, or define a dedicated temporary staging domain with a
+single owner and deterministic cleanup/recovery rules. It must never become the
+active override or full-backup data before explicit Save; Retake/failed validation
+may alter only the preview; Save promotes validated media through the D50
+crash-safe boundary without endangering the currently saved file. Exact TTLs and
+file paths may remain implementation-owned.
+
+### O4 — BLOCKING. Human-recording eligibility is circular, and the runtime discovery path is not reconciled with the accepted live-Wiktionary rejection.
+
+**Conflicting contract.** D48 permits a human recording only from an "approved
+Wiktionary/Wikimedia source" and D53 rejects media whose metadata is insufficient
+under "the application's media-use policy", but neither the approved-source set,
+the media-use policy, nor the owner/version of that policy exists in the
+repository. Separately, ADR-0001 §9 rejects a live Wiktionary API at runtime,
+while D52/§3 introduce opportunistic human-source lookup/download without saying
+whether that accepted rejection still applies to pronunciation discovery.
+
+**Concrete failure mode.** slice-7 cannot deterministically decide whether a
+recording with a particular license/classification is eligible for runtime cache
+or packaging, nor whether querying Wiktionary live for pronunciation metadata is
+forbidden or is a narrow supersession. Two conforming implementations can accept
+different licenses/sources or one can silently violate an accepted rejected
+runtime dependency.
+
+**Why blocking.** Eligibility and discovery require product/distribution policy,
+not a codec implementation detail; leaving them undefined makes the feature
+non-deterministic and risks incompatible distribution/provenance handling.
+
+**Required remedy direction.** Define a versioned/owned human-media eligibility
+contract: approved discovery/source mechanisms, normalized license/classification
+handling, required attribution fields, fail-closed treatment for unknown or
+insufficient metadata, and any distinction between disposable runtime caching and
+redistribution/packaging. Explicitly reconcile ADR-0001's live Wiktionary API
+rejection: either keep it forbidden and choose a compliant discovery mechanism
+(such as a permitted Wikimedia/static-metadata path), or record a narrow explicit
+supersession for pronunciation metadata. Do not invent copyright conclusions;
+make the software's accept/reject rule executable.
+
+### O5 — BLOCKING. "Cached and still-valid human recording" has no byte-integrity/provenance-binding contract.
+
+**Conflicting contract.** D48 selects only a validated human recording and D52
+allows a cached human recording when "still-valid"; D53 requires provenance
+metadata. But D54's actual-content, bounded-media validation applies only to
+learner-supplied upload/recording, and no decision states how downloaded human
+bytes remain bound to the provenance/license record that describes them.
+
+**Concrete failure mode.** A downloaded cache file can be truncated, replaced, or
+mismatched with stale metadata and still be served as the attributed/licensed
+human recording; alternatively malformed remote media can bypass the explicit
+learner-media validation boundary. In either case the application can serve
+corrupt or misattributed bytes instead of invalidating the entry and using Piper.
+
+**Why blocking.** This is an integrity/provenance failure in a runtime media path,
+not a cache-eviction optimization.
+
+**Required remedy direction.** Treat downloaded human media as untrusted bytes as
+well. Define a cache-validity invariant that validates supported media/bounds
+before first use and binds retained provenance to the exact validated object
+(e.g. digest + byte size or an equivalent immutable identity). On cache load,
+corruption, metadata/object mismatch, unsupported content, or failed validation
+invalidates the disposable entry and falls through to Piper. Exact safe limits,
+container/codec set, and chosen digest mechanics may remain implementation-slice
+decisions.
+
+### Cross-file remedy requirement
+
+Resolving O1–O5 must propagate the resulting accepted contract through the
+repository memory rather than relying on this ADR alone. In particular, use
+amendment/supersession records rather than rewriting historical accepted ADR
+bodies; reconcile ADR-0001 §11/§12/§9 and ADR-0002 D26 where the remedies require
+it; update `docs/plan.md` slice-6/7/8 ownership and `docs/backlog.md`; and amend
+`tasks/slice-6.md` before dispatch if O1 assigns the Piper image prerequisite to
+slice-6. Existing AGENTS R1/R9/R12/R13 are otherwise sufficient; no new AGENTS
+rule is required by this review.
+
+**NEXT: ADR-0005 revision session.** Preserve D48–D56 and all Rejected choices;
+add explicit resolution records beneath O1–O5, make only the required cross-file
+contract remedies, and then send the revised lineage to fresh cold review #2.
