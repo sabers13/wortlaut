@@ -707,8 +707,6 @@ Tests cover at minimum:
 Stage 03:
 - deterministic queue IDs/order;
 - input-order independence where relevant;
-- exact DE→FA mapping and primary precedence;
-- ambiguous DE→FA and EN→FA bridge mapping reject with no FA row;
 - deterministic missing-FA coverage report/sample and owner STOP;
 - missing-EN classification;
 - source-first German retention and DE learner-meaning fallback classification;

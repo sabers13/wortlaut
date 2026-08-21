@@ -339,8 +339,10 @@ A canary never implies full-run authorization.
 
 - Persian remains a first-class optional learner-meaning language, but source
   coverage—not a generated default—determines current availability.
-- A valid architecture may initially have only DE→FA ingestion; EN→FA is
-  optional until D60 is proven. Measured gaps are preferable to guessed mapping.
+- A valid architecture may initially have only the direct English-edition
+  canonical-source FA relation; the German-Wiktionary cross-edition fallback is
+  optional until the D60 bridge is proven. Measured gaps are preferable to
+  guessed mapping.
 - Stage-03/04 implementation must be revised before any paid work: old Persian
   jobs and multi-item prompt transport are historical, not forward contracts.
 - Batch reduces provider processing cost only when currently available; it does
