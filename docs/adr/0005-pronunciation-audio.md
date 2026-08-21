@@ -116,8 +116,20 @@ Revert to automatic
 A microphone take is never saved merely because recording stopped. Saving custom
 audio is an explicit learner action.
 
-Upload and microphone recording use the same backend validation and persistence
-contract.
+Before explicit Save, microphone and upload preview bytes remain browser-local
+only. The browser may hold them as temporary Blob/object-URL state or an
+equivalent browser-local representation. Preview, Retake, and choosing another
+upload replace only that temporary browser-local state.
+
+The backend receives the media bytes only when the learner explicitly chooses
+Save as pronunciation. Page close, navigation, refresh, or abandoning the edit
+naturally discards the unsaved browser-local preview. Unsaved preview is not
+sacred user data, is not backup/export state, and can never be an active custom
+override.
+
+On explicit Save, microphone and upload bytes enter the same backend
+untrusted-media validation and durable-save contract. A failed validation or
+failed save leaves any previously saved custom pronunciation unchanged.
 
 If microphone permission is denied, unavailable or unsupported:
 
@@ -167,30 +179,64 @@ Saving a custom override does not destroy the automatic pronunciation path.
 restore automatic selection. It must not require deleting the human/Piper source
 capability.
 
+Replacing an existing saved custom pronunciation is commit-after-validation,
+never delete-then-create. The candidate replacement is first received, bounded,
+validated as actual media, and durably written under a non-active object identity.
+Only after those steps succeed may the durable override metadata atomically
+switch to the new object.
+
+Until that activation commit succeeds, the old saved custom object remains the
+active pronunciation and must not be destroyed. Failure or crash before the
+activation commit leaves the old object active. Any unreferenced candidate object
+left by an interrupted save is cleanup-only state and may be reclaimed
+deterministically after recovery. After a successful activation commit, the
+superseded object may be reclaimed according to implementation-owned cleanup
+rules.
+
+Exact paths and physical transaction/file mechanics are implementation-owned,
+but no saved override may reference an incomplete or unvalidated object.
+
 ### D51 — Stable pronunciation target identity
 
-Durable custom pronunciation must never be keyed solely by asset-local numeric
-`lemma_id` or `sense_id`.
+Durable pronunciation state never treats asset-local numeric `lemma_id`,
+`sense_id`, cache row IDs, or variant ordinals as authoritative identity.
 
-The minimum durable target identity is ADR-0004 D47's stable lemma semantic
-reference.
+v1 custom pronunciation ownership is **note-local**: a learner saves an override
+for one vocabulary note. Custom media is not automatically shared or reused
+between two notes merely because their dictionary targets happen to match.
+Dictionary semantic identity is nevertheless persisted with the note-local media
+so dictionary replacement can determine whether the saved association is still
+safe.
 
-An optional stable sense/variant discriminator may additionally be used when a
-real pronunciation distinction requires it.
+The durable pronunciation-target hierarchy is:
 
-A dictionary replacement must not silently attach a learner's recording to an
-unrelated word because a numeric SQLite ID was recycled.
+1. A stable ADR-0004 D47 `lemma.semantic_ref` is sufficient only when the
+   pronunciation is genuinely uniform for that lemma target.
+2. When real pronunciation differs by semantic sense, the stable
+   `sense.semantic_ref` is mandatory in addition to the lemma ref.
+3. When a real pronunciation distinction exists that is not represented by
+   sense identity, a deterministic stable `pronunciation_variant_ref` is
+   mandatory.
 
-On dictionary replacement:
+`pronunciation_variant_ref` is intentionally narrow machinery, not a generic
+pronunciation ontology. It is a namespaced/versioned deterministic fingerprint
+over the stable lemma ref, the required stable sense ref when applicable, and the
+canonical pronunciation-distinguishing information actually available for that
+variant. The distinguishing information may include normalized IPA and an
+upstream stable variant identifier or stable locale/dialect/region qualifier when
+such metadata exists. A variant's ordinal, list position, database row number, or
+other ordering local to one dictionary build is never durable identity.
 
-* exact stable semantic re-binding may restore the active association;
-* no fuzzy/closest pronunciation-target guessing is allowed;
-* if a target cannot be safely rebound, fail closed;
-* preserve the learner-owned recording and its durable semantic identity even
-  when it is temporarily unbound.
+If real variants exist but the available stable data cannot uniquely distinguish
+the intended pronunciation, the identity is ambiguous and the association fails
+closed. The implementation must not guess a variant, fall back to a first/nearest
+variant, or fuzzy/closest rebind.
 
-Custom-audio lifecycle must therefore follow the same general durable-identity
-principle as ADR-0004 D47.
+On dictionary replacement, only an exact unambiguous stable-identity match may
+reactivate a saved association. Missing, disappeared, duplicate, or ambiguous
+identity leaves the learner-owned media preserved but temporarily unbound. No
+dictionary replacement may delete the recording merely because it cannot
+currently be rebound.
 
 ### D52 — Offline and network failure behavior
 
@@ -210,34 +256,73 @@ If human audio is:
 
 selection falls through to the automatic Piper-capable path.
 
+A cached human recording is "still-valid" only when it satisfies D53's current
+source/media-use-policy eligibility and D54's exact-object validation/integrity
+contract. An entry that no longer satisfies either is disposable and is ignored
+or invalidated; source selection continues through the automatic TTS path.
+
 A previously cached and still-valid human recording may be used offline.
 
 The implementation must not make first use appear broken while waiting for a
 human-audio network fetch. Automatic local pronunciation remains available.
 
-### D53 — Human-audio provenance and licensing
+### D53 — Human-audio provenance, discovery and media-use policy
 
-There is **no blanket Wiktionary/Wikimedia pronunciation-audio license** assumed
-by this application.
+There is no blanket Wiktionary/Wikimedia pronunciation-audio license assumed by
+the application.
 
-License and attribution may differ per recording.
+Eligibility is governed by a **versioned, source-controlled application
+human-media policy owned by the application maintainers**. Runtime responses,
+remote free text, and per-user configuration cannot silently redefine that
+policy. A policy version maps normalized upstream license/classification keys to
+explicit application decisions, including whether disposable runtime caching is
+permitted, whether redistribution/packaging is permitted, and which attribution
+fields must be retained. The software contract records classifications and
+applies the maintained policy; this ADR does not itself make a copyright
+conclusion about an upstream work.
 
-For each human recording retained in the automatic cache or distributed by an
-approved packaging mechanism, metadata must retain enough information to identify
-at least:
+For v1, approved runtime human-audio discovery is deliberately narrow:
 
-* upstream source/site;
-* upstream stable file/page identifier or equivalent source reference;
-* author/attribution when supplied or required;
-* exact license/classification supplied for that recording;
-* retrieval/cache metadata needed by the implementation to validate provenance.
+- generic live Wiktionary API lookup/page parsing remains rejected;
+- no runtime free-text Wiktionary or Wikimedia search by lemma is introduced;
+- a human recording may be considered only when source-backed dictionary data or
+  an application-shipped/versioned pronunciation manifest already provides an
+  exact upstream Wikimedia Commons file/page identity;
+- from that exact identity, the runtime may resolve the corresponding Commons
+  file metadata/media object using the approved metadata mechanism;
+- if no exact approved identifier exists, human audio is simply unavailable and
+  selection falls through to automatic TTS/Piper.
 
-If the required provenance/license metadata is insufficient under the
-application's media-use policy, that human recording is ineligible and selection
-falls through to Piper.
+This is a pronunciation-file metadata capability, not a reopening of
+ADR-0001's rejected "Live Wiktionary API at runtime" design: the application does
+not fetch dictionary entries, parse wiki fields, depend on generic search, or make
+human discovery a correctness dependency.
 
-Piper engine/model/voice licensing is a separate licensing concern from
-Wikimedia/Wiktionary human-audio licensing and must not be conflated with it.
+For every retained human recording, provenance metadata binds at least:
+
+- application media-policy version;
+- upstream source/site;
+- canonical stable upstream file/page identifier or equivalent source reference;
+- upstream metadata/revision identifier when supplied;
+- immutable/retrieved media source reference;
+- retrieval/cache metadata;
+- author/attribution text when supplied or required;
+- exact raw upstream license/classification;
+- normalized policy classification key;
+- the applicable runtime-cache and redistribution/packaging eligibility result.
+
+Unknown, unsupported, conflicting, or insufficient required metadata fails
+closed: that recording is ineligible and selection falls through to automatic
+TTS/Piper.
+
+Disposable runtime caching and redistribution/packaging are separate policy
+decisions. A recording may be eligible for a reconstructable local runtime cache
+without being eligible for redistribution. Packaging requires an explicit
+policy result permitting redistribution and retention of every required
+attribution/provenance field.
+
+Piper engine, model/voice, and training-dataset classifications are separate from
+human-recording classifications and remain independently recorded.
 
 ### D54 — Recording/upload validation boundary
 
@@ -264,6 +349,28 @@ browser capability.
 Microphone permission is requested only as needed for a user-initiated recording
 action.
 
+Downloaded human pronunciation media is untrusted input under the same
+actual-content principle. Before downloaded bytes can become a valid automatic
+cache entry, the application validates actual media content against
+implementation-owned bounded supported container/codec, byte-size, and duration
+limits.
+
+After validation, provenance/license/policy metadata is bound to the exact
+validated cached object through an immutable byte identity consisting of a
+collision-resistant digest plus exact byte size, or an equivalent immutable
+object identity. The chosen digest algorithm and safe media bounds are
+implementation-owned and executable-tested.
+
+On cache load, any missing bytes, corruption, digest mismatch, size mismatch,
+metadata/object mismatch, unsupported content, or media-validation failure
+invalidates that disposable entry. Invalid remote/downloaded media never becomes
+a valid cache hit.
+
+Invalidating human cache state always falls through to the automatic TTS path,
+including ADR-0002 D26's optional bounded remote `/speak` optimization when
+configured and local Piper as the correctness fallback. A corrupt human cache
+must never make card display, review, lookup, export, or pronunciation unusable.
+
 ### D55 — No LLM or bulk pronunciation-generation pipeline
 
 Pronunciation audio does **not** enter the multilingual LLM pipeline.
@@ -285,28 +392,70 @@ meaning-generation workload.
 
 ### D56 — Ownership and sequencing
 
-This ADR does **not** change slice-6's Stage-03/04/05 multilingual
-meaning-enrichment scope.
+slice-6 retains its existing Stage-03/04/05 multilingual meaning-enrichment and
+packaging scope. It additionally owns **only the build/runtime prerequisite**
+needed to make the already-accepted Piper correctness floor executable before
+runtime pronunciation work begins.
 
-No bulk pronunciation asset is added to slice-6.
+The slice-6 Docker/runtime foundation must:
 
-Primary implementation ownership is:
+- install and pin the Piper engine at image-build time;
+- install one explicitly selected/pinned German voice/model at image-build time;
+- verify the engine and selected voice/model are actually present and can be
+  invoked in the built runtime image;
+- record/verify the selected engine, voice/model and relevant dataset
+  distribution license/classification and preserve any required notices or
+  attribution;
+- fail closed during the build/release process if the pinned artifact,
+  classification, integrity information, or required distribution metadata
+  cannot be established.
 
-* **slice-7:** runtime/user-data pronunciation behavior, durable custom
-  recording/upload persistence, stable semantic targeting, automatic precedence,
-  human/Piper cache behavior, and the relevant API/render integration;
-* **slice-8:** end-to-end smoke verification including custom override,
-  Revert-to-automatic, offline fallback, unsafe-media rejection as applicable,
-  and dictionary-replacement/stable-ref scenarios.
+The initial pinned prerequisite is:
 
-If cold review establishes that a real build-time metadata prerequisite must land
-before slice-7, return to governance and amend sequencing explicitly. Do not
-silently expand slice-6.
+- engine package: `piper-tts==1.6.0`, current OHF-Voice Piper lineage,
+  package classification `GPL-3.0-or-later`;
+- German voice/model: `de_DE-thorsten-high` from `rhasspy/piper-voices`, pinned
+  to immutable source revision
+  `8aaa3c9839d2b669cb57a94e1ec92ae0928897e8`;
+- model SHA-256:
+  `9df1c43c61149ef9b39e618e2b861fbe41e1fcea9390b2dac62e8761573ea4f1`;
+- preserve the voice repository's declared MIT metadata and the model card's
+  Thorsten-Voice dataset classification `CC0`.
 
-Future implementation briefs must independently apply WORKFLOW §6's path-based
-risk lookup. In particular, user-data migration, public API or data-loss paths
-may make the implementation risk-labeled even though this ADR drafting operation
-is not a slice.
+These records are artifact classifications used by the build/release contract,
+not a claim that one license universally describes every Piper-related artifact.
+If authoritative upstream metadata for the pinned artifact conflicts with the
+recorded classification at implementation/release time, STOP at governance
+rather than guessing.
+
+This slice-6 addition is **not pronunciation feature implementation**. slice-6
+must not add:
+
+- bulk pre-generated Piper audio;
+- a pronunciation database;
+- runtime pronunciation source selection;
+- a pronunciation/audio HTTP API;
+- automatic pronunciation cache behavior;
+- custom recording or upload persistence;
+- human-audio discovery/download behavior;
+- pronunciation UI/browser behavior.
+
+Piper audio remains generated on demand by the later runtime feature; no
+whole-dictionary pronunciation asset is created.
+
+Primary feature ownership remains:
+
+- **slice-7:** runtime/user-data pronunciation behavior: note-local custom
+  recording/upload persistence, stable pronunciation targeting, source
+  precedence, approved human discovery, human/Piper cache behavior, crash-safe
+  replacement, and relevant API/render integration;
+- **slice-8:** end-to-end pronunciation smoke including custom override,
+  Revert-to-automatic, offline/Piper fallback, unsafe-media rejection,
+  human-cache corruption fallback, preview lifecycle, and
+  dictionary-replacement/stable-pronunciation-identity scenarios.
+
+Future implementation briefs still apply WORKFLOW §6 path-based risk lookup from
+their actual allowlists.
 
 ---
 
@@ -466,7 +615,9 @@ from their actual allowlist before implementation.
   identity rather than numeric IDs.
 * Human-media licensing becomes per-recording metadata rather than a package-wide
   assumption.
-* slice-6 remains focused on Stage-03/04/05 multilingual meaning enrichment.
+* slice-6 keeps its Stage-03/04/05 multilingual meaning enrichment work and adds
+  only the image-build Piper engine+voice prerequisite; runtime pronunciation
+  remains slice-7 and pronunciation smoke remains slice-8.
 * slice-7 gains the runtime/custom-audio implementation contract.
 * slice-8 gains end-to-end pronunciation smoke scenarios.
 * No runtime LLM or pronunciation-specific paid generation pipeline is added.
@@ -490,7 +641,27 @@ The owning implementation/smoke slices must cover at minimum:
 * disappeared stable target fails closed without deleting learner media;
 * human recording metadata preserves its actual source/license information;
 * custom uploads cannot escape their storage boundary;
-* runtime dependency graph remains free of LLM SDKs.
+* runtime dependency graph remains free of LLM SDKs;
+* lemma-only pronunciation identity is used only when genuinely lemma-uniform;
+* sense-distinct pronunciation requires stable sense identity;
+* non-sense pronunciation variation requires an unambiguous deterministic stable
+  variant ref; build-local variant ordinal is rejected;
+* ambiguous/missing pronunciation identity fails closed and preserves user media;
+* custom pronunciation ownership is note-local and is not silently shared across
+  notes;
+* microphone/upload preview remains browser-local before Save;
+* failed Save/validation and replacement crash preserve the old active saved
+  object;
+* exact-id Commons pronunciation metadata discovery does not become generic live
+  Wiktionary/free-text lookup;
+* unknown/unsupported media policy metadata fails closed;
+* runtime-cache eligibility and redistribution eligibility are independently
+  enforced;
+* downloaded human bytes are actual-media validated before caching;
+* human cache metadata is bound to the validated object's digest+size/equivalent
+  immutable identity;
+* missing/corrupt/mismatched human cache always falls through to automatic
+  TTS/local Piper.
 
 Exact HTTP/schema/file-layout assertions belong to the owning implementation
 brief rather than this ADR unless cold review finds a missing architectural
@@ -500,13 +671,19 @@ contract.
 
 ## Cold review
 
-This ADR has not yet received cold review.
+Cold review #1 — BROAD ARCHITECTURE CHALLENGE — recorded blocking objections
+O1–O5 below. The 2026-08-21 governance revision applies the explicit remedies
+without approving the ADR.
+
+`NEEDS COLD REVIEW` remains.
 
 Next required session:
 
-**Cold review #1 — broad architecture challenge**, per WORKFLOW §7 / AGENTS G7.
+**Cold review #2 — focused remedy verification**, per WORKFLOW §7 / AGENTS G7.
 
-No pronunciation implementation may begin while `NEEDS COLD REVIEW` remains.
+No pronunciation runtime implementation may begin while `NEEDS COLD REVIEW`
+remains. The slice-6 Piper image-build prerequisite is a build/runtime foundation
+amendment, not pronunciation feature implementation.
 
 ### Cold review #1 — BROAD ARCHITECTURE CHALLENGE — OBJECTIONS
 
@@ -556,6 +733,15 @@ instead deliberately assigns the Dockerfile amendment to slice-7, that ownership
 must be explicit in D56/plan/the future slice-7 brief and must land before any
 pronunciation path can claim Piper availability; it may not remain implicit.
 
+**Resolution (2026-08-21 revision): APPLIED.** D56 now assigns slice-6 only the
+Piper build/runtime prerequisite: a pinned engine and German voice/model are
+installed and verified at image-build time with artifact
+license/classification/integrity records. Runtime pronunciation behavior remains
+slice-7 and end-to-end pronunciation smoke remains slice-8. No bulk audio,
+pronunciation DB/API/cache/custom-media/human-discovery/UI work enters slice-6.
+The same prerequisite is propagated through the accepted-ADR amendment records,
+`docs/plan.md`, `docs/backlog.md`, and `tasks/slice-6.md`.
+
 ### O2 — BLOCKING. D51's lemma-only minimum identity can persistently bind audio to the wrong pronunciation variant.
 
 **Conflicting contract.** D51 makes ADR-0004 D47's stable lemma semantic ref the
@@ -584,6 +770,15 @@ or define a deterministic stable pronunciation-variant ref when the distinction
 is not sense-based. Missing/ambiguous discriminators must fail closed; numeric
 variant order and fuzzy/closest rebinding remain forbidden.
 
+**Resolution (2026-08-21 revision): APPLIED.** D51 now makes v1 custom
+pronunciation ownership note-local and defines an executable identity hierarchy:
+lemma ref only for genuinely lemma-uniform pronunciation, mandatory stable
+sense_ref for sense-distinct pronunciation, and a deterministic stable
+pronunciation-variant ref when a real distinction is not represented by sense
+identity. Numeric IDs and build-local variant ordinal/order are non-authoritative;
+missing/ambiguous identity fails closed; no fuzzy/closest rebinding is permitted;
+learner media is preserved while temporarily unbound.
+
 ### O3 — BLOCKING. Unsaved microphone/upload preview bytes have no lifecycle or storage owner.
 
 **Conflicting contract.** D49 defines `Stop -> Preview -> Save`, says stopping is
@@ -610,6 +805,14 @@ active override or full-backup data before explicit Save; Retake/failed validati
 may alter only the preview; Save promotes validated media through the D50
 crash-safe boundary without endangering the currently saved file. Exact TTLs and
 file paths may remain implementation-owned.
+
+**Resolution (2026-08-21 revision): APPLIED.** D49/D50 now choose the
+browser-local preview model. Microphone/upload bytes stay in browser-local
+temporary state until explicit Save; Retake or abandonment touches no saved
+media, and navigation naturally discards the preview. Save is the first backend
+media transfer and uses the common untrusted-media validation plus crash-safe
+promotion contract. A replacement never destroys the old active object until the
+new media is durably validated and atomically activated.
 
 ### O4 — BLOCKING. Human-recording eligibility is circular, and the runtime discovery path is not reconciled with the accepted live-Wiktionary rejection.
 
@@ -642,6 +845,15 @@ rejection: either keep it forbidden and choose a compliant discovery mechanism
 supersession for pronunciation metadata. Do not invent copyright conclusions;
 make the software's accept/reject rule executable.
 
+**Resolution (2026-08-21 revision): APPLIED.** D53 now gives human-media
+eligibility one versioned source-controlled policy owned by the application
+maintainers, defines required provenance/classification fields and fail-closed
+behavior, and separates disposable runtime-cache eligibility from
+redistribution/packaging eligibility. v1 discovery is limited to resolving exact
+Wikimedia Commons file/page identities already supplied by source-backed
+dictionary data or a versioned application manifest; generic live Wiktionary
+lookup/page parsing and free-text runtime search remain rejected.
+
 ### O5 — BLOCKING. "Cached and still-valid human recording" has no byte-integrity/provenance-binding contract.
 
 **Conflicting contract.** D48 selects only a validated human recording and D52
@@ -667,6 +879,15 @@ corruption, metadata/object mismatch, unsupported content, or failed validation
 invalidates the disposable entry and falls through to Piper. Exact safe limits,
 container/codec set, and chosen digest mechanics may remain implementation-slice
 decisions.
+
+**Resolution (2026-08-21 revision): APPLIED.** D52/D54 now define
+"still-valid" human cache by both policy eligibility and exact-object integrity.
+Downloaded media is untrusted and must pass actual-media validation before
+becoming a cache entry; provenance/license/policy metadata is bound to the
+validated bytes by digest+size or equivalent immutable identity. Missing,
+corrupt, mismatched, unsupported, or failed-validation cache entries are
+disposable and always fall through to automatic TTS/local Piper rather than
+breaking pronunciation or card/review behavior.
 
 ### Cross-file remedy requirement
 

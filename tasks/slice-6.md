@@ -1,11 +1,13 @@
 # Slice 6 — build stages 03–05: multilingual offline enrichment and packaging
 
 Task:        Implement the maintainer-operated offline dictionary stages 03–05
-             required by ADR-0001 §12, ADR-0002 §6 order 7, and ADR-0004
-             D33–D38/D45: deterministic enrichment queue construction,
-             multilingual build-time meaning generation/validation/QA, final
-             versioned dictionary packaging, and the first standalone Dockerfile.
-             Phase A ends before any paid full Stage-04 generation run.
+             required by ADR-0001 §12, ADR-0002 §6 order 7, ADR-0004
+             D33–D38/D45, and ADR-0005 D56: deterministic enrichment queue
+             construction, multilingual build-time meaning
+             generation/validation/QA, final versioned dictionary packaging,
+             and the first standalone Dockerfile with the build-time Piper
+             engine+voice prerequisite. Phase A ends before any paid full
+             Stage-04 generation run.
 
 Depends:     slice-5
 
@@ -67,6 +69,7 @@ The binding architecture is:
 - ADR-0001 §12, except where superseded;
 - ADR-0002 §6 order 7;
 - ADR-0004 D33–D38, D45 and §§3–8;
+- ADR-0005 D56 (Piper build/runtime prerequisite);
 - AGENTS R1 and R11;
 - docs/plan.md slice-6 row;
 - docs/backlog.md Stage-04 credit deadline.
@@ -114,12 +117,20 @@ In particular do NOT modify:
 - browser/API/UI code
 - pronunciation/audio runtime architecture
 
+Keep these prohibitions:
+
+- no app/runtime pronunciation implementation
+- no pronunciation database
+- no bulk Piper pre-generation
+- no runtime pronunciation API
+- no pronunciation selection/cache behavior
+- no custom recording/upload persistence
+- no human-audio discovery
+- no pronunciation UI/browser behavior
+- no Stage-04 pronunciation work
+
 No bulk pronunciation/audio database or LLM pronunciation pipeline belongs in
 this slice.
-
-If a later accepted pronunciation ADR changes the Dockerfile contract before
-slice-6 dispatch, the slice-6 orchestrator must amend this brief before Attempt 1.
-The worker must not silently anticipate that ADR.
 
 ## Acceptance
 
@@ -416,25 +427,45 @@ authorization after the final real enriched asset is accepted.
 
 Do not commit the packaged SQLite asset.
 
-### A12 — Dockerfile
+### A12 — Dockerfile and Piper build prerequisite
 
-Create the first standalone `Dockerfile` required by ADR-0002 §6 order 7.
+Create the first standalone `Dockerfile` required by ADR-0002 §6 order 7 and
+ADR-0005 D56.
 
-Phase-A Docker acceptance is limited to the currently decided runtime foundation:
+The Docker acceptance contract requires:
 
-- project/runtime Python dependencies install;
-- `de_core_news_md` is present at image-build time;
-- no API key;
-- no Stage-04 generation execution;
-- no LLM SDK in the runtime image dependency graph;
-- no source/Tatoeba/build cache or maintainer credential copied into the image;
-- no user SQLite database baked into the image.
+- existing Python/runtime foundation and `de_core_news_md`;
+- `piper-tts==1.6.0` pinned in the runtime image;
+- selected voice `de_DE-thorsten-high` pinned to source revision
+  `8aaa3c9839d2b669cb57a94e1ec92ae0928897e8`;
+- model SHA-256
+  `9df1c43c61149ef9b39e618e2b861fbe41e1fcea9390b2dac62e8761573ea4f1`;
+- image build verifies the expected model digest;
+- engine and voice are present at runtime;
+- a bounded smoke invocation proves Piper can synthesize with the selected
+  voice/model inside the built image;
+- build/release evidence records engine classification GPL-3.0-or-later,
+  separate voice-repository MIT metadata and Thorsten-Voice model-card dataset
+  classification CC0, plus required notices/attribution;
+- conflicting, missing, or unverifiable upstream artifact metadata is a STOP,
+  not a guessed license conclusion;
+- no runtime LLM SDK/API key/build cache/user DB enters the image;
+- no bulk pronunciation media is generated or baked in.
 
-Do not invent pronunciation/audio architecture or bulk audio assets in this
-slice.
+The future worker may decide ordinary Docker implementation details, but it may
+not choose a different engine/voice/identity/license policy without governance.
 
-A later accepted pronunciation ADR may require an orchestrator-authored brief
-amendment before slice-6 implementation proceeds.
+This addition is the build/runtime prerequisite only; slice-6 must not add:
+
+- app/runtime pronunciation implementation;
+- a pronunciation database;
+- bulk Piper pre-generation;
+- a runtime pronunciation API;
+- pronunciation selection/cache behavior;
+- custom recording/upload persistence;
+- human-audio discovery;
+- pronunciation UI/browser behavior;
+- Stage-04 pronunciation work.
 
 Loopback publication/CORS/API runtime behavior remains owned by later runtime
 slices.
@@ -486,9 +517,10 @@ Stage 05:
 - overwrite refusal;
 - metadata/checksum consistency.
 
-Docker:
+Docker / Piper prerequisite:
 - image build succeeds when container tooling is available;
-- runtime dependency inspection proves no LLM SDK.
+- runtime dependency inspection proves no LLM SDK;
+- mechanical evidence of the Piper pin, digest, presence, invocation, and recorded classification/notices.
 
 All prior Stage-01 and Stage-02 regressions remain passing.
 
@@ -559,6 +591,7 @@ Phase-A report includes:
 - rollback evidence;
 - Stage-05 fixture packaging evidence;
 - Docker build/runtime-dependency evidence;
+- mechanical evidence of the Piper pin, digest, presence, invocation, and recorded classification/notices;
 - targeted test counts;
 - Stage-01 regression count;
 - Stage-02 regression count;
@@ -598,8 +631,9 @@ STOP and return to the slice-6 orchestrator if:
 - checkpoint/resume cannot avoid duplicate paid submission;
 - the accepted Stage-02 asset would need in-place mutation;
 - Stage 05 would overwrite an existing dictionary release;
-- pronunciation/audio work becomes necessary;
-- a later accepted ADR changes this slice's Dockerfile/build contract;
+- STOP if satisfying the Piper prerequisite requires any runtime pronunciation
+  feature, API/cache/database/custom-media/human-discovery/UI work, a different
+  unpinned artifact, or an architecture/license decision not fixed by ADR-0005;
 - any mandatory gate/test fails;
 - Phase A reaches the paid-run boundary.
 

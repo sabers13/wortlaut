@@ -4,6 +4,35 @@
 from that session's brief plus its §17 plugin amendment. Do not edit the original
 text below; changes happen in later ADRs.
 
+**ADR-0004 activation record (2026-08-21).** ADR-0004 is now
+`ACCEPTED / FROZEN`; the older `ADR-0004 (pending)` / "not in force yet"
+annotations preserved below are historical status annotations only. Every
+supersession listed for ADR-0004 is in force. This activation record changes no
+ADR-0004 decision and does not reopen its frozen lineage.
+
+**Pending ADR-0005 amendment record (2026-08-21; not in force until ADR-0005
+approval).** If ADR-0005 is approved:
+
+- §12's image-build Piper requirement is made executable by ADR-0005 D56:
+  slice-6 installs/verifies the pinned Piper engine and one pinned German
+  voice/model as a Docker/runtime prerequisite only; runtime pronunciation
+  behavior remains later work and no bulk audio asset is introduced.
+- §8's historical blanket `Piper + espeak-ng | ... | MIT` row must not be used as
+  the current Piper engine classification. For the D56 pin, `piper-tts==1.6.0`
+  is recorded as `GPL-3.0-or-later`; `de_DE-thorsten-high` is separately pinned
+  to the recorded immutable voice revision/model digest, preserving its voice
+  repository MIT metadata and Thorsten-Voice dataset-model-card CC0
+  classification. The build/release process verifies these independently and
+  fails closed on conflicting/missing upstream metadata.
+- §9's rejected `Live Wiktionary API at runtime` alternative remains rejected.
+  D53 permits only the narrow pronunciation-only resolution of an exact
+  Wikimedia Commons file/page identity already supplied by source-backed data or
+  a versioned application manifest. It does not permit runtime Wiktionary field
+  parsing, generic page lookup, or free-text search.
+
+All unrelated ADR-0001 decisions and every Rejected alternative remain
+unchanged.
+
 **Partially superseded.** The following parts are revised by later ADRs; on
 conflict, the later ADR wins:
 
