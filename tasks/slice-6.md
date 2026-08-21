@@ -285,7 +285,15 @@ A restart must:
 
 Changing any material generation input — prompt/pipeline semantics, generation
 version, queue content, configured model role occupant where relevant — must not
-silently reuse an incompatible checkpoint.
+silently reuse an incompatible checkpoint. Incompatible reuse explicitly includes:
+
+- generated-output license/classification;
+- bulk prompt/pipeline version;
+- QA prompt/pipeline version;
+- any provider-response schema/version that materially changes interpretation.
+
+Do not make transport batch size part of durable semantic identity unless batch
+size itself changes the prompt/result semantics.
 
 The generation version is explicit.
 
@@ -295,6 +303,68 @@ First live generated rows use:
 
 unless the slice-6 orchestrator explicitly authorizes a successor marker before
 the real run.
+
+#### Incremental paid-work durability
+
+The live Stage-04 transport must expose paid work to the checkpoint layer in
+deterministic bounded units.
+
+It is not acceptable for `run_stage04` to hand the entire remaining real queue
+to an opaque provider transport and checkpoint only after all pending provider
+work has returned.
+
+Bulk generation and selective QA are BOTH paid-work phases for the purposes of
+resume safety.
+
+For bulk generation:
+
+- pending queue items are processed in deterministic bounded batches or
+  individually;
+- every successfully returned bulk candidate is structurally and
+  deterministically validated before it becomes reusable checkpoint state;
+- after each successfully validated bounded unit, the completed per-item result
+  is atomically persisted to the maintainer-local checkpoint BEFORE another
+  unpaid/pending bounded unit is submitted;
+- if a later request or process fails, already checkpointed bulk items remain
+  durable;
+- restart submits only bulk items whose compatible completed result is absent.
+
+For selective QA/correction:
+
+- the deterministic QA selection set is derived before paid QA submission;
+- QA completion state is durable per selected item;
+- every successfully returned and validated QA result is atomically checkpointed
+  before another unpaid/pending QA unit is submitted;
+- restart must not resubmit QA items whose compatible completed QA result is
+  already checkpointed;
+- an interruption after some QA items complete must preserve those completed
+  corrections.
+
+Checkpoint state must distinguish at least:
+
+- compatible bulk candidate completed;
+- QA required/not required for that item;
+- compatible QA correction completed where required.
+
+A partially completed checkpoint is valid only when all persisted completed
+entries are structurally valid and match the current checkpoint identity.
+
+A corrupt or incompatible partial checkpoint fails closed.
+
+Provider batching is an operational transport detail and must not alter durable
+logical output identity or final deterministic ordering.
+
+A provider transport must not hide successfully billed per-item/batch work from
+the checkpoint layer. If provider work can complete successfully without that
+completion becoming durably checkpointable before subsequent paid work, STOP.
+
+On resume, the final logical enriched output after an interruption must be
+equivalent to an uninterrupted run for the same compatible queue, generation
+version, prompts/pipeline semantics, model-role occupants, generated-output
+classification, and provider results.
+
+No generated SQLite output is published as complete until all required bulk and
+QA work for that run has completed and passed validation.
 
 ### A7 — Generated-row provenance and derivation
 
@@ -506,7 +576,40 @@ Stage 04:
 - completed-item no-resubmit;
 - corrupt checkpoint fail-closed;
 - rollback preserves source rows;
-- API secret never written/logged.
+- API secret never written/logged;
+- partial bulk interruption after at least one completed bounded unit;
+- restart after partial bulk interruption submits zero already-checkpointed bulk
+  item IDs;
+- resumed bulk run produces the same logical generated result set as an
+  uninterrupted equivalent run;
+- partial selective-QA interruption after at least one completed QA unit;
+- restart after partial QA interruption submits zero already-checkpointed QA item
+  IDs;
+- resumed QA run produces the same logical corrected result set as an
+  uninterrupted equivalent run;
+- bulk and QA completion states are independently represented in checkpoint
+  state;
+- corrupt partial bulk checkpoint fails closed;
+- corrupt partial QA checkpoint fails closed;
+- incompatible generated-output classification invalidates checkpoint reuse;
+- incompatible bulk prompt/pipeline version invalidates checkpoint reuse;
+- incompatible QA prompt/pipeline version invalidates checkpoint reuse.
+
+Tests must use fake/local deterministic transports only.
+
+No provider credential or network is used by these tests.
+
+The fake transport used for interruption testing must be able to:
+
+1. successfully complete and expose at least one bounded unit;
+2. deliberately fail afterward;
+3. permit restart from the persisted partial checkpoint;
+4. record exact submitted item IDs so no-resubmit is mechanically asserted.
+
+The test must track BOTH bulk submission IDs and QA submission IDs.
+
+A test that only performs one complete run followed by a second complete run is
+not sufficient evidence of interruption safety.
 
 Stage 05:
 - validation success;
@@ -571,6 +674,18 @@ authorizes any paid canary/full run explicitly.
 That continuation remains within the same WORKFLOW attempt when no code/design
 change is required.
 
+A live canary/full run remains blocked until the incremental bulk AND selective
+QA interruption/resume tests above pass on the committed implementation.
+
+The live provider path must also have:
+
+- explicit orchestrator authorization;
+- explicit maintainer-approved generated-output license/classification;
+- compatible provider/model configuration;
+- credential handling satisfying A5.
+
+No paid execution may be used as the test for whether checkpoint safety works.
+
 ### A16 — Report
 
 Create `tasks/slice-6.report.md`.
@@ -601,7 +716,19 @@ Phase-A report includes:
 - final branch HEAD;
 - push status;
 - exact Stop-and-ask conditions hit;
-- work left undone.
+- work left undone;
+- bulk transport bounded-unit policy;
+- partial bulk interruption point;
+- exact bulk item IDs submitted before failure;
+- exact already-completed bulk IDs skipped on restart;
+- partial QA interruption point;
+- exact QA item IDs submitted before failure;
+- exact already-completed QA IDs skipped on restart;
+- proof resumed logical result equals uninterrupted logical result;
+- checkpoint schema/version;
+- checkpoint identity components;
+- proof bulk and QA completion states are independently durable;
+- generated-output classification included in checkpoint compatibility identity.
 
 Do not record:
 
@@ -636,6 +763,18 @@ STOP and return to the slice-6 orchestrator if:
   unpinned artifact, or an architecture/license decision not fixed by ADR-0005;
 - any mandatory gate/test fails;
 - Phase A reaches the paid-run boundary.
+
+STOP if:
+
+- successfully billed bulk work can complete without becoming durably
+  checkpointed before later paid work;
+- successfully billed selective-QA work can complete without becoming durably
+  checkpointed before later paid QA work;
+- restart can resubmit any compatible completed bulk item;
+- restart can resubmit any compatible completed QA item;
+- the transport abstraction hides partial paid completion from the checkpoint
+  layer;
+- interruption/resume requires guessing whether provider work already completed.
 
 Do not solve a Stop-and-ask condition by changing architecture.
 
