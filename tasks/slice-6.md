@@ -205,7 +205,7 @@ it.
 When simplifying source-backed German wording, persist a separate generated row
 and preserve the original source row.
 
-### A4 — Multilingual Stage-04 jobs
+### A4 — Multilingual Stage-04 jobs and Persian orthography
 
 Stage 04 supports ADR-0004 §8:
 
@@ -228,9 +228,57 @@ Persian generation is sense-disambiguated and receives deterministic available
 context such as lemma, POS, gender where relevant, semantic sense, English
 source meaning where available, and German source definition where available.
 
-Persian is stored as plain Unicode. Do not inject bidi control characters.
+Persian is stored as plain Unicode.
 
-### A5 — Offline-only LLM boundary
+#### Persian Unicode Policy
+
+The generated Persian text must follow standard Persian orthography and must
+never contain bidi direction-manipulation controls.
+
+Ordinary Persian orthography MUST NOT be rejected merely because it contains
+`U+200C` ZERO WIDTH NON-JOINER (ZWNJ).
+
+ALLOWED for FA text:
+
+- `U+200C` ZERO WIDTH NON-JOINER (ZWNJ) when used inside otherwise valid Persian
+  text.
+
+FORBIDDEN:
+
+- `U+061C` ARABIC LETTER MARK
+- `U+200E` LEFT-TO-RIGHT MARK
+- `U+200F` RIGHT-TO-LEFT MARK
+- `U+202A` LEFT-TO-RIGHT EMBEDDING
+- `U+202B` RIGHT-TO-LEFT EMBEDDING
+- `U+202C` POP DIRECTIONAL FORMATTING
+- `U+202D` LEFT-TO-RIGHT OVERRIDE
+- `U+202E` RIGHT-TO-LEFT OVERRIDE
+- `U+2066` LEFT-TO-RIGHT ISOLATE
+- `U+2067` RIGHT-TO-LEFT ISOLATE
+- `U+2068` FIRST STRONG ISOLATE
+- `U+2069` POP DIRECTIONAL ISOLATE
+
+Other Unicode control (`Cc`) and format (`Cf`) characters remain forbidden unless
+the brief explicitly lists an allowed exception. The validator must not be relaxed
+into accepting arbitrary `Cf` characters.
+
+#### Stronger-model Persian QA evaluation
+
+Selective QA for Persian candidates must evaluate:
+
+- semantic fidelity to the source sense;
+- preservation of grammatical/inflectional relationships (e.g. inflected forms,
+  plural forms, degrees of comparison, tense/person/mood);
+- natural idiomatic Persian phrasing;
+- learner usefulness;
+- correct Persian orthography including legitimate `U+200C` ZWNJ;
+- zero forbidden bidi controls.
+
+A structurally valid but unnatural or grammar-losing Persian candidate may be
+corrected by QA when selected. QA returns only the final structured candidate,
+never chain-of-thought.
+
+### A5 — Offline-only LLM boundary and per-language model roles
 
 AGENTS R1 remains absolute.
 
@@ -259,37 +307,59 @@ Never:
 
 Tests use a fake/mock transport and require no credential/network.
 
-Operational model occupants are configuration, not architecture. The current
-non-normative defaults from docs/plan.md are:
+#### Per-language bulk model roles
 
-- bulk structured generation: GPT-5.6 Luna;
-- selective semantic QA/correction: GPT-5.6 Terra.
+Stage 04 must allow configuring model occupants separately for at least:
 
-Do not encode those product names as immutable data-contract semantics.
+- `bulk DE` (German learner meaning bulk model);
+- `bulk EN` (English translation bulk model);
+- `bulk FA` (Persian translation bulk model);
+- `semantic QA` (selective semantic QA / correction model).
 
-### A6 — Structured generation and checkpoint/resume
+Operational model product names remain operational configuration, NOT
+architecture. The non-normative initial baseline defaults are:
+
+- bulk DE: `gpt-5.6-luna`;
+- bulk EN: `gpt-5.6-luna`;
+- bulk FA: to be decided by canary comparison and explicit approval (A15);
+- semantic QA: `gpt-5.6-terra`.
+
+Checkpoint compatibility must include every configured model role that can
+materially affect its corresponding generated output.
+
+Changing the FA bulk model must invalidate incompatible FA generation state and
+prevent silent reuse of incompatible FA completed results.
+
+Do not hard-code a permanent FA provider/model into the architecture.
+
+### A6 — Structured generation, checkpoint/resume, and paid-response state machine
 
 Paid generation must be resumable.
 
 Every generation item has a stable deterministic identity.
 
-Completed provider responses/results are checkpointed in maintainer-local,
-ignored build storage so interruption does not rebill completed work.
+Completed provider responses/results and rejected paid results are checkpointed in
+maintainer-local, ignored build storage so interruption does not rebill completed
+work.
 
 A restart must:
 
 - reuse exactly matching completed work;
 - not duplicate meaning rows;
 - not resubmit completed queue items;
+- not automatically resubmit rejected items without explicit authorization;
 - fail closed on corrupt/incompatible checkpoint state.
 
 Changing any material generation input — prompt/pipeline semantics, generation
-version, queue content, configured model role occupant where relevant — must not
-silently reuse an incompatible checkpoint. Incompatible reuse explicitly includes:
+version, queue content, configured model role occupants (per-language bulk model
+or QA model) — must not silently reuse an incompatible checkpoint. Incompatible
+reuse explicitly includes:
 
 - generated-output license/classification;
 - bulk prompt/pipeline version;
 - QA prompt/pipeline version;
+- configured bulk model for that language role;
+- configured QA model role;
 - any provider-response schema/version that materially changes interpretation.
 
 Do not make transport batch size part of durable semantic identity unless batch
@@ -304,7 +374,7 @@ First live generated rows use:
 unless the slice-6 orchestrator explicitly authorizes a successor marker before
 the real run.
 
-#### Incremental paid-work durability
+#### Paid-response state machine and bounded durability
 
 The live Stage-04 transport must expose paid work to the checkpoint layer in
 deterministic bounded units.
@@ -313,58 +383,91 @@ It is not acceptable for `run_stage04` to hand the entire remaining real queue
 to an opaque provider transport and checkpoint only after all pending provider
 work has returned.
 
+The checkpoint layer must strictly distinguish two distinct conditions:
+
+A. **IN_FLIGHT (Ambiguous request outcome):**
+   A request unit was transmitted over transport and no complete usable provider
+   response outcome is known (e.g. transport, network, timeout, or process failure
+   before a complete usable response was received).
+   - In this state, retain `in_flight` IDs in the checkpoint;
+   - STOP immediately;
+   - Never automatically resubmit or clear in-flight IDs.
+
+B. **RETURNED RESPONSE (Complete provider response received):**
+   The provider returned a complete response for the exact requested item-ID set.
+   The request is complete and may have been billed by the provider.
+
+For a complete returned bounded unit:
+
+1. Validate each returned candidate independently;
+2. Candidates that pass deterministic validation become durable **completed**
+   candidates;
+3. Candidates that fail deterministic validation become durable **rejected**
+   (validation-failed) paid results;
+4. Atomically persist that per-item result state to the maintainer-local
+   checkpoint;
+5. Clear the request's `in_flight` state because provider completion is no longer
+   ambiguous;
+6. If any candidate in that unit was rejected, STOP before submitting another
+   paid bounded unit;
+7. Restart MUST NOT automatically resubmit rejected IDs;
+8. A single invalid candidate must not erase, discard, or hide valid paid
+   candidates returned from the same bounded batch.
+
 Bulk generation and selective QA are BOTH paid-work phases for the purposes of
 resume safety.
 
-For bulk generation:
+#### Durable rejected state
 
-- pending queue items are processed in deterministic bounded batches or
-  individually;
-- every successfully returned bulk candidate is structurally and
-  deterministically validated before it becomes reusable checkpoint state;
-- after each successfully validated bounded unit, the completed per-item result
-  is atomically persisted to the maintainer-local checkpoint BEFORE another
-  unpaid/pending bounded unit is submitted;
-- if a later request or process fails, already checkpointed bulk items remain
-  durable;
-- restart submits only bulk items whose compatible completed result is absent.
+Checkpoint state must explicitly and durably represent rejected paid results.
 
-For selective QA/correction:
+For each rejected item, preserve at least:
 
-- the deterministic QA selection set is derived before paid QA submission;
-- QA completion state is durable per selected item;
-- every successfully returned and validated QA result is atomically checkpointed
-  before another unpaid/pending QA unit is submitted;
-- restart must not resubmit QA items whose compatible completed QA result is
-  already checkpointed;
-- an interruption after some QA items complete must preserve those completed
-  corrections.
+- item ID;
+- phase (`bulk` or `qa`);
+- deterministic / sanitized validation error code;
+- paid attempt count;
+- sufficient non-secret metadata to prove the item was returned and rejected.
 
-Checkpoint state must distinguish at least:
+Do not require persistence of raw unsafe provider text merely for diagnostics.
 
-- compatible bulk candidate completed;
-- QA required/not required for that item;
-- compatible QA correction completed where required.
+Rejected state must be structurally validated on checkpoint load. Corrupt or
+malformed rejected state fails closed.
 
-A partially completed checkpoint is valid only when all persisted completed
-entries are structurally valid and match the current checkpoint identity.
+Rejected IDs are NOT pending normal work. They may not be automatically
+resubmitted on normal restart.
 
-A corrupt or incompatible partial checkpoint fails closed.
+#### Explicit retry of rejected work
 
-Provider batching is an operational transport detail and must not alter durable
-logical output identity or final deterministic ordering.
+A knowingly authorized paid retry is distinct from accidental automatic
+resubmission.
 
-A provider transport must not hide successfully billed per-item/batch work from
-the checkpoint layer. If provider work can complete successfully without that
-completion becoming durably checkpointable before subsequent paid work, STOP.
+A rejected item may be retried ONLY when the orchestrator explicitly authorizes
+the exact rejected item IDs via a deterministic explicit recovery mechanism (such
+as a maintainer-local retry manifest or explicit CLI option).
 
-On resume, the final logical enriched output after an interruption must be
-equivalent to an uninterrupted run for the same compatible queue, generation
-version, prompts/pipeline semantics, model-role occupants, generated-output
-classification, and provider results.
+Explicit retry requirements:
 
-No generated SQLite output is published as complete until all required bulk and
-QA work for that run has completed and passed validation.
+- Exact item IDs explicitly authorized;
+- Prior rejected state preserved / recorded;
+- Durable paid-attempt count increments;
+- No wildcard "retry everything";
+- No implicit retry on ordinary restart;
+- No retry of genuinely ambiguous `in_flight` work;
+- Every retry remains checkpointed under compatible run identity.
+
+#### Legacy first-canary checkpoint preservation
+
+The existing first-canary checkpoint predates the repaired rejected-state
+semantics. Its five current `bulk.in_flight` IDs remain LEGACY UNRESOLVED.
+
+The implementation MUST NOT automatically reinterpret, clear, migrate, or
+resubmit those five IDs.
+
+The first canary is retired as failure evidence. Preserve its checkpoint and
+artifacts locally. After repaired implementation acceptance, the orchestrator
+will authorize a fresh deterministic canary-v2 rather than rewriting old paid
+state.
 
 ### A7 — Generated-row provenance and derivation
 
@@ -428,6 +531,12 @@ Validation covers at minimum:
 - duplicate detection;
 - obvious echo-the-lemma failures;
 - Persian-script expectation for FA;
+- Persian Unicode validation:
+  - ALLOWED: `U+200C` ZERO WIDTH NON-JOINER (ZWNJ) in valid Persian text;
+  - FORBIDDEN: bidi controls `U+061C`, `U+200E`, `U+200F`, `U+202A`–`U+202E`,
+    `U+2066`–`U+2069`;
+  - FORBIDDEN: general control characters (`Cc`) and unallowed format characters
+    (`Cf`);
 - German-language plausibility checks for DE;
 - forbidden/control-content checks;
 - derivation/provenance consistency.
@@ -446,9 +555,18 @@ seed/input identity.
 
 QA is selective, never every row by default.
 
-Record actual queue size, validation flags, QA sample size and correction counts
-in the report. ADR-0004 deliberately defines no fixed percentage acceptance
-threshold.
+Selective QA prompt for Persian enforces:
+
+- semantic fidelity;
+- preservation of grammatical/inflectional relationships;
+- natural idiomatic Persian phrasing;
+- learner usefulness;
+- correct Persian orthography including legitimate ZWNJ;
+- zero forbidden bidi controls.
+
+Record actual queue size, validation flags, QA sample size, correction counts,
+and rejected item counts in the report. ADR-0004 deliberately defines no fixed
+percentage acceptance threshold.
 
 ### A10 — Clean rollback
 
@@ -570,30 +688,43 @@ Stage 04:
 - zero-edge valid case;
 - generated→generated rejection;
 - deterministic validation;
+- Persian with legitimate `U+200C` ZWNJ passes validation;
+- Persian with prohibited bidi controls (`U+061C`, `U+200E`, `U+200F`, `U+202A`–`U+202E`, `U+2066`–`U+2069`) fails validation;
+- ordinary control characters/newlines where forbidden fail validation;
+- complete five-item provider response with four valid + one invalid:
+  - four valid candidates become completed;
+  - one invalid candidate becomes durable rejected;
+  - `in_flight` clears;
+  - execution STOPs before submitting the next paid request;
+- restart does not resubmit completed or rejected IDs;
+- transport failure with unknown provider outcome keeps `in_flight` and fails closed;
+- explicit retry manifest is required to retry rejected IDs;
+- retry manifest cannot authorize `in_flight` IDs;
+- explicit rejected retry increments durable paid-attempt state;
+- per-language DE/EN/FA model roles participate correctly in checkpoint compatibility;
+- FA model change cannot silently reuse incompatible FA completed state;
+- Persian QA prompt includes naturalness, grammatical/inflectional preservation, and ZWNJ/bidi requirements;
+- legacy first-canary in-flight checkpoint is not silently cleared or migrated;
 - suspicious-row routing;
 - deterministic audit sample;
 - checkpoint resume;
 - completed-item no-resubmit;
-- corrupt checkpoint fail-closed;
+- corrupt checkpoint fails closed;
 - rollback preserves source rows;
 - API secret never written/logged;
 - partial bulk interruption after at least one completed bounded unit;
-- restart after partial bulk interruption submits zero already-checkpointed bulk
-  item IDs;
-- resumed bulk run produces the same logical generated result set as an
-  uninterrupted equivalent run;
+- restart after partial bulk interruption submits zero already-checkpointed bulk item IDs;
+- resumed bulk run produces the same logical generated result set as an uninterrupted equivalent run;
 - partial selective-QA interruption after at least one completed QA unit;
-- restart after partial QA interruption submits zero already-checkpointed QA item
-  IDs;
-- resumed QA run produces the same logical corrected result set as an
-  uninterrupted equivalent run;
-- bulk and QA completion states are independently represented in checkpoint
-  state;
+- restart after partial QA interruption submits zero already-checkpointed QA item IDs;
+- resumed QA run produces the same logical corrected result set as an uninterrupted equivalent run;
+- bulk completed, rejected, and QA completion states are independently represented in checkpoint state;
 - corrupt partial bulk checkpoint fails closed;
 - corrupt partial QA checkpoint fails closed;
 - incompatible generated-output classification invalidates checkpoint reuse;
 - incompatible bulk prompt/pipeline version invalidates checkpoint reuse;
-- incompatible QA prompt/pipeline version invalidates checkpoint reuse.
+- incompatible QA prompt/pipeline version invalidates checkpoint reuse;
+- mocked tests make zero live requests.
 
 Tests must use fake/local deterministic transports only.
 
@@ -653,7 +784,7 @@ Against the accepted real Stage-02 asset:
 If real Stage-03 queue construction shows a contract ambiguity requiring an ADR
 decision, STOP and return to the orchestrator.
 
-### A15 — Paid-run authorization boundary
+### A15 — Paid-run authorization boundary, Persian Quality Gate, and Canary-v2
 
 After Phase-A implementation and real Stage-03 queue measurement, STOP.
 
@@ -661,8 +792,8 @@ Do NOT:
 
 - submit the full queue to an LLM provider;
 - consume the owner's Stage-04 credits;
-- perform a paid canary;
-- run selective real QA;
+- perform a paid canary without explicit authorization;
+- run selective real QA without explicit authorization;
 - claim the final real dictionary is Stage-05 complete;
 - publish a release.
 
@@ -674,17 +805,76 @@ authorizes any paid canary/full run explicitly.
 That continuation remains within the same WORKFLOW attempt when no code/design
 change is required.
 
-A live canary/full run remains blocked until the incremental bulk AND selective
-QA interruption/resume tests above pass on the committed implementation.
+#### Persian full-run quality gate
 
-The live provider path must also have:
+Before the full Stage-04 run, the orchestrator must explicitly approve the
+Persian bulk model based on live evidence.
 
-- explicit orchestrator authorization;
-- explicit maintainer-approved generated-output license/classification;
-- compatible provider/model configuration;
-- credential handling satisfying A5.
+A fresh deterministic canary-v2 must exercise Persian lexical AND
+grammatical/inflectional senses.
 
-No paid execution may be used as the test for whether checkpoint safety works.
+The evidence returned for each FA candidate must include:
+
+- lemma;
+- POS;
+- exact source English meaning/context;
+- generated Persian;
+- whether the source meaning represents an inflection/form relation;
+- model role occupant;
+- derivation IDs;
+- whether stronger QA selected/corrected it.
+
+The orchestrator manually evaluates at minimum:
+
+- exact sense preservation;
+- preservation of grammatical/inflectional relationships;
+- natural Persian phrasing;
+- learner usefulness;
+- correct Persian script/orthography;
+- no bidi-control abuse.
+
+The full FA run is blocked until the orchestrator explicitly records:
+
+`PERSIAN BULK MODEL APPROVED: <configured model>`
+
+Neither Luna nor Terra is presumed approved in advance; the canary decides.
+
+Selective QA remains selective as required by A9 (never every row by default).
+
+#### Canary-v2 model comparison
+
+The next live canary must permit a small controlled comparison of candidate FA
+bulk model occupants on the SAME deterministic semantic sample (for example, Luna
+vs a stronger candidate).
+
+This comparison is a separately bounded paid canary, not the production run.
+
+Canary-v2 comparison requirements:
+
+- same semantic inputs;
+- same prompt/pipeline semantics;
+- model occupant recorded per run;
+- outputs shown side-by-side for review;
+- exact request/job caps;
+- no production expansion until manual approval.
+
+#### Full-run blockers
+
+The 960,442-job real production run remains strictly prohibited until ALL of the
+following are true:
+
+1. Repaired implementation accepted;
+2. All repaired A13 tests green;
+3. Fresh canary-v2 completes without unresolved paid state;
+4. Persian model comparison reviewed;
+5. Orchestrator explicitly approves the FA bulk model (`PERSIAN BULK MODEL APPROVED: <model>`);
+6. DE/FA semantic sample accepted;
+7. Selective QA actually executes successfully;
+8. Generated-output classification remains approved;
+9. Credential handling remains compliant;
+10. Explicit orchestrator authorization for the full run is issued.
+
+No worker may infer full-run authorization merely because a canary passes.
 
 ### A16 — Report
 
@@ -727,8 +917,12 @@ Phase-A report includes:
 - proof resumed logical result equals uninterrupted logical result;
 - checkpoint schema/version;
 - checkpoint identity components;
-- proof bulk and QA completion states are independently durable;
-- generated-output classification included in checkpoint compatibility identity.
+- proof bulk completed, rejected, and QA completion states are independently durable;
+- generated-output classification included in checkpoint compatibility identity;
+- durable rejected state counts, validation error breakdown, and explicit retry manifest verification;
+- per-language bulk model occupants recorded;
+- Persian ZWNJ and bidi-control test results;
+- verification of legacy first-canary preservation.
 
 Do not record:
 
@@ -766,6 +960,12 @@ STOP and return to the slice-6 orchestrator if:
 
 STOP if:
 
+- transport failure leaves provider call outcome ambiguous (`in_flight` retained);
+- any candidate in a returned unit is rejected before submitting another paid bounded unit;
+- restart would automatically resubmit rejected IDs without explicit authorization;
+- legacy first-canary `bulk.in_flight` state would be cleared, migrated, or resubmitted;
+- full FA run is attempted before explicit `PERSIAN BULK MODEL APPROVED: <configured model>` record;
+- arbitrary `Cf` format characters are accepted or forbidden bidi controls are not rejected;
 - successfully billed bulk work can complete without becoming durably
   checkpointed before later paid work;
 - successfully billed selective-QA work can complete without becoming durably
