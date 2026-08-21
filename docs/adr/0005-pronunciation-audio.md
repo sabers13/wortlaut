@@ -1,6 +1,6 @@
 # ADR-0005 — Pronunciation audio precedence and user overrides
 
-**Status:** NEEDS COLD REVIEW
+**Status:** ACCEPTED / FROZEN. Approved at cold review #2 — FOCUSED REMEDY VERIFICATION (2026-08-21). `NEEDS COLD REVIEW` is removed.
 
 **Decision IDs:** D48–D56.
 
@@ -672,18 +672,12 @@ contract.
 ## Cold review
 
 Cold review #1 — BROAD ARCHITECTURE CHALLENGE — recorded blocking objections
-O1–O5 below. The 2026-08-21 governance revision applies the explicit remedies
-without approving the ADR.
+O1–O5 below. The 2026-08-21 governance revision applied the explicit remedies.
+Cold review #2 — FOCUSED REMEDY VERIFICATION — approved the ADR. `NEEDS COLD REVIEW` is removed. ADR-0005 is ACCEPTED / FROZEN.
 
-`NEEDS COLD REVIEW` remains.
-
-Next required session:
-
-**Cold review #2 — focused remedy verification**, per WORKFLOW §7 / AGENTS G7.
-
-No pronunciation runtime implementation may begin while `NEEDS COLD REVIEW`
-remains. The slice-6 Piper image-build prerequisite is a build/runtime foundation
-amendment, not pronunciation feature implementation.
+The slice-6 Piper image-build prerequisite is a build/runtime foundation
+amendment, not pronunciation feature implementation. Runtime pronunciation
+remains slice-7 and pronunciation smoke remains slice-8.
 
 ### Cold review #1 — BROAD ARCHITECTURE CHALLENGE — OBJECTIONS
 
@@ -900,6 +894,16 @@ it; update `docs/plan.md` slice-6/7/8 ownership and `docs/backlog.md`; and amend
 slice-6. Existing AGENTS R1/R9/R12/R13 are otherwise sufficient; no new AGENTS
 rule is required by this review.
 
-**NEXT: ADR-0005 revision session.** Preserve D48–D56 and all Rejected choices;
-add explicit resolution records beneath O1–O5, make only the required cross-file
-contract remedies, and then send the revised lineage to fresh cold review #2.
+### Cold review #2 — FOCUSED REMEDY VERIFICATION — APPROVED
+
+**APPROVED — remove NEEDS COLD REVIEW.**
+
+The focused remedy verification found no qualifying material blocker under
+WORKFLOW.md §7 / AGENTS G7. O1–O5 and all of their resolution records remain
+preserved. Their cross-file remedies are coherent, D48–D56 and every Rejected
+alternative remain unchanged, and no serious correctness, executability,
+integrity, persistent-state, security, or licensing-policy blocker remains.
+
+ADR-0005 is accepted and frozen. Administrative approval/removal of
+`NEEDS COLD REVIEW` does not create another cold-review requirement. No cold
+review #3 is required for this approved lineage.

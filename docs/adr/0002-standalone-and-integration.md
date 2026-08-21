@@ -18,13 +18,15 @@ D19, §17.7, and every unrelated Rejected choice remain in force.
 historical status annotations only and the listed ADR-0004 amendments are in
 force.
 
-**Pending ADR-0005 amendment record (2026-08-21; not in force until ADR-0005
-approval).** ADR-0002 D26 remains unchanged in behavior: local Piper is
-authoritative; optional remote `/speak` is bounded to total timeout <= 1 second
-and every remote failure falls back locally. ADR-0005 D56 makes that accepted
-local fallback executable by assigning slice-6 only the image-build/runtime
-Piper engine+voice prerequisite. Runtime pronunciation source selection,
-human/custom media, cache semantics, API and UI remain slice-7 work.
+**ADR-0005 activation record (2026-08-21).** ADR-0005 is now
+`ACCEPTED / FROZEN` (approved at cold review #2 — FOCUSED REMEDY VERIFICATION).
+The previously pending amendments are in force. ADR-0002 D26 remains unchanged in
+behavior: local Piper is authoritative; optional remote `/speak` is bounded to
+total timeout <= 1 second and every remote failure falls back locally. ADR-0005
+D56 makes that accepted local fallback executable by assigning slice-6 only the
+image-build/runtime Piper engine+voice prerequisite. Runtime pronunciation
+source selection, human/custom media, cache semantics, API and UI remain slice-7
+work.
 
 **Amended by ADR-0004 — pending cold review, not in force yet.** ADR-0004 is
 `NEEDS COLD REVIEW`; the rows below take effect only on its approval. It adds a

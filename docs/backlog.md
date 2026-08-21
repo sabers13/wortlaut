@@ -5,9 +5,6 @@ them. REJECTED items are listed so they do not resurface.
 
 ## Blocked
 
-- **ADR-0005 pronunciation audio:** ADR-0005 remains `NEEDS COLD REVIEW`; cold review #1 O1–O5 have been revised and the exact next governance action is fresh cold review #2 — focused remedy verification. No slice-7/8 pronunciation feature implementation begins until the ADR is accepted/frozen.
-
-  O1 changed the sequencing contract: slice-6 owns only the image-build/runtime Piper prerequisite — pinned engine, pinned German voice/model, license/classification/attribution/integrity verification and runtime-image availability. This is not pronunciation feature implementation. It adds no bulk audio, pronunciation DB/API/cache/custom media/human discovery/UI. Runtime pronunciation remains slice-7 and E2E pronunciation smoke remains slice-8.
 - **`reference/schema.sql` remains intentionally stale only for ADR-0004
   PART-B/runtime state.** The accepted and T3-reviewed slice-3 alignment resolves
   the PART-A dictionary shape: stable lemma/sense semantic refs,

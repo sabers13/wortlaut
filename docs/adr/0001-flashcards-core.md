@@ -10,8 +10,9 @@ annotations preserved below are historical status annotations only. Every
 supersession listed for ADR-0004 is in force. This activation record changes no
 ADR-0004 decision and does not reopen its frozen lineage.
 
-**Pending ADR-0005 amendment record (2026-08-21; not in force until ADR-0005
-approval).** If ADR-0005 is approved:
+**ADR-0005 activation record (2026-08-21).** ADR-0005 is now
+`ACCEPTED / FROZEN` (approved at cold review #2 — FOCUSED REMEDY VERIFICATION).
+The previously pending amendments are in force:
 
 - §12's image-build Piper requirement is made executable by ADR-0005 D56:
   slice-6 installs/verifies the pinned Piper engine and one pinned German

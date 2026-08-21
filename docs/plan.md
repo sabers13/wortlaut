@@ -19,8 +19,8 @@ and `tasks/<NEXT>.md` naming key on the slice ID, never the order number.
 | slice-4 | 5 | — | §6 order 5's thresholds govern verbatim. A design gate, not a §5 retry ladder: `<85%` returns to governance. |
 | slice-5 | 6 | — | Stage 02 imports `app/resolve.py`; cache keys include its SHA-256 (AGENTS R2/R3). |
 | slice-6 | 7 | — | Stages 03–05 and ADR-0004 multilingual enrichment remain unchanged; first Docker/runtime foundation additionally installs and verifies pinned Piper engine plus selected German voice/model at image-build time and records separate distribution classifications/required notices (prerequisite only: no pronunciation API/cache/custom media/human discovery/UI and no bulk audio generation/database); stage 04 completes before mid-September 2026 API-credit expiry. |
-| slice-7 | 8 | — | ADR-0003 review/mastery semantics and AGENTS R12/R13 land before browser integration; render/API supports note's selected DE/EN/FA meaning set, Persian RTL, tri-state noun plural on back (ADR-0004 §10), PART-B durable bindings, D47 atomic dictionary activation/relink, and stale-picker HTTP 409 before UI/browser completion; after ADR-0005 is accepted, owns runtime pronunciation feature (note-local custom record/upload persistence, stable pronunciation identity, human-media policy and exact-id discovery, precedence, human/Piper cache, crash-safe replacement and API/render integration). |
-| slice-8 | 9 | — | `reference/smoke_test.py` path defect repaired; assertions match ADR-0002 §4/§5, ADR-0003 §5, and ADR-0004 D47 replacement/stale-picker scenarios; after ADR-0005 is accepted, owns end-to-end pronunciation smoke (override/revert, browser-local unsaved preview, unsafe media, identity/replacement cases, human-cache integrity corruption, offline/remote failure and Piper fallback). |
+| slice-7 | 8 | — | ADR-0003 review/mastery semantics and AGENTS R12/R13 land before browser integration; render/API supports note's selected DE/EN/FA meaning set, Persian RTL, tri-state noun plural on back (ADR-0004 §10), PART-B durable bindings, D47 atomic dictionary activation/relink, and stale-picker HTTP 409 before UI/browser completion; owns runtime pronunciation feature (note-local custom record/upload persistence, stable pronunciation identity, human-media policy and exact-id discovery, precedence, human/Piper cache, crash-safe replacement and API/render integration). |
+| slice-8 | 9 | — | `reference/smoke_test.py` path defect repaired; assertions match ADR-0002 §4/§5, ADR-0003 §5, and ADR-0004 D47 replacement/stale-picker scenarios; owns end-to-end pronunciation smoke (override/revert, browser-local unsaved preview, unsafe media, identity/replacement cases, human-cache integrity corruption, offline/remote failure and Piper fallback). |
 | slice-9 | 10 | Lecture app Phase 4 decomposition complete | Read-only, out-of-ladder donor inspection (WORKFLOW §12 / AGENTS G6) writes `tasks/adr-0002-donor-notes.md` first; any contradiction returns to governance. Compose work starts only if donor evidence agrees and the host blocker is gone. |
 
 ## Dispatch boundaries
@@ -91,30 +91,34 @@ one blocking condition and three scope notes; the sequence is unchanged.
   language-bearing `/vocab/gloss` POST/DELETE endpoint, stable picker refs plus
   dictionary asset token, stale-token HTTP 409 rejection, D47 atomic
   activation/relink/rollback, and AGENTS R12/R13 runtime enforcement before
-  browser integration), after ADR-0005 is accepted it owns the runtime
+  browser integration), under accepted ADR-0005 it owns the runtime
   pronunciation feature: note-local custom record/upload persistence, stable
   pronunciation identity, human-media policy and exact-id discovery, precedence,
   human/Piper cache, crash-safe replacement and API/render integration.
 - **slice-8 / order 9 (smoke work):** In addition to the existing smoke work
   (repairing the `reference/smoke_test.py` baseline and end-to-end D47
-  replacement/stale-picker verification), after ADR-0005 is accepted it owns
+  replacement/stale-picker verification), under accepted ADR-0005 it owns
   end-to-end pronunciation smoke: override/revert, browser-local unsaved preview,
   unsafe media, identity/replacement cases, human-cache integrity corruption,
   offline/remote failure and Piper fallback.
 
-## Governance amendment — ADR-0005 revision (2026-08-21)
+## Governance amendment — ADR-0005 approval (2026-08-21)
 
-`docs/adr/0005-pronunciation-audio.md` remains `NEEDS COLD REVIEW`. Cold review #1
-recorded blocking objections O1–O5; this governance revision preserves those
-objections and applies the explicit remedies without approving the ADR. The next
-required governance action is fresh **cold review #2 — focused remedy
-verification**.
+`docs/adr/0005-pronunciation-audio.md` was approved and frozen at cold review #2 —
+**FOCUSED REMEDY VERIFICATION**. `NEEDS COLD REVIEW` is removed and ADR-0005 is
+`ACCEPTED / FROZEN`. Cold review #2 approved the O1–O5 remedies and confirmed
+cross-file coherence.
 
-The slice-6 Piper requirement above is only the pre-runtime image prerequisite
-identified by O1 (pinned engine, pinned German voice/model, and distribution
-classification verification at image-build time). It does not authorize
-pronunciation runtime implementation before ADR approval. No slice-7/8
-pronunciation feature implementation begins until ADR-0005 is accepted/frozen.
+The pronunciation scope assignments are active:
+- **slice-6** owns the Piper build/runtime prerequisite only (pinned engine,
+  pinned German voice/model, and distribution classification verification at
+  image-build time); no pronunciation API/database/cache/custom media/human
+  discovery/UI work enters slice-6;
+- **slice-7** owns the runtime pronunciation feature;
+- **slice-8** owns end-to-end pronunciation smoke.
+
+Stage-04 multilingual meaning-generation scope and the mid-September 2026
+API-credit expiry boundary remain unchanged.
 
 ### Operational defaults for the offline build (non-normative)
 

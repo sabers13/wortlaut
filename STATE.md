@@ -41,12 +41,11 @@ memory of a conversation.
   token-by-token parity passes.
 * **ADR-0004 remains ACCEPTED / FROZEN.** Cold review #3 was the FINAL
   CONVERGENCE REVIEW; there is no ADR-0004 review #4.
-* **ADR-0005 cold review #1 recorded O1–O5; this governance revision preserves
-  those objections and applies their explicit remedies. ADR-0005 remains
-  `NEEDS COLD REVIEW`; it is neither approved nor frozen.**
-  The O1 sequencing remedy gives slice-6 only the Piper image-build/runtime
-  prerequisite in addition to its existing stages 03–05 work. Runtime
-  pronunciation is still slice-7; E2E pronunciation smoke is still slice-8.
+* **ADR-0005 is ACCEPTED / FROZEN.** Cold review #2 — FOCUSED REMEDY
+  VERIFICATION — approved the O1–O5 remedies. O1–O5 and their resolution history
+  remain preserved. Slice-6 owns only the Piper image-build/runtime
+  prerequisite; slice-7 owns runtime pronunciation; slice-8 owns pronunciation
+  E2E smoke.
 * **Next implementation ownership is slice-6.** It owns stages 03–05, including
   deterministic multilingual enrichment queue construction, maintainer-only
   offline DE/EN/FA generation/validation/selective QA, final dictionary
@@ -97,12 +96,6 @@ memory of a conversation.
 
 ## Blocked
 
-* **ADR-0005 pronunciation audio remains `NEEDS COLD REVIEW` and blocks
-  pronunciation implementation.** Cold review #1 recorded O1–O5; this
-  governance revision applies the explicit remedies without approving the ADR.
-  The next required action is fresh cold review #2 — focused remedy verification.
-  No slice-7/8 pronunciation feature implementation begins until ADR-0005 is
-  accepted/frozen.
 * **ADR-0004 PART-B/runtime schema remains intentionally deferred to slice-7.**
   Remaining work includes note-local multilingual meaning state, durable
   dictionary bindings, active dictionary version+SHA state and D47 runtime
@@ -122,12 +115,16 @@ memory of a conversation.
 
 ## Next three actions
 
-1. **Open a fresh ADR-0005 cold review #2 — focused remedy verification — against
-   the committed/pushed governance revision. Do not open slice-6 first.**
-2. **Verify ADR-0005 governance closure.** Only after ADR-0005 reaches an
-   approving outcome and repository state is closed/pushed may the slice-6
-   startup verification resume.
-3. **Open slice-6 with formal startup verification and input check, conditional
-   on action 2.** Verify HEAD/manifest, clean local tree, origin sanity, fresh
-   `make gate`, STATE consistency, both audit triggers, `Depends: slice-5` merged,
-   and the accepted Stage-02 local input before Phase-A dispatch.
+1. **Open slice-6 with formal startup verification.** Verify this governance
+   close's final pushed main HEAD, clean local tree, origin sanity, fresh
+   `make gate`, STATE consistency, both audit triggers, and
+   `Depends: slice-5` merged.
+2. **Verify the accepted Stage-02 local input before dispatch.** Require SHA-256
+   `75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97`,
+   size `945410048`, `PRAGMA quick_check = ok`, and the accepted row counts
+   from `tasks/slice-6.md`. The asset remains local and uncommitted.
+3. **Dispatch slice-6 Phase A per `tasks/slice-6.md`** to
+   `gpt-5.6-terra / T3 / high` (fallback `opus-5 / T3 / high`). Phase A
+   implements/verifies stages 03–05, measures the real Stage-03 queue, uses
+   fake/local Stage-04 transport, verifies Stage-05 packaging and Docker/Piper,
+   and STOPS before any paid Stage-04 canary/full generation run.
