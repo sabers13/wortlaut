@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
+from typing import Any, cast
+from urllib import request as urllib_request
 
 import pytest
 
+import tools.build_dict as build_dict
 from tools.build_dict import (
     STAGE02_EXAMPLE_SCHEMA_SQL,
+    STAGE04_CHECKPOINT_FORMAT,
     BuildDictError,
     _audit_item_ids,
+    _checkpoint_identity,
     build_stage01,
     build_stage03,
     read_stage03_queue,
@@ -239,7 +245,7 @@ def test_stage04_rejects_implicit_network_and_secret_bearing_provider_payload(
 
     def secret_transport(items: list[dict[str, object]]) -> list[dict[str, object]]:
         response = _fake_candidates(items)
-        response[0]["api_key"] = "sk-this-must-not-persist-0123456789"
+        response[0]["api_key"] = "test-secret-must-not-persist"
         return response
 
     with pytest.raises(BuildDictError, match="structured schema"):
@@ -252,7 +258,9 @@ def test_stage04_rejects_implicit_network_and_secret_bearing_provider_payload(
             transport=secret_transport,
             qa_transport=lambda candidates: candidates,
         )
-    assert not checkpoint.exists()
+    checkpoint_state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert checkpoint_state["bulk"]["completed"] == {}
+    assert checkpoint_state["bulk"]["in_flight"]
     assert not (tmp_path / "secret.sqlite").exists()
 
 
@@ -293,6 +301,301 @@ def test_stage04_routes_all_suspicious_and_reproducible_audit_item_ids(
     assert suspicious <= selected_runs[0]
     assert expected_audit <= selected_runs[0]
 
+
+def _logical_generated_rows(path: Path) -> list[tuple[str, str, str, str, str]]:
+    with sqlite3.connect(path) as conn:
+        return conn.execute(
+            "SELECT s.semantic_ref, m.language, m.kind, m.text, m.license "
+            "FROM sense_meaning m JOIN sense s ON s.id=m.sense_id "
+            "WHERE m.source='llm_generated_v1' "
+            "ORDER BY s.semantic_ref, m.language, m.kind, m.ord"
+        ).fetchall()
+
+
+def test_stage04_bulk_partial_checkpoint_resume_and_equivalence(
+    queue_and_input: tuple[Path, Path], tmp_path: Path
+) -> None:
+    database, queue = queue_and_input
+    checkpoint = tmp_path / "checkpoint.json"
+    submitted: list[list[str]] = []
+    calls = 0
+
+    def interrupted(items: list[dict[str, object]]) -> list[dict[str, object]]:
+        nonlocal calls
+        calls += 1
+        submitted.append([str(item["item_id"]) for item in items])
+        if calls == 2:
+            raise RuntimeError("deliberate interruption after first bounded unit")
+        return _fake_candidates(items)
+
+    with pytest.raises(RuntimeError, match="deliberate interruption"):
+        run_stage04(
+            database,
+            queue,
+            tmp_path / "interrupted.sqlite",
+            checkpoint,
+            "test-only",
+            transport=interrupted,
+            qa_transport=lambda candidates: candidates,
+            batch_size=1,
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    first_id, second_id = submitted[0][0], submitted[1][0]
+    assert set(state["bulk"]["completed"]) == {first_id}
+    assert state["bulk"]["in_flight"] == [second_id]
+    with pytest.raises(BuildDictError, match="unresolved bulk"):
+        run_stage04(
+            database,
+            queue,
+            tmp_path / "must-not-resubmit.sqlite",
+            checkpoint,
+            "test-only",
+            transport=lambda _items: pytest.fail("unresolved paid work was resubmitted"),
+            qa_transport=lambda candidates: candidates,
+            batch_size=1,
+        )
+
+    # A process can be interrupted immediately after its first atomic completion
+    # checkpoint. That valid partial state is safely resumable and skips its ID.
+    state["bulk"]["in_flight"] = []
+    checkpoint.write_text(json.dumps(state), encoding="utf-8")
+    resumed_submitted: list[str] = []
+
+    def resumed_transport(items: list[dict[str, object]]) -> list[dict[str, object]]:
+        resumed_submitted.extend(str(item["item_id"]) for item in items)
+        return _fake_candidates(items)
+
+    resumed = tmp_path / "resumed.sqlite"
+    run_stage04(
+        database,
+        queue,
+        resumed,
+        checkpoint,
+        "test-only",
+        transport=resumed_transport,
+        qa_transport=lambda candidates: candidates,
+        batch_size=1,
+    )
+    assert first_id not in resumed_submitted
+
+    uninterrupted = tmp_path / "uninterrupted.sqlite"
+    run_stage04(
+        database,
+        queue,
+        uninterrupted,
+        tmp_path / "uninterrupted-checkpoint.json",
+        "test-only",
+        transport=_fake_candidates,
+        qa_transport=lambda candidates: candidates,
+        batch_size=3,
+    )
+    assert _logical_generated_rows(resumed) == _logical_generated_rows(uninterrupted)
+
+
+def test_stage04_qa_partial_checkpoint_resume_and_independent_state(
+    queue_and_input: tuple[Path, Path], tmp_path: Path
+) -> None:
+    database, queue = queue_and_input
+    checkpoint = tmp_path / "checkpoint.json"
+    submitted_qa: list[list[str]] = []
+    qa_calls = 0
+
+    def interrupted_qa(items: list[dict[str, object]]) -> list[dict[str, object]]:
+        nonlocal qa_calls
+        qa_calls += 1
+        submitted_qa.append([str(item["item_id"]) for item in items])
+        if qa_calls == 2:
+            raise RuntimeError("deliberate QA interruption")
+        return items
+
+    def flagged_bulk(items: list[dict[str, object]]) -> list[dict[str, object]]:
+        candidates = _fake_candidates(items)
+        for candidate in candidates:
+            if candidate["language"] == "de":
+                candidate["text"] = (
+                    "eins zwei drei vier fünf sechs sieben acht neun zehn elf zwölf dreizehn"
+                )
+        return candidates
+
+    with pytest.raises(RuntimeError, match="deliberate QA interruption"):
+        run_stage04(
+            database,
+            queue,
+            tmp_path / "interrupted.sqlite",
+            checkpoint,
+            "test-only",
+            transport=flagged_bulk,
+            qa_transport=interrupted_qa,
+            batch_size=1,
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    first_id, second_id = submitted_qa[0][0], submitted_qa[1][0]
+    assert state["bulk"]["completed"]
+    assert state["qa"]["required"]
+    assert set(state["qa"]["completed"]) == {first_id}
+    assert state["qa"]["in_flight"] == [second_id]
+    with pytest.raises(BuildDictError, match="unresolved QA"):
+        run_stage04(
+            database,
+            queue,
+            tmp_path / "must-not-resubmit.sqlite",
+            checkpoint,
+            "test-only",
+            transport=lambda _items: pytest.fail("bulk should already be complete"),
+            qa_transport=lambda _items: pytest.fail("unresolved QA was resubmitted"),
+            batch_size=1,
+        )
+
+    state["qa"]["in_flight"] = []
+    checkpoint.write_text(json.dumps(state), encoding="utf-8")
+    resumed_qa: list[str] = []
+
+    def resumed_transport(items: list[dict[str, object]]) -> list[dict[str, object]]:
+        resumed_qa.extend(str(item["item_id"]) for item in items)
+        return items
+
+    resumed = tmp_path / "resumed.sqlite"
+    run_stage04(
+        database,
+        queue,
+        resumed,
+        checkpoint,
+        "test-only",
+        transport=lambda _items: pytest.fail("completed bulk was resubmitted"),
+        qa_transport=resumed_transport,
+        batch_size=1,
+    )
+    assert first_id not in resumed_qa
+
+    uninterrupted = tmp_path / "uninterrupted.sqlite"
+    run_stage04(
+        database,
+        queue,
+        uninterrupted,
+        tmp_path / "uninterrupted-checkpoint.json",
+        "test-only",
+        transport=flagged_bulk,
+        qa_transport=lambda candidates: candidates,
+        batch_size=2,
+    )
+    assert _logical_generated_rows(resumed) == _logical_generated_rows(uninterrupted)
+
+
+@pytest.mark.parametrize(
+    ("keyword", "value"),
+    [
+        ("generated_license", "other-classification"),
+        ("bulk_pipeline_version", "bulk-v2"),
+        ("qa_pipeline_version", "qa-v2"),
+        ("provider_response_schema_version", "schema-v2"),
+    ],
+)
+def test_stage04_checkpoint_identity_changes_fail_closed(
+    queue_and_input: tuple[Path, Path], tmp_path: Path, keyword: str, value: str
+) -> None:
+    database, queue = queue_and_input
+    checkpoint = tmp_path / "checkpoint.json"
+    run_stage04(
+        database,
+        queue,
+        tmp_path / "first.sqlite",
+        checkpoint,
+        "test-only",
+        transport=_fake_candidates,
+        qa_transport=lambda candidates: candidates,
+    )
+    with pytest.raises(BuildDictError, match="incompatible"):
+        if keyword == "generated_license":
+            run_stage04(
+                database, queue, tmp_path / "second.sqlite", checkpoint, value,
+                transport=_fake_candidates, qa_transport=lambda candidates: candidates,
+            )
+        elif keyword == "bulk_pipeline_version":
+            run_stage04(
+                database, queue, tmp_path / "second.sqlite", checkpoint, "test-only",
+                transport=_fake_candidates, qa_transport=lambda candidates: candidates,
+                bulk_pipeline_version=value,
+            )
+        elif keyword == "qa_pipeline_version":
+            run_stage04(
+                database, queue, tmp_path / "second.sqlite", checkpoint, "test-only",
+                transport=_fake_candidates, qa_transport=lambda candidates: candidates,
+                qa_pipeline_version=value,
+            )
+        else:
+            run_stage04(
+                database, queue, tmp_path / "second.sqlite", checkpoint, "test-only",
+                transport=_fake_candidates, qa_transport=lambda candidates: candidates,
+                provider_response_schema_version=value,
+            )
+
+
+def test_stage04_rejects_corrupt_partial_phase_state(
+    queue_and_input: tuple[Path, Path], tmp_path: Path
+) -> None:
+    database, queue = queue_and_input
+    queue_sha = sha256_file(queue)
+    identity = _checkpoint_identity(
+        queue_sha,
+        "llm_generated_v1",
+        "test-only",
+        build_dict.STAGE04_DEFAULT_BULK_MODEL,
+        build_dict.STAGE04_DEFAULT_QA_MODEL,
+        build_dict.STAGE04_BULK_PIPELINE_VERSION,
+        build_dict.STAGE04_QA_PIPELINE_VERSION,
+        build_dict.STAGE04_PROVIDER_RESPONSE_SCHEMA_VERSION,
+    )
+    for phase in ("bulk", "qa"):
+        checkpoint = tmp_path / f"corrupt-{phase}.json"
+        state: dict[str, Any] = {
+            "format": STAGE04_CHECKPOINT_FORMAT,
+            "identity": identity,
+            **build_dict._empty_checkpoint(),
+        }
+        state[phase]["in_flight"] = [123]
+        checkpoint.write_text(json.dumps(state), encoding="utf-8")
+        with pytest.raises(BuildDictError, match="invalid in-flight"):
+            run_stage04(
+                database,
+                queue,
+                tmp_path / f"{phase}.sqlite",
+                checkpoint,
+                "test-only",
+                transport=_fake_candidates,
+                qa_transport=lambda candidates: candidates,
+            )
+
+
+def test_stage04_fixture_mode_is_explicit_and_never_reads_openai_key(
+    queue_and_input: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database, queue = queue_and_input
+    responses = tmp_path / "responses.json"
+    responses.write_text(json.dumps(_fake_candidates(read_stage03_queue(queue))), encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-secret-must-not-be-read")
+    monkeypatch.setattr(
+        build_dict,
+        "make_openai_transport",
+        lambda *_args: pytest.fail("fixture mode constructed a live transport"),
+    )
+    assert build_dict.main(
+        [
+            "stage04", "--stage02", str(database), "--queue", str(queue), "--output",
+            str(tmp_path / "fixture.sqlite"), "--checkpoint", str(tmp_path / "fixture.json"),
+            "--generated-license", "test-only", "--bulk-model", "fixture-bulk", "--qa-model",
+            "fixture-qa", "--responses", str(responses), "--qa-responses", str(responses),
+        ]
+    ) == 0
+    assert (tmp_path / "fixture.sqlite").exists()
+    monkeypatch.delenv("OPENAI_API_KEY")
+    assert build_dict.main(
+        [
+            "stage04", "--transport", "openai", "--stage02", str(database), "--queue", str(queue),
+            "--output", str(tmp_path / "no-live.sqlite"), "--checkpoint",
+            str(tmp_path / "no-live.json"), "--generated-license", "test-only", "--bulk-model",
+            "live-bulk", "--qa-model", "live-qa",
+        ]
+    ) == 1
 
 def test_stage04_rejects_incompatible_checkpoint_and_invalid_persian(
     queue_and_input: tuple[Path, Path], tmp_path: Path
@@ -338,3 +641,68 @@ def test_stage04_rejects_incompatible_checkpoint_and_invalid_persian(
             transport=bad_persian,
             qa_transport=lambda candidates: candidates,
         )
+
+
+def test_stage04_mocked_openai_live_mode_uses_structured_store_false_without_secret_leak(
+    queue_and_input: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database, queue = queue_and_input
+    observed_requests: list[tuple[urllib_request.Request, dict[str, Any]]] = []
+
+    class FakeResponse:
+        def __init__(self, body: dict[str, object]) -> None:
+            self._body = json.dumps(body).encode("utf-8")
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return self._body
+
+    def fake_urlopen(request: urllib_request.Request, timeout: int) -> FakeResponse:
+        assert timeout == 120
+        body = request.data
+        assert isinstance(body, bytes)
+        payload = cast(dict[str, Any], json.loads(body.decode("utf-8")))
+        observed_requests.append((request, payload))
+        prompt = cast(dict[str, Any], json.loads(str(payload["input"])))
+        records = prompt["items"]
+        candidates = _fake_candidates(
+            [cast(dict[str, object], record["queue_item"]) for record in records]
+        )
+        return FakeResponse({"output_text": json.dumps({"candidates": candidates})})
+
+    secret = "test-secret-never-persist-or-report"
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+    monkeypatch.setattr(urllib_request, "urlopen", fake_urlopen)
+    output = tmp_path / "live-mocked.sqlite"
+    checkpoint = tmp_path / "live-mocked.json"
+    assert build_dict.main(
+        [
+            "stage04", "--transport", "openai", "--stage02", str(database), "--queue", str(queue),
+            "--output", str(output), "--checkpoint", str(checkpoint), "--generated-license",
+            "test-only", "--bulk-model", "configured-bulk", "--qa-model", "configured-qa",
+            "--batch-size", "2", "--bulk-pipeline-version", "test-bulk-v1",
+            "--qa-pipeline-version", "test-qa-v1", "--provider-response-schema-version",
+            "test-schema-v1",
+        ]
+    ) == 0
+    captured = capsys.readouterr()
+    assert observed_requests
+    assert all(payload["store"] is False for _request, payload in observed_requests)
+    assert {str(payload["model"]) for _request, payload in observed_requests} == {
+        "configured-bulk", "configured-qa"
+    }
+    for request, payload in observed_requests:
+        assert request.get_header("Authorization") == f"Bearer {secret}"
+        assert payload["text"]["format"]["type"] == "json_schema"
+        assert payload["text"]["format"]["strict"] is True
+    assert secret not in checkpoint.read_text(encoding="utf-8")
+    assert secret not in output.read_bytes().decode("latin1")
+    assert secret not in captured.out and secret not in captured.err

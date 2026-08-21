@@ -11,12 +11,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
 import sys
 import tempfile
 import unicodedata
+import urllib.error
+import urllib.request
 from collections import Counter
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -170,8 +173,14 @@ INCLUDED_SENSE_DISTINCTION_FIELDS: Final[tuple[str, ...]] = (
 GENERATED_SOURCE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^llm_generated_v[1-9][0-9]*$")
 PERSIAN_SCRIPT_PATTERN: Final[re.Pattern[str]] = re.compile(r"[\u0600-\u06ff]")
 GERMAN_TEXT_PATTERN: Final[re.Pattern[str]] = re.compile(r"[A-Za-zÄÖÜäöüß]")
-STAGE04_CHECKPOINT_FORMAT: Final[str] = "flashcard-stage04-checkpoint-v1"
+STAGE04_CHECKPOINT_FORMAT: Final[str] = "flashcard-stage04-checkpoint-v2"
 STAGE04_MAX_TEXT_LENGTH: Final[int] = 280
+STAGE04_BULK_PIPELINE_VERSION: Final[str] = "stage04-bulk-v1"
+STAGE04_QA_PIPELINE_VERSION: Final[str] = "stage04-qa-v1"
+STAGE04_PROVIDER_RESPONSE_SCHEMA_VERSION: Final[str] = "openai-responses-json-schema-v1"
+STAGE04_DEFAULT_BATCH_SIZE: Final[int] = 100
+STAGE04_DEFAULT_BULK_MODEL: Final[str] = "gpt-5.6-luna"
+STAGE04_DEFAULT_QA_MODEL: Final[str] = "gpt-5.6-terra"
 
 
 class BuildDictError(Exception):
@@ -1923,43 +1932,81 @@ def read_stage03_queue(queue_path: Path | str) -> list[dict[str, object]]:
 
 
 def _checkpoint_identity(
-    queue_sha256: str, generation_version: str, bulk_model: str, qa_model: str
+    queue_sha256: str,
+    generation_version: str,
+    generated_license: str,
+    bulk_model: str,
+    qa_model: str,
+    bulk_pipeline_version: str,
+    qa_pipeline_version: str,
+    provider_response_schema_version: str,
 ) -> dict[str, str]:
+    """Return every compatibility-bearing Stage-04 run identity component."""
     return {
         "queue_sha256": queue_sha256,
         "generation_version": generation_version,
+        "generated_output_classification": generated_license,
         "bulk_model": bulk_model,
         "qa_model": qa_model,
+        "bulk_pipeline_version": bulk_pipeline_version,
+        "qa_pipeline_version": qa_pipeline_version,
+        "provider_response_schema_version": provider_response_schema_version,
     }
 
 
-def _load_checkpoint(path: Path, identity: dict[str, str]) -> dict[str, dict[str, object]]:
+def _empty_checkpoint() -> dict[str, object]:
+    return {
+        "bulk": {"completed": {}, "in_flight": []},
+        "qa": {"required": {}, "completed": {}, "in_flight": []},
+    }
+
+
+def _load_checkpoint(path: Path, identity: dict[str, str]) -> dict[str, object]:
     if not path.exists():
-        return {}
+        return _empty_checkpoint()
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise BuildDictError("Stage 04 checkpoint is corrupt") from exc
     if not isinstance(value, dict) or value.get("format") != STAGE04_CHECKPOINT_FORMAT:
         raise BuildDictError("Stage 04 checkpoint has an incompatible format")
-    if value.get("identity") != identity or not isinstance(value.get("completed"), dict):
+    if value.get("identity") != identity:
         raise BuildDictError("Stage 04 checkpoint is incompatible with this run")
-    completed_value = value["completed"]
-    if not isinstance(completed_value, dict) or not all(
-        isinstance(key, str) and isinstance(item, dict) for key, item in completed_value.items()
+    state = {key: value.get(key) for key in ("bulk", "qa")}
+    bulk, qa = state["bulk"], state["qa"]
+    if not isinstance(bulk, dict) or not isinstance(qa, dict):
+        raise BuildDictError("Stage 04 checkpoint has invalid phase state")
+    phase_schemas = (
+        (bulk, {"completed", "in_flight"}),
+        (qa, {"required", "completed", "in_flight"}),
+    )
+    for phase, required_keys in phase_schemas:
+        if set(phase) != required_keys:
+            raise BuildDictError("Stage 04 checkpoint has invalid phase schema")
+        if not isinstance(phase["completed"], dict) or not isinstance(phase["in_flight"], list):
+            raise BuildDictError("Stage 04 checkpoint has invalid completion state")
+        if not all(isinstance(item_id, str) for item_id in phase["in_flight"]):
+            raise BuildDictError("Stage 04 checkpoint has invalid in-flight IDs")
+        if not all(
+            isinstance(key, str) and isinstance(item, dict)
+            for key, item in phase["completed"].items()
+        ):
+            raise BuildDictError("Stage 04 checkpoint has invalid completed results")
+    if not isinstance(qa["required"], dict) or not all(
+        isinstance(key, str) and isinstance(required, bool)
+        for key, required in qa["required"].items()
     ):
-        raise BuildDictError("Stage 04 checkpoint has invalid completed results")
-    return {str(key): item for key, item in completed_value.items() if isinstance(item, dict)}
+        raise BuildDictError("Stage 04 checkpoint has invalid QA requirements")
+    return {"bulk": bulk, "qa": qa}
 
 
-def _write_checkpoint(
-    path: Path, identity: dict[str, str], completed: dict[str, dict[str, object]]
-) -> None:
+def _write_checkpoint(path: Path, identity: dict[str, str], state: dict[str, object]) -> None:
+    """Atomically persist all paid-work state before another provider request."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(
         _canonical_json(
-            {"format": STAGE04_CHECKPOINT_FORMAT, "identity": identity, "completed": completed}
+            {"format": STAGE04_CHECKPOINT_FORMAT, "identity": identity, **state}
         )
         + "\n",
         encoding="utf-8",
@@ -2052,6 +2099,191 @@ def validate_generated_derivations(conn: sqlite3.Connection) -> None:
 Stage04Transport = Callable[[list[dict[str, object]]], list[dict[str, object]]]
 
 
+def _bounded_units(
+    items: list[dict[str, object]], batch_size: int
+) -> list[list[dict[str, object]]]:
+    if batch_size < 1:
+        raise BuildDictError("Stage 04 batch size must be positive")
+    return [items[index : index + batch_size] for index in range(0, len(items), batch_size)]
+
+
+def _validate_checkpoint_candidates(
+    phase: str,
+    completed: object,
+    item_by_id: dict[str, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    if not isinstance(completed, dict) or not set(completed) <= set(item_by_id):
+        raise BuildDictError(f"Stage 04 checkpoint has invalid {phase} completed IDs")
+    validated: dict[str, dict[str, object]] = {}
+    for item_id, candidate in completed.items():
+        if not isinstance(item_id, str) or not isinstance(candidate, dict):
+            raise BuildDictError(f"Stage 04 checkpoint has invalid {phase} completed results")
+        _validate_candidate(item_by_id[item_id], candidate)
+        validated[item_id] = candidate
+    return validated
+
+
+def _validate_returned_unit(
+    phase: str,
+    requested: list[dict[str, object]],
+    returned: object,
+    item_by_id: dict[str, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    if not isinstance(returned, list):
+        raise BuildDictError(f"Stage 04 {phase} transport returned a non-list response")
+    returned_by_id: dict[str, dict[str, object]] = {}
+    for candidate in returned:
+        if not isinstance(candidate, dict) or not isinstance(candidate.get("item_id"), str):
+            raise BuildDictError(f"Stage 04 {phase} transport returned an invalid candidate")
+        item_id = str(candidate["item_id"])
+        if item_id in returned_by_id:
+            raise BuildDictError(f"Stage 04 {phase} transport returned duplicate item IDs")
+        returned_by_id[item_id] = candidate
+    requested_ids = {str(item["item_id"]) for item in requested}
+    if set(returned_by_id) != requested_ids:
+        raise BuildDictError(
+            f"Stage 04 {phase} transport did not return exactly the requested items"
+        )
+    for item_id, candidate in returned_by_id.items():
+        _validate_candidate(item_by_id[item_id], candidate)
+    return returned_by_id
+
+
+def _openai_candidate_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["candidates"],
+        "properties": {
+            "candidates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["item_id", "language", "kind", "text", "derivation_input_ids"],
+                    "properties": {
+                        "item_id": {"type": "string"},
+                        "language": {"type": "string", "enum": ["de", "en", "fa"]},
+                        "kind": {
+                            "type": "string",
+                            "enum": ["definition", "synonym", "translation"],
+                        },
+                        "text": {"type": "string"},
+                        "derivation_input_ids": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+            }
+        },
+    }
+
+
+def _openai_prompt(
+    phase: str, items: list[dict[str, object]], queue_by_id: dict[str, dict[str, object]]
+) -> str:
+    """Build the versioned, deterministic provider prompt without hidden reasoning."""
+    records: list[dict[str, object]] = []
+    for item in items:
+        item_id = str(item["item_id"])
+        source_item = queue_by_id[item_id]
+        records.append(
+            {
+                "queue_item": source_item,
+                "candidate": item if phase == "qa" else None,
+            }
+        )
+    instruction = (
+        "Return only the JSON-schema response. Preserve each item_id exactly. "
+        "Do not include analysis, reasoning, or credentials."
+    )
+    return _canonical_json(
+        {"pipeline": f"stage04-{phase}-v1", "instruction": instruction, "items": records}
+    )
+
+
+def _response_output_text(response: object) -> str:
+    if not isinstance(response, dict):
+        raise BuildDictError("OpenAI Responses returned an invalid response")
+    output_text = response.get("output_text")
+    if isinstance(output_text, str):
+        return output_text
+    output = response.get("output")
+    if isinstance(output, list):
+        texts: list[str] = []
+        for message in output:
+            if not isinstance(message, dict) or not isinstance(message.get("content"), list):
+                continue
+            for content_item in message["content"]:
+                if (
+                    isinstance(content_item, dict)
+                    and content_item.get("type") == "output_text"
+                    and isinstance(content_item.get("text"), str)
+                ):
+                    texts.append(content_item["text"])
+        if len(texts) == 1:
+            return texts[0]
+    raise BuildDictError("OpenAI Responses returned no structured output text")
+
+
+def _post_openai_responses(payload: dict[str, object], api_key: str) -> object:
+    """The sole build-only HTTP boundary. Callers never persist or log api_key."""
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=_canonical_json(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310 -- explicit opt-in
+            return json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
+        raise BuildDictError("OpenAI Responses request failed") from exc
+
+
+def make_openai_transport(
+    api_key: str, model: str, phase: str, queue_items: list[dict[str, object]]
+) -> Stage04Transport:
+    """Create an explicit build-only OpenAI Responses transport for one Stage-04 phase."""
+    if not api_key:
+        raise BuildDictError("OpenAI live mode requires OPENAI_API_KEY")
+    if not model.strip() or phase not in {"bulk", "qa"}:
+        raise BuildDictError("OpenAI transport configuration is invalid")
+    queue_by_id = {str(item["item_id"]): item for item in queue_items}
+
+    def transport(items: list[dict[str, object]]) -> list[dict[str, object]]:
+        payload: dict[str, object] = {
+            "model": model,
+            "store": False,
+            "input": _openai_prompt(phase, items, queue_by_id),
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": f"stage04_{phase}_candidates",
+                    "strict": True,
+                    "schema": _openai_candidate_schema(),
+                }
+            },
+        }
+        try:
+            value = json.loads(_response_output_text(_post_openai_responses(payload, api_key)))
+        except json.JSONDecodeError as exc:
+            raise BuildDictError("OpenAI Responses structured output is malformed") from exc
+        if not isinstance(value, dict) or not isinstance(value.get("candidates"), list):
+            raise BuildDictError("OpenAI Responses structured output is incomplete")
+        candidates_value = value["candidates"]
+        if not all(isinstance(candidate, dict) for candidate in candidates_value):
+            raise BuildDictError("OpenAI Responses structured output is malformed")
+        parsed: list[dict[str, object]] = []
+        for candidate in candidates_value:
+            if not isinstance(candidate, dict) or not all(
+                isinstance(key, str) for key in candidate
+            ):
+                raise BuildDictError("OpenAI Responses structured output is malformed")
+            parsed.append({str(key): item for key, item in candidate.items()})
+        return parsed
+
+    return transport
+
+
 def run_stage04(
     stage02_path: Path | str,
     queue_path: Path | str,
@@ -2059,10 +2291,14 @@ def run_stage04(
     checkpoint_path: Path | str,
     generated_license: str,
     generation_version: str = "llm_generated_v1",
-    bulk_model: str = "bulk",
-    qa_model: str = "qa",
+    bulk_model: str = STAGE04_DEFAULT_BULK_MODEL,
+    qa_model: str = STAGE04_DEFAULT_QA_MODEL,
     transport: Stage04Transport | None = None,
     qa_transport: Stage04Transport | None = None,
+    batch_size: int = STAGE04_DEFAULT_BATCH_SIZE,
+    bulk_pipeline_version: str = STAGE04_BULK_PIPELINE_VERSION,
+    qa_pipeline_version: str = STAGE04_QA_PIPELINE_VERSION,
+    provider_response_schema_version: str = STAGE04_PROVIDER_RESPONSE_SCHEMA_VERSION,
 ) -> dict[str, int]:
     """Run copy-on-write Stage 04 using an injected maintainer transport.
 
@@ -2088,29 +2324,37 @@ def run_stage04(
     before_hash, before_size = sha256_file(stage02), stage02.stat().st_size
     queue_items = read_stage03_queue(queue)
     queue_sha = sha256_file(queue)
-    identity = _checkpoint_identity(queue_sha, generation_version, bulk_model, qa_model)
-    completed = _load_checkpoint(checkpoint, identity)
+    identity = _checkpoint_identity(
+        queue_sha,
+        generation_version,
+        generated_license,
+        bulk_model,
+        qa_model,
+        bulk_pipeline_version,
+        qa_pipeline_version,
+        provider_response_schema_version,
+    )
+    state = _load_checkpoint(checkpoint, identity)
     item_by_id = {str(item["item_id"]): item for item in queue_items}
-    if not set(completed) <= set(item_by_id):
-        raise BuildDictError("Stage 04 checkpoint contains results outside this queue")
+    bulk_state = state["bulk"]
+    qa_state = state["qa"]
+    if not isinstance(bulk_state, dict) or not isinstance(qa_state, dict):
+        raise BuildDictError("Stage 04 checkpoint has invalid phase state")
+    if bulk_state["in_flight"]:
+        raise BuildDictError(
+            "Stage 04 has unresolved bulk in-flight paid work; refusing resubmission"
+        )
+    completed = _validate_checkpoint_candidates("bulk", bulk_state["completed"], item_by_id)
     pending = [item for item in queue_items if str(item["item_id"]) not in completed]
-    if pending:
-        returned = transport(pending)
-        if not isinstance(returned, list):
-            raise BuildDictError("Stage 04 transport returned a non-list response")
-        returned_by_id: dict[str, dict[str, object]] = {}
-        for candidate in returned:
-            if not isinstance(candidate, dict) or not isinstance(candidate.get("item_id"), str):
-                raise BuildDictError("Stage 04 transport returned an invalid candidate")
-            returned_by_id[str(candidate["item_id"])] = candidate
-        if set(returned_by_id) != {str(item["item_id"]) for item in pending}:
-            raise BuildDictError("Stage 04 transport did not return exactly the pending items")
-        # Validate before checkpointing so arbitrary provider payload fields,
-        # including an accidental credential echo, cannot enter local storage.
-        for item in pending:
-            _validate_candidate(item, returned_by_id[str(item["item_id"])])
+    for unit in _bounded_units(pending, batch_size):
+        unit_ids = [str(item["item_id"]) for item in unit]
+        bulk_state["in_flight"] = unit_ids
+        _write_checkpoint(checkpoint, identity, state)
+        returned_by_id = _validate_returned_unit("bulk", unit, transport(unit), item_by_id)
         completed.update(returned_by_id)
-        _write_checkpoint(checkpoint, identity, completed)
+        bulk_state["completed"] = completed
+        bulk_state["in_flight"] = []
+        _write_checkpoint(checkpoint, identity, state)
     candidates: list[tuple[dict[str, object], dict[str, object], list[str]]] = []
     for item in queue_items:
         candidate = completed[str(item["item_id"])]
@@ -2129,28 +2373,43 @@ def run_stage04(
         seen_text.add(duplicate_key)
     audit_ids = _audit_item_ids(candidate_ids, queue_sha)
     qa_ids = {str(item["item_id"]) for item, _candidate, flags in candidates if flags} | audit_ids
+    required = {item_id: item_id in qa_ids for item_id in candidate_ids}
+    existing_required = qa_state["required"]
+    if existing_required and existing_required != required:
+        raise BuildDictError("Stage 04 checkpoint has incompatible QA selection state")
+    if not existing_required:
+        qa_state["required"] = required
+        _write_checkpoint(checkpoint, identity, state)
+    if qa_state["in_flight"]:
+        raise BuildDictError(
+            "Stage 04 has unresolved QA in-flight paid work; refusing resubmission"
+        )
+    qa_completed = _validate_checkpoint_candidates("QA", qa_state["completed"], item_by_id)
+    if not set(qa_completed) <= qa_ids:
+        raise BuildDictError("Stage 04 checkpoint has QA completion for an unselected item")
     if qa_ids and qa_transport is None:
         raise BuildDictError("Stage 04 QA transport is required for the selected audit set")
-    if qa_ids and qa_transport is not None:
-        qa_requests = [
-            candidate for item, candidate, _flags in candidates if str(item["item_id"]) in qa_ids
-        ]
-        qa_results = qa_transport(qa_requests)
-        if not isinstance(qa_results, list):
-            raise BuildDictError("Stage 04 QA transport returned a non-list response")
-        replacements = {
-            str(candidate["item_id"]): candidate
-            for candidate in qa_results
-            if isinstance(candidate, dict) and isinstance(candidate.get("item_id"), str)
-        }
-        if set(replacements) != qa_ids:
-            raise BuildDictError("Stage 04 QA transport did not return exactly the selected items")
-        candidates = [
-            (item, replacements.get(str(item["item_id"]), candidate), flags)
-            for item, candidate, flags in candidates
-        ]
-        for item, candidate, _flags in candidates:
-            _validate_candidate(item, candidate)
+    pending_qa = [
+        candidate
+        for item, candidate, _flags in candidates
+        if str(item["item_id"]) in qa_ids and str(item["item_id"]) not in qa_completed
+    ]
+    if qa_transport is not None:
+        for unit in _bounded_units(pending_qa, batch_size):
+            unit_ids = [str(candidate["item_id"]) for candidate in unit]
+            qa_state["in_flight"] = unit_ids
+            _write_checkpoint(checkpoint, identity, state)
+            returned_by_id = _validate_returned_unit("QA", unit, qa_transport(unit), item_by_id)
+            qa_completed.update(returned_by_id)
+            qa_state["completed"] = qa_completed
+            qa_state["in_flight"] = []
+            _write_checkpoint(checkpoint, identity, state)
+    candidates = [
+        (item, qa_completed.get(str(item["item_id"]), candidate), flags)
+        for item, candidate, flags in candidates
+    ]
+    for item, candidate, _flags in candidates:
+        _validate_candidate(item, candidate)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = tempfile.NamedTemporaryFile(
         dir=output.parent, prefix=f".{output.name}.", suffix=".tmp", delete=False
@@ -2440,7 +2699,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     stage04_parser = subparsers.add_parser(
         "stage04",
-        help="Stage 04: Apply a deterministic maintainer response fixture to an enriched copy",
+        help="Stage 04: Apply explicit fixture or OpenAI build-only transport to an enriched copy",
     )
     stage04_parser.add_argument(
         "--stage02", type=Path, required=True, help="Accepted Stage-02 SQLite"
@@ -2456,14 +2715,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--generated-license", required=True, help="Explicit generated output classification"
     )
     stage04_parser.add_argument(
-        "--responses", type=Path, required=True, help="Local fake response JSON array"
+        "--transport",
+        choices=("fixture", "openai"),
+        default="fixture",
+        help="Explicit provider mode; fixture is the network-free default",
+    )
+    stage04_parser.add_argument(
+        "--responses", type=Path, help="Local fake response JSON array (fixture mode only)"
     )
     stage04_parser.add_argument(
         "--qa-responses", type=Path, help="Optional local fake QA response JSON array"
     )
     stage04_parser.add_argument("--generation-version", default="llm_generated_v1")
-    stage04_parser.add_argument("--bulk-model", default="bulk")
-    stage04_parser.add_argument("--qa-model", default="qa")
+    stage04_parser.add_argument("--bulk-model")
+    stage04_parser.add_argument("--qa-model")
+    stage04_parser.add_argument("--batch-size", type=int)
+    stage04_parser.add_argument("--bulk-pipeline-version")
+    stage04_parser.add_argument("--qa-pipeline-version")
+    stage04_parser.add_argument("--provider-response-schema-version")
 
     stage05_parser = subparsers.add_parser(
         "stage05",
@@ -2521,22 +2790,64 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "stage04":
         try:
-            responses_value = json.loads(args.responses.read_text(encoding="utf-8"))
-            if not isinstance(responses_value, list):
-                raise BuildDictError("Stage 04 responses fixture must be a JSON array")
-            qa_value: object | None = None
-            if args.qa_responses is not None:
-                qa_value = json.loads(args.qa_responses.read_text(encoding="utf-8"))
-                if not isinstance(qa_value, list):
-                    raise BuildDictError("Stage 04 QA responses fixture must be a JSON array")
+            queue_items = read_stage03_queue(args.queue)
+            if not args.bulk_model or not args.qa_model:
+                raise BuildDictError("Stage 04 requires explicit bulk and QA model occupants")
+            if args.transport == "fixture":
+                if args.responses is None:
+                    raise BuildDictError("Fixture mode requires --responses")
+                responses_value = json.loads(args.responses.read_text(encoding="utf-8"))
+                if not isinstance(responses_value, list):
+                    raise BuildDictError("Stage 04 responses fixture must be a JSON array")
+                qa_value: object | None = None
+                if args.qa_responses is not None:
+                    qa_value = json.loads(args.qa_responses.read_text(encoding="utf-8"))
+                    if not isinstance(qa_value, list):
+                        raise BuildDictError("Stage 04 QA responses fixture must be a JSON array")
 
-            def local_transport(_items: list[dict[str, object]]) -> list[dict[str, object]]:
-                return responses_value
+                def local_transport(items: list[dict[str, object]]) -> list[dict[str, object]]:
+                    item_ids = {str(item["item_id"]) for item in items}
+                    return [
+                        item
+                        for item in responses_value
+                        if isinstance(item, dict) and item.get("item_id") in item_ids
+                    ]
 
-            def local_qa_transport(_items: list[dict[str, object]]) -> list[dict[str, object]]:
-                if not isinstance(qa_value, list):
-                    raise BuildDictError("No local QA fixture configured")
-                return qa_value
+                def local_qa_transport(items: list[dict[str, object]]) -> list[dict[str, object]]:
+                    if not isinstance(qa_value, list):
+                        raise BuildDictError("No local QA fixture configured")
+                    item_ids = {str(item["item_id"]) for item in items}
+                    return [
+                        item
+                        for item in qa_value
+                        if isinstance(item, dict) and item.get("item_id") in item_ids
+                    ]
+
+                stage_transport: Stage04Transport = local_transport
+                stage_qa_transport: Stage04Transport | None = (
+                    local_qa_transport if qa_value is not None else None
+                )
+            else:
+                if args.responses is not None or args.qa_responses is not None:
+                    raise BuildDictError("OpenAI mode does not accept fixture response files")
+                if (
+                    args.batch_size is None
+                    or args.bulk_pipeline_version is None
+                    or args.qa_pipeline_version is None
+                    or args.provider_response_schema_version is None
+                ):
+                    raise BuildDictError(
+                        "OpenAI live mode requires explicit batch and pipeline/schema versions"
+                    )
+                api_key = os.environ.get("OPENAI_API_KEY")
+                if not api_key:
+                    raise BuildDictError("OpenAI live mode requires OPENAI_API_KEY")
+                stage_transport = make_openai_transport(
+                    api_key, args.bulk_model, "bulk", queue_items
+                )
+                stage_qa_transport = make_openai_transport(
+                    api_key, args.qa_model, "qa", queue_items
+                )
 
             run_stage04(
                 args.stage02,
@@ -2547,8 +2858,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.generation_version,
                 args.bulk_model,
                 args.qa_model,
-                local_transport,
-                local_qa_transport if qa_value is not None else None,
+                stage_transport,
+                stage_qa_transport,
+                args.batch_size if args.batch_size is not None else STAGE04_DEFAULT_BATCH_SIZE,
+                (
+                    args.bulk_pipeline_version
+                    if args.bulk_pipeline_version is not None
+                    else STAGE04_BULK_PIPELINE_VERSION
+                ),
+                (
+                    args.qa_pipeline_version
+                    if args.qa_pipeline_version is not None
+                    else STAGE04_QA_PIPELINE_VERSION
+                ),
+                (
+                    args.provider_response_schema_version
+                    if args.provider_response_schema_version is not None
+                    else STAGE04_PROVIDER_RESPONSE_SCHEMA_VERSION
+                ),
             )
             return 0
         except Exception as e:

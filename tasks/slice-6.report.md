@@ -1,112 +1,107 @@
-# Slice 6 — Phase A implementation and acceptance remediation
+# Slice 6 — Phase A, post-ceiling Cycle Attempt 1
 
-## Attempt history and disposition
+## T3 ceiling history
 
-- Attempt 1 implementation commit: `a03cb6b1364d493d4443dc68448a8153e024dbbe`.
-- Attempt 1 completed non-paid implementation, real Stage-03 measurement,
-  fake-only Stage-04 E2E, fixture Stage-05 packaging, container smoke, and
-  green gates. Orchestrator acceptance classified it as **Failure 1** because
-  A13 coverage was incomplete, this durable report retained stale fields, and
-  A12 GPL/MIT evidence was not fail-closed. It was not a runtime or gate failure.
-- Attempt 2 remediates those A12, A13, and A16 gaps. Its report-finalization
-  commit and push identity are supplied by the mechanical worker receipt; this
-  report deliberately does not claim a self-referential commit SHA.
-- Branch evidence head before report finalization:
-  `a03cb6b1364d493d4443dc68448a8153e024dbbe`; branch: `slice/6`.
-- Attempt-2 Stage-03 production semantics changed: **no**. The valid Attempt-1
-  real measurement is therefore reused unchanged.
+- Historical Attempt 1 (`a03cb6b1364d493d4443dc68448a8153e024dbbe`) = Failure 1.
+- Historical Attempt 2 (`75ae9d4d555006f854982dbdd2c4b20615c3d4bb`) = Failure 2.
+- T3-ceiling design repair main commit:
+  `31606d5596ddae638b7a7211a68c35e960f65528`.
+- Design merge / starting slice-6 commit:
+  `d51331c83894626151791ef85d3ce0eaaaf62ee9`.
+- Post-ceiling Cycle Attempt 1 is the current implementation. It does not erase
+  or renumber either historical failure.
 
-## Accepted Stage-02 input and preserved measurement
+## Preserved real-data evidence
 
-- SHA-256: `75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97`.
-- Bytes: `945410048`; `PRAGMA quick_check`: `ok`.
-- Counts: 777295 Tatoeba examples; 494687 with English; 282608 without English;
-  6504849 `example_lemma` rows; 99537 indexed lemmas; token-count sum 7292286;
-  zero incomplete-attribution rows; zero orphan index rows.
-- Input hash and bytes were verified after both attempts; the supplied asset was
-  not mutated.
-- Real Stage-03 queue: 960442 records; SHA-256
-  `9433f7e236bbf621ff22b0e9ae7b3f350ec4986ec693b0b3408f08fc6ec71ef0`;
-  bytes `914504842`.
-- Queue language counts: `de=480221`, `en=0`, `fa=480221`.
-- Queue job counts: `de_learner_meaning=480221`, `fa_translation=480221`,
-  `missing_en=0`; all source senses already had English meanings.
-- Localized derivation-input counts: with text `960442`; without text `0`.
-- Queue private-path and secret-pattern checks: PASS.
+- Stage-02 input SHA-256: `75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97`.
+- Stage-02 input bytes: `945410048`; fresh `PRAGMA quick_check`: `ok`; input
+  mutation: no.
+- Stage-03 production semantics changed: **no**. The accepted real measurement
+  is reused: 960442 records, SHA-256
+  `9433f7e236bbf621ff22b0e9ae7b3f350ec4986ec693b0b3408f08fc6ec71ef0`,
+  bytes `914504842`; DE `480221`, EN `0`, FA `480221`; missing-EN `0`,
+  German learner meaning `480221`, Persian translation `480221`.
 
-## Attempt-2 remediations
+## Repaired A6 checkpoint and paid-work boundary
 
-- A13 coverage is now focused and executable: Stage 03 proves semantic identity,
-  stable ordering, numeric-ID/insertion-order independence, no network, no input
-  mutation, all three job classifications, and overwrite refusal. Stage 04
-  proves fake bulk/QA behavior, no implicit transport, generated DE/EN/FA rows,
-  exact and zero derivations, deterministic suspicious/audit identities,
-  checkpoint rejection/reuse, no-resubmit, rollback, and secret-bearing response
-  rejection before checkpoint or output persistence. Stage 05 proves package
-  success, attribution and blank-ref rejection, malformed generated provenance
-  rejection through its validation boundary, duplicate lemma/sense stable-ref
-  rejection, input immutability, overwrite refusal, and metadata consistency.
-- Stage 05 now explicitly verifies duplicate semantic references in addition to
-  SQLite schema constraints.
-- The image now mechanically verifies GPL-3.0-or-later from installed
-  `piper-tts==1.6.0` distribution metadata; retrieves immutable metadata from
-  the pinned Piper voice revision and requires matching revision SHA plus MIT;
-  and retrieves the pinned Thorsten model card and requires CC0. The verified
-  source artifacts and derived notices remain in the image.
+- Checkpoint schema: `flashcard-stage04-checkpoint-v2`.
+- Compatibility identity: Stage-03 queue SHA-256, generation/source version,
+  generated-output classification, bulk model occupant, QA model occupant,
+  bulk pipeline version, QA pipeline version, and provider-response schema
+  version. Transport batch size is intentionally excluded.
+- Bulk policy: queue-order deterministic units of `--batch-size` IDs (default
+  100). Before each request, the exact IDs are atomically persisted as
+  `bulk.in_flight`; complete structurally and deterministically validated units
+  atomically become `bulk.completed` before the next request.
+- QA policy: the deterministic required/not-required mapping is persisted in
+  `qa.required` before paid QA. Selected units use the same bounded policy and
+  atomically persist `qa.completed`.
+- Restart refuses any non-empty bulk or QA `in_flight` set. It therefore never
+  guesses whether an interrupted request was billed and never resubmits it.
+- The checkpoint independently represents completed bulk candidates, QA
+  required/not-required, and completed QA corrections. Corrupt phase state,
+  corrupt completed candidates, unknown IDs, and incompatible identity all fail
+  closed.
 
-## Phase-A boundary and generated-data evidence
+## Repaired A13 evidence
 
-- Stage 04 transport remains fake/local deterministic only. Live provider
-  requests: `0`; paid credits consumed: no; no credential was inspected.
-- Generated rows use `llm_generated_v1`, explicit test-only classification in
-  fixtures, deterministic ordering, source-backed same-sense derivation only,
-  and no generated-to-generated links. SQL rollback preserves source rows.
-- Fake Stage-04 E2E, deterministic validation, selective QA routing,
-  checkpoint resume/no-resubmit, and rollback: PASS.
-- Stage 05 exercised only a synthetic/fake-enriched fixture. The real dictionary
-  is not claimed Stage-04 complete, no release was published, and no bulk
-  pronunciation media was generated.
+- Partial bulk interruption: PASS. Fixture unit 1 completed, then unit 2
+  deliberately interrupted. Exact submitted IDs before failure:
+  `enrichment-job:v1:1304356fc4e41c92bbbf33d992361fd0141b8d6f964d9bddf5a4c4ff520585bc`,
+  then `enrichment-job:v1:2ff5ee2a299d6fe0cc0a2bc8f03017509f4b5be345a1b889a5655a39a9a04d65`.
+  The first is durable; the second remains unresolved and is fail-closed with
+  no resubmission.
+- Bulk resume: PASS. A valid checkpoint interrupted immediately after its first
+  durable completion skips
+  `enrichment-job:v1:1304356fc4e41c92bbbf33d992361fd0141b8d6f964d9bddf5a4c4ff520585bc`.
+  Interrupted/resumed and uninterrupted logical generated rows are identical.
+- Partial QA interruption: PASS. First selected QA ID
+  `enrichment-job:v1:938e0984e4abb093c098669dd993d263196a33e4dd1b92f84b3bb1987280486a`
+  completed; the next selected ID
+  `enrichment-job:v1:9cded056cf31933ed5e6bc46258a112ba0974c5358ef5c4769ce57ad9fdb0f95`
+  remains unresolved and fails closed with no resubmission.
+- QA resume: PASS. The completed first QA ID is skipped from a valid partial
+  checkpoint; resumed and uninterrupted logical generated rows are identical.
+- Classification, bulk-pipeline, QA-pipeline, and provider-schema identity
+  changes: PASS (all invalidate reuse). Corrupt partial bulk/QA state: PASS.
+- Malformed provider candidates, duplicate/missing unit IDs, and secret-bearing
+  payload fields fail before completion checkpointing or output persistence.
 
-## Container / Piper evidence
+## Explicit live provider adapter (not executed live)
 
-- Available tooling: Docker (Podman-backed Docker CLI) and Podman.
-- Rebuild command: `docker build --progress=plain -t flashcard-slice6-phasea-attempt2 .`.
-  Result: PASS.
-- Piper: `piper-tts==1.6.0`; voice `de_DE-thorsten-high`; revision
-  `8aaa3c9839d2b669cb57a94e1ec92ae0928897e8`; model SHA-256
-  `9df1c43c61149ef9b39e618e2b861fbe41e1fcea9390b2dac62e8761573ea4f1`.
-- Engine license: PASS — installed pinned distribution metadata exactly equals
-  `GPL-3.0-or-later`.
-- Voice-repository license: PASS — pinned revision metadata has matching SHA and
-  `cardData.license == mit`.
-- Thorsten model/dataset license: PASS — pinned `MODEL_CARD` contains
-  `License: CC0`.
-- Runtime inspection: selected model exists with the required digest; Piper
-  bounded synthesis PASS; required notices present; no `anthropic`, `openai`, or
-  `google-genai` runtime package exists.
+- `stage04 --transport fixture` remains the default network-free test mode.
+  Fixture mode does not read `OPENAI_API_KEY`.
+- `stage04 --transport openai` is the explicit build-only opt-in. It requires
+  `OPENAI_API_KEY` at execution time, explicit bulk/QA model occupants,
+  classification, checkpoint, bounded-unit size, and versioned pipeline/schema
+  arguments. The key is neither logged nor persisted.
+- Adapter: OpenAI Responses API, `POST /v1/responses`, standard-library HTTP,
+  `store=false`, strict JSON-schema output. Configured model names are used;
+  defaults remain operationally `gpt-5.6-luna` for bulk and `gpt-5.6-terra` for
+  QA, without embedding them in durable schema beyond a run's checkpoint
+  identity.
+- The live adapter test uses only a mocked local HTTP boundary. It verifies the
+  Authorization header, configured models, `store=false`, strict structured
+  output, parsing, and that a test credential is absent from checkpoint, SQLite,
+  stdout, and stderr. Real OpenAI requests: **0**; paid credits: **no**.
+- No OpenAI SDK/dependency was added; nothing in `app/` or the Docker runtime
+  dependency graph changed.
 
-## Test and gate evidence
+## Validation, scope, and verification
 
-- A13 focused command:
-  `pytest -q tests/test_build_dict_stage03.py tests/test_build_dict_stage04.py tests/test_build_dict_stage05.py`:
-  `16 passed`.
-- Stage-01 through Stage-05 regression command: `116 passed` (Stage 01: 46;
-  Stage 02: 54; Stage 03: 4; Stage 04: 6; Stage 05: 6).
-- Attempt-2 pre-commit `git diff --check`: PASS.
-- Attempt-2 pre-commit `make gate`: PASS; 239 tests. A fresh committed-tree gate
-  is required and recorded in the mechanical receipt after the finalization
-  commit.
-
-## Final scope and outstanding work
-
-- Changed tracked paths relative to Attempt 1: `tools/build_dict.py`,
-  `tests/test_build_dict_stage03.py`, `tests/test_build_dict_stage04.py`,
-  `tests/test_build_dict_stage05.py`, `Dockerfile`, and this report.
-- Allowlist: PASS. `git diff --check`: PASS. No generated SQLite/DB/queue,
-  checkpoint, model cache, credential, or private absolute path is committed.
-- Local/remote equality and push result are recorded in the final mechanical
-  receipt; this report contains no unfinalized status field.
-- Stop conditions hit: none.
-- Deliberately not done: paid/live Stage-04 canary; full real generation; real
-  semantic QA; final real Stage-05 package; release publication; runtime
-  pronunciation implementation.
+- Existing deterministic candidate validation, provenance/derivation checks,
+  generated row marker (`llm_generated_v1`), rollback behavior, and Stage-05
+  fixture packaging remain covered. No real Stage-04 queue item was sent to a
+  provider; no real Stage-05 enriched asset or release was produced.
+- Focused Stage-03/04/05 tests: **25 passed**.
+- Stage-01 through Stage-05 regressions: **125 passed**. Pre-commit `make gate`:
+  **248 passed**; AGENTS executable checks R1, R3, and R7 passed.
+- Commit SHA, post-commit gate, and push identity are recorded by the mechanical
+  receipt; this report cannot self-contain the SHA of the commit that contains it.
+- Changed paths are limited to `tools/build_dict.py`,
+  `tests/test_build_dict_stage04.py`, and this report. Allowlist: PASS. No
+  private absolute path, credential, queue, checkpoint,
+  provider artifact, or SQLite file is tracked.
+- Stop conditions hit: none. Deliberately undone: live canary, paid full bulk
+  generation, real selective QA, real final packaging/release, and runtime
+  pronunciation work.
