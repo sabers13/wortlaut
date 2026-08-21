@@ -968,3 +968,275 @@ No new real Stage-02 build is authorized in Phase A.
 After Phase-A acceptance, the orchestrator may authorize a separate mechanical
 cleanup of redundant failed-run/cache/HIT artifacts before the Phase-B rebuild
 so disk space is recovered without losing required evidence.
+
+## Design-reset Attempt 1 — Phase-B performance failure
+
+### Attempt classification
+
+`Design-reset Attempt 1` reached Phase B only after its Phase-A
+resolver-containment and lookup-parity repair was accepted.
+
+Phase A remains accepted evidence and is not rolled back.
+
+The required real cache-MISS execution in Phase B did not complete.
+
+This is:
+
+`Design-reset Attempt 1 = WORKFLOW §5 Failure 1`
+
+for the redesigned ladder.
+
+It is NOT original Attempt 4, is NOT an infrastructure interruption, and is NOT
+another T3-ceiling design reset.
+
+Per WORKFLOW §5, the next implementation dispatch is:
+
+`Design-reset Attempt 2`
+
+at the same T3 tier.
+
+### Failure evidence
+
+The Phase-B MISS used:
+
+- branch HEAD:
+  `fd4dcb98922f2b69821c3db0fc5d727f19442af0`;
+- repaired resolver SHA-256:
+  `0e7663bf351d177bbc3ac176f1508c549e396bed67e5c3c0928f8d8ad3cbda08`;
+- prospective cache key:
+  `stage02:v1:af120b460e5373f35cd39fa4bc71007e4330d392f4abac0af38ea6e9095080f8`;
+- spaCy:
+  `de_core_news_md`;
+- real `n_process`:
+  `1`.
+
+The detached real MISS ran for approximately two hours before the orchestrator
+ordered a graceful stop.
+
+Immediately before termination:
+
+- Python PID: `66130`;
+- elapsed: approximately `02:00:59`;
+- CPU: approximately `99.3%`;
+- RSS: approximately `916080 kB`;
+- swap: `0`;
+- Stage-02 temporary output bytes: `767934464`;
+- temporary projection-store bytes: `174456832`;
+- committed Stage-02 `example` rows: `0`;
+- `/proc` logical read characters observed earlier:
+  approximately `5.06 TB`;
+- physical read pressure was low, so the process was CPU/query-bound rather than
+  blocked on storage.
+
+The orchestrator then sent SIGTERM to the known Stage-02 process.
+
+The wrapper recorded:
+
+- `miss.status = FAIL`;
+- `miss.exit = 143`.
+
+PID `66130` exited, the tmux session exited, failed artifacts were preserved,
+and the tracked working tree remained unchanged.
+
+Exit 143 therefore records the orchestrator-authorized termination of an
+already-proven non-executable performance path; it is not evidence of an
+unexplained crash.
+
+### Query-plan evidence
+
+Read-only `EXPLAIN QUERY PLAN` against the accepted real Stage-01 asset showed:
+
+Canonical-equivalent exact lookup:
+
+```text
+SCAN lemma
+USE TEMP B-TREE FOR ORDER BY
+```
+
+Representative timings:
+
+```text
+haben   ~0.2432 s
+die     ~0.2489 s
+Haus    ~0.2469 s
+was     ~0.2527 s
+gehen   ~0.2498 s
+```
+
+Canonical-equivalent surface lookup:
+
+```text
+SCAN sf
+SEARCH l USING INTEGER PRIMARY KEY (rowid=?)
+USE TEMP B-TREE FOR ORDER BY
+```
+
+Representative timings:
+
+```text
+haben   ~0.8341 s
+die     ~0.7324 s
+Haus    ~0.7309 s
+was     ~0.7712 s
+gehen   ~0.7448 s
+```
+
+The `haben` surface query returned `15168` rows.
+
+The accepted Stage-01 schema has a normal index beginning with `lemma`, but the
+canonical-equivalent predicates include `lower(lemma)` / `lower(surface_form)`.
+The real planner therefore performs repeated full scans for the current
+Stage-02 adapter.
+
+At zero first-batch commits after approximately two hours, the absolute
+best-case lower-bound projection exceeded roughly 60 hours for the NLP loop.
+The orchestrator rejected that execution strategy as operationally
+non-executable for the real build.
+
+### What remains accepted
+
+Do NOT undo or weaken the accepted Phase-A semantic repair.
+
+The following continue to stand:
+
+* `app.resolve` remains the one canonical resolver;
+* strict surface-form POS containment remains required;
+* punctuation may not acquire wrong-POS dictionary IDs;
+* Stage-02 and runtime lookup behavior must remain semantically equivalent;
+* canonical `resolve_token` remains mandatory;
+* resolver-hash cache invalidation remains mandatory;
+* the accepted real Stage-01 asset remains read-only;
+* no second resolver is permitted.
+
+The failure is performance of the Stage-02 lookup implementation, not semantic
+correctness of the repaired resolver.
+
+### Design-reset Attempt 2 — performance repair contract
+
+Attempt 2 stays at:
+
+`gpt-5.6-terra / T3 / high`
+
+Fallback:
+
+`opus-5 / T3 / high`
+
+No lower-tier fallback is authorized.
+
+Attempt 2 may modify only:
+
+* `tools/build_dict.py`
+* `tests/test_build_dict_stage02.py`
+* `tasks/slice-5.report.md`
+
+`app/resolve.py` is frozen at the accepted Phase-A semantics for this retry.
+
+Do not modify:
+
+* the Stage-01 schema or builder;
+* `app/dictionary.py`;
+* `reference/schema.sql`;
+* dependencies;
+* ADRs;
+* AGENTS.md;
+* WORKFLOW.md;
+* STATE.md;
+* runtime/API/UI/user-data code.
+
+#### Performance-repair requirement
+
+The Stage-02 resolver-facing lookup adapter must preserve the already-proven
+behavioral parity with `app.dictionary.Dictionary`, while eliminating
+per-token full scans of the real Stage-01 `lemma` and `surface_form` relations.
+
+A one-time bounded-memory scan/materialization during Stage-02 startup is
+permitted.
+
+A Stage-02-only disk-backed temporary lookup accelerator is explicitly
+permitted.
+
+Such an accelerator:
+
+* must be derived deterministically from the supplied Stage-01 asset;
+* must remain beneath Stage-02 temporary/run storage;
+* must not modify the accepted Stage-01 asset;
+* must not become durable semantic state;
+* must not be committed;
+* must be deleted by normal successful temporary-artifact cleanup;
+* must reproduce the current canonical lookup semantics exactly, including the
+  existing SQLite/Python case behavior proved by the parity tests;
+* must preserve deterministic ordering and deduplication.
+
+Do not solve the performance defect by weakening case behavior, POS behavior,
+gender behavior, resolver behavior, or lookup parity.
+
+Do not load the full dictionary/surface index into unbounded Python memory.
+
+#### Required cheap performance gate before another full corpus build
+
+Attempt 2 must NOT immediately launch the full real Stage-02 MISS.
+
+First:
+
+1. preserve all existing Phase-A semantic/parity tests;
+2. add tests for the optimized lookup path;
+3. prove lookup-result equality against `app.dictionary.Dictionary`;
+4. use the real accepted Stage-01 asset read-only;
+5. show via executable query-plan/instrumentation evidence that individual
+   resolver lookups no longer perform a full `lemma` or `surface_form` scan;
+6. rerun the existing forensic sentences;
+7. run a deterministic real-data throughput preflight over a bounded prefix of
+   the German Tatoeba projection through:
+   `de_core_news_md` + canonical `resolve_token` + the optimized Stage-02
+   adapter, with `n_process=1`;
+8. record:
+
+   * prefix sentence count;
+   * token count;
+   * elapsed wall time;
+   * sentences/second;
+   * tokens/second;
+   * RSS peak or observed RSS;
+   * estimated full 777664-sentence NLP-loop duration.
+
+Use a prefix large enough to produce a stable rate measurement; at least
+`5000` German sentences.
+
+The preflight performs no durable Stage-02 publication and is not the required
+real cache MISS.
+
+If the projected NLP-loop duration is greater than four hours, STOP and return
+the evidence to the orchestrator. Do not start the full corpus.
+
+If it is four hours or less, still STOP after the performance preflight and
+return the complete evidence. The orchestrator must explicitly authorize the
+real MISS.
+
+#### Verification before returning
+
+Require:
+
+* targeted Stage-02 tests PASS;
+* accepted resolver tests PASS unchanged;
+* Stage-01 regression tests PASS unchanged;
+* runtime/Stage-02 lookup parity PASS;
+* forensic sentence parity PASS;
+* optimized lookup performance evidence recorded;
+* bounded real-data preflight completed;
+* full-duration estimate recorded;
+* `git diff --check` PASS;
+* full `make gate` PASS;
+* exact changed-path allowlist PASS.
+
+No full real Stage-02 MISS is authorized by this retry amendment.
+
+### Storage rule
+
+Preserve the accepted Stage-01 asset and the failed Phase-B evidence until the
+orchestrator authorizes cleanup.
+
+The failed design-reset-1 Phase-B temporary files are not valid cache/output
+assets and must never be reused as a successful cache artifact.
+
+Do not delete them during Attempt 2 unless the orchestrator separately
+authorizes mechanical cleanup.
