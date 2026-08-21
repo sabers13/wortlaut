@@ -23,6 +23,8 @@ RUN pip install . \
 # The revision, digest and model-card fetch are all explicit so a changed voice
 # artifact cannot silently enter the runtime image.
 RUN mkdir -p /opt/piper /usr/share/doc/flashcard \
+    && python -c "import importlib.metadata as m; license_value=m.metadata('piper-tts').get('License'); assert license_value == 'GPL-3.0-or-later', license_value; print(license_value)" \
+       > /usr/share/doc/flashcard/PIPER-ENGINE-LICENSE \
     && voice_url="https://huggingface.co/rhasspy/piper-voices/resolve/${PIPER_VOICE_REV}/de/de_DE/thorsten/high" \
     && curl --fail --location --silent --show-error "${voice_url}/${PIPER_VOICE}.onnx" \
        --output "${PIPER_VOICE_PATH}" \
@@ -32,9 +34,13 @@ RUN mkdir -p /opt/piper /usr/share/doc/flashcard \
     && curl --fail --location --silent --show-error "${voice_url}/MODEL_CARD" \
        --output /usr/share/doc/flashcard/THORSTEN-MODEL-CARD \
     && grep --fixed-strings --quiet 'License: CC0' /usr/share/doc/flashcard/THORSTEN-MODEL-CARD \
+    && curl --fail --location --silent --show-error \
+       "https://huggingface.co/api/models/rhasspy/piper-voices/revision/${PIPER_VOICE_REV}" \
+       --output /usr/share/doc/flashcard/PIPER-VOICE-REPOSITORY-METADATA.json \
+    && python -c "import json; p='/usr/share/doc/flashcard/PIPER-VOICE-REPOSITORY-METADATA.json'; value=json.load(open(p, encoding='utf-8')); assert value.get('sha') == '${PIPER_VOICE_REV}', value.get('sha'); assert value.get('cardData', {}).get('license') == 'mit', value.get('cardData')" \
     && printf '%s\n' \
-       'Piper engine: GPL-3.0-or-later (https://github.com/rhasspy/piper)' \
-       'Piper voices repository metadata: MIT (https://huggingface.co/rhasspy/piper-voices)' \
+       "Piper engine: $(cat /usr/share/doc/flashcard/PIPER-ENGINE-LICENSE) (installed piper-tts==1.6.0 metadata)" \
+       "Piper voices repository metadata: MIT (pinned revision ${PIPER_VOICE_REV} API metadata)" \
        'Thorsten-Voice dataset/model card: CC0 (pinned MODEL_CARD above)' \
        "Voice: ${PIPER_VOICE}; source revision: ${PIPER_VOICE_REV}" \
        "Model SHA-256: ${PIPER_MODEL_SHA256}" \

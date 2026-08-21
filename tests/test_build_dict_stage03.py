@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import sqlite3
 from pathlib import Path
 
@@ -70,3 +71,32 @@ def test_stage03_refuses_overwrite_and_tampered_queue(
     output.write_text("\n".join(reversed(lines)) + "\n", encoding="utf-8")
     with pytest.raises(BuildDictError, match="ordering"):
         read_stage03_queue(output)
+
+
+def test_stage03_is_independent_of_numeric_id_and_insertion_order(
+    stage02_fixture: Path, tmp_path: Path
+) -> None:
+    renumbered = tmp_path / "renumbered.sqlite"
+    renumbered.write_bytes(stage02_fixture.read_bytes())
+    with sqlite3.connect(renumbered) as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("UPDATE surface_form SET lemma_id=lemma_id+10000")
+        conn.execute("UPDATE example_lemma SET lemma_id=lemma_id+10000")
+        conn.execute("UPDATE sense_meaning SET sense_id=sense_id+10000")
+        conn.execute("UPDATE sense SET lemma_id=lemma_id+10000")
+        conn.execute("UPDATE sense SET id=id+10000")
+        conn.execute("UPDATE lemma SET id=id+10000")
+    first, second = tmp_path / "original.jsonl", tmp_path / "renumbered.jsonl"
+    build_stage03(stage02_fixture, first)
+    build_stage03(renumbered, second)
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_stage03_has_no_network_path(
+    stage02_fixture: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden_socket(*_args: object, **_kwargs: object) -> socket.socket:
+        raise AssertionError("Stage 03 attempted network access")
+
+    monkeypatch.setattr(socket, "socket", forbidden_socket)
+    build_stage03(stage02_fixture, tmp_path / "network-free.jsonl")

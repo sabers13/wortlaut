@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -91,6 +92,58 @@ def test_stage05_rejects_bad_attribution(enriched: Path) -> None:
         validate_stage05_database(enriched)
 
 
+def _copy_without_semantic_ref_uniques(source: Path, target: Path) -> None:
+    with sqlite3.connect(source) as conn:
+        dump = "\n".join(conn.iterdump())
+    with sqlite3.connect(target) as conn:
+        conn.executescript(
+            re.sub(r"semantic_ref\s+TEXT NOT NULL UNIQUE", "semantic_ref TEXT NOT NULL", dump)
+        )
+
+
+@pytest.mark.parametrize("table", ["lemma", "sense"])
+def test_stage05_rejects_duplicate_semantic_refs_through_package_validation(
+    enriched: Path, tmp_path: Path, table: str
+) -> None:
+    malformed = tmp_path / f"duplicate-{table}.sqlite"
+    _copy_without_semantic_ref_uniques(enriched, malformed)
+    with sqlite3.connect(malformed) as conn:
+        first, second = conn.execute(
+            f"SELECT id, semantic_ref FROM {table} ORDER BY id LIMIT 2"
+        ).fetchall()
+        conn.execute(f"UPDATE {table} SET semantic_ref=? WHERE id=?", (first[1], second[0]))
+    with pytest.raises(BuildDictError, match="duplicate semantic refs"):
+        package_stage05(malformed, tmp_path / f"package-{table}", "v1")
+
+
+def test_stage05_rejects_blank_ref_and_malformed_generated_provenance(
+    enriched: Path, tmp_path: Path
+) -> None:
+    malformed = tmp_path / "malformed.sqlite"
+    malformed.write_bytes(enriched.read_bytes())
+    with sqlite3.connect(malformed) as conn:
+        generated_id, source_id = conn.execute(
+            "SELECT g.id, s.id FROM sense_meaning g JOIN sense_meaning s ON s.sense_id=g.sense_id "
+            "WHERE g.source='llm_generated_v1' AND s.source!='llm_generated_v1' LIMIT 1"
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO sense_meaning_derivation "
+            "(generated_meaning_id, source_meaning_id) VALUES (?, ?)",
+            (generated_id, source_id),
+        )
+        conn.execute("UPDATE sense_meaning SET source='llm_generated_v1' WHERE id=?", (source_id,))
+        assert generated_id != source_id
+    with pytest.raises(BuildDictError, match="invalid edges"):
+        package_stage05(malformed, tmp_path / "bad-provenance", "v1")
+
+    blank = tmp_path / "blank.sqlite"
+    blank.write_bytes(enriched.read_bytes())
+    with sqlite3.connect(blank) as conn:
+        conn.execute("UPDATE lemma SET semantic_ref=' ' WHERE id=(SELECT MIN(id) FROM lemma)")
+    with pytest.raises(BuildDictError, match="blank semantic refs"):
+        package_stage05(blank, tmp_path / "blank-package", "v1")
+
+
 def test_dockerfile_has_pinned_piper_prerequisite() -> None:
     dockerfile = (Path(__file__).parent.parent / "Dockerfile").read_text(encoding="utf-8")
     assert "piper-tts==1.6.0" in dockerfile
@@ -99,3 +152,5 @@ def test_dockerfile_has_pinned_piper_prerequisite() -> None:
     assert "9df1c43c61149ef9b39e618e2b861fbe41e1fcea9390b2dac62e8761573ea4f1" in dockerfile
     assert "sha256sum --check --status" in dockerfile
     assert "GPL-3.0-or-later" in dockerfile and "CC0" in dockerfile and "MIT" in dockerfile
+    assert "importlib.metadata" in dockerfile
+    assert "api/models/rhasspy/piper-voices/revision/${PIPER_VOICE_REV}" in dockerfile

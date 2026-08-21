@@ -2250,6 +2250,14 @@ def validate_stage05_database(dictionary_path: Path | str) -> None:
         ).fetchone()[0]
         if bad_refs:
             raise BuildDictError(f"Stage 05 database has {bad_refs} blank semantic refs")
+        duplicate_refs = conn.execute(
+            "SELECT (SELECT count(*) FROM (SELECT semantic_ref FROM lemma "
+            "GROUP BY semantic_ref HAVING count(*) > 1)) + "
+            "(SELECT count(*) FROM (SELECT semantic_ref FROM sense "
+            "GROUP BY semantic_ref HAVING count(*) > 1))"
+        ).fetchone()[0]
+        if duplicate_refs:
+            raise BuildDictError(f"Stage 05 database has {duplicate_refs} duplicate semantic refs")
         bad_meanings = conn.execute(
             "SELECT count(*) FROM sense_meaning WHERE trim(language)='' OR trim(kind)='' "
             "OR trim(text)='' OR trim(source)='' OR trim(license)=''"

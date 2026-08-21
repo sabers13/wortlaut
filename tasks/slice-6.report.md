@@ -1,129 +1,112 @@
-# Slice 6 — Attempt 1 / Phase A report
+# Slice 6 — Phase A implementation and acceptance remediation
 
-## Scope and input
+## Attempt history and disposition
 
-- Attempt: 1. Phase: A (non-paid).
-- Starting main: `2400cec62d6fd0f4e291def59079535f7a4393d6`.
-- Accepted Stage-02 role: final cache-MISS asset from slice 5.
-- Stage-02 SHA-256: `75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97`.
-- Stage-02 bytes: `945410048`; `PRAGMA quick_check`: `ok`.
-- Stage-02 counts: 777295 Tatoeba examples; 494687 with English; 282608
-  without English; 6504849 `example_lemma` rows; 99537 indexed lemmas;
-  token-count sum 7292286; 0 incomplete-attribution rows; 0 orphan index rows.
-- The accepted input was SHA/byte checked before and after Phase A and was not
-  mutated.
+- Attempt 1 implementation commit: `a03cb6b1364d493d4443dc68448a8153e024dbbe`.
+- Attempt 1 completed non-paid implementation, real Stage-03 measurement,
+  fake-only Stage-04 E2E, fixture Stage-05 packaging, container smoke, and
+  green gates. Orchestrator acceptance classified it as **Failure 1** because
+  A13 coverage was incomplete, this durable report retained stale fields, and
+  A12 GPL/MIT evidence was not fail-closed. It was not a runtime or gate failure.
+- Attempt 2 remediates those A12, A13, and A16 gaps. Its report-finalization
+  commit and push identity are supplied by the mechanical worker receipt; this
+  report deliberately does not claim a self-referential commit SHA.
+- Branch evidence head before report finalization:
+  `a03cb6b1364d493d4443dc68448a8153e024dbbe`; branch: `slice/6`.
+- Attempt-2 Stage-03 production semantics changed: **no**. The valid Attempt-1
+  real measurement is therefore reused unchanged.
 
-## Implementation evidence
+## Accepted Stage-02 input and preserved measurement
 
-- Stage 03 is a deterministic, network-free JSONL queue with semantic-only
-  durable identities: queue items use lemma/sense semantic refs and hashes of
-  relevant source context; local SQLite IDs and filesystem paths are absent.
-  Missing-EN jobs are emitted only for senses without an English row; every
-  sense receives DE learner-meaning and FA translation candidates.
-- Stage 04 is copy-on-write and has no implicit network transport. Phase-A tests
-  use injected fake/local deterministic transports only. Candidate schemas are
-  validated before checkpoint persistence; therefore arbitrary provider payload
-  fields cannot enter the checkpoint. The checkpoint identity includes queue
-  hash, generation version, and model-role occupants.
-- Validation rejects bad schema/language/kind/text, controls, lemma echoes,
-  invalid Persian script, unavailable derivation inputs, and duplicates. The
-  selective QA set is deterministic: all soft flags plus a seed derived from the
-  queue hash, at one percent with a minimum of one and maximum of 25 audit rows.
-- Generated rows are version-marked, hold an explicit generated-output test
-  classification, use deterministic ordering, and create only same-sense,
-  source-backed derivation edges. A zero-edge job is valid. Generated-to-
-  generated edges are rejected. SQL rollback by generation marker cascades only
-  its outgoing derivation rows and preserves source rows.
-- Stage 05 validates an enriched copy then produces only a new
-  `dictionary_vN.sqlite` plus deterministic metadata and provenance summary;
-  unsafe overwrite is refused.
-- The Docker prerequisite installs `piper-tts==1.6.0`, the required spaCy model,
-  and the pinned `de_DE-thorsten-high` voice. Build-time SHA-256 verification,
-  the pinned model card, notices, and bounded Piper smoke are in the Dockerfile.
-  No pronunciation runtime/API/cache/database/UI or bulk media was added.
-
-## Phase-A real Stage-03 measurement
-
-- Queue records: `960442`.
-- Queue SHA-256: `9433f7e236bbf621ff22b0e9ae7b3f350ec4986ec693b0b3408f08fc6ec71ef0`.
-- Queue bytes: `914504842`.
-- Target-language counts: `de=480221`, `en=0`, `fa=480221`.
-- Job-class counts: `de_learner_meaning=480221`, `fa_translation=480221`,
-  `missing_en=0`. The accepted source asset had English meanings for every
-  sense, so no missing-EN job was applicable.
+- SHA-256: `75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97`.
+- Bytes: `945410048`; `PRAGMA quick_check`: `ok`.
+- Counts: 777295 Tatoeba examples; 494687 with English; 282608 without English;
+  6504849 `example_lemma` rows; 99537 indexed lemmas; token-count sum 7292286;
+  zero incomplete-attribution rows; zero orphan index rows.
+- Input hash and bytes were verified after both attempts; the supplied asset was
+  not mutated.
+- Real Stage-03 queue: 960442 records; SHA-256
+  `9433f7e236bbf621ff22b0e9ae7b3f350ec4986ec693b0b3408f08fc6ec71ef0`;
+  bytes `914504842`.
+- Queue language counts: `de=480221`, `en=0`, `fa=480221`.
+- Queue job counts: `de_learner_meaning=480221`, `fa_translation=480221`,
+  `missing_en=0`; all source senses already had English meanings.
 - Localized derivation-input counts: with text `960442`; without text `0`.
-- Queue private-path check: PASS. Queue secret-pattern check: PASS.
+- Queue private-path and secret-pattern checks: PASS.
 
-## Fake-only Stage 04 / fixture Stage 05
+## Attempt-2 remediations
 
-- Transport: fake/local deterministic only. Live provider requests: `0`.
-  Paid credits consumed: no.
-- Fake Stage-04 E2E: PASS; deterministic validation: PASS; selective QA routing:
-  PASS; checkpoint resume and completed-item no-resubmit: PASS; rollback: PASS;
-  generated-to-generated derivation count: `0`.
-- Stage-05 input class: synthetic/fake-enriched fixture. Fixture packaging:
-  PASS. The real dictionary is **not** claimed Stage-04 complete. No release was
-  published.
+- A13 coverage is now focused and executable: Stage 03 proves semantic identity,
+  stable ordering, numeric-ID/insertion-order independence, no network, no input
+  mutation, all three job classifications, and overwrite refusal. Stage 04
+  proves fake bulk/QA behavior, no implicit transport, generated DE/EN/FA rows,
+  exact and zero derivations, deterministic suspicious/audit identities,
+  checkpoint rejection/reuse, no-resubmit, rollback, and secret-bearing response
+  rejection before checkpoint or output persistence. Stage 05 proves package
+  success, attribution and blank-ref rejection, malformed generated provenance
+  rejection through its validation boundary, duplicate lemma/sense stable-ref
+  rejection, input immutability, overwrite refusal, and metadata consistency.
+- Stage 05 now explicitly verifies duplicate semantic references in addition to
+  SQLite schema constraints.
+- The image now mechanically verifies GPL-3.0-or-later from installed
+  `piper-tts==1.6.0` distribution metadata; retrieves immutable metadata from
+  the pinned Piper voice revision and requires matching revision SHA plus MIT;
+  and retrieves the pinned Thorsten model card and requires CC0. The verified
+  source artifacts and derived notices remain in the image.
+
+## Phase-A boundary and generated-data evidence
+
+- Stage 04 transport remains fake/local deterministic only. Live provider
+  requests: `0`; paid credits consumed: no; no credential was inspected.
+- Generated rows use `llm_generated_v1`, explicit test-only classification in
+  fixtures, deterministic ordering, source-backed same-sense derivation only,
+  and no generated-to-generated links. SQL rollback preserves source rows.
+- Fake Stage-04 E2E, deterministic validation, selective QA routing,
+  checkpoint resume/no-resubmit, and rollback: PASS.
+- Stage 05 exercised only a synthetic/fake-enriched fixture. The real dictionary
+  is not claimed Stage-04 complete, no release was published, and no bulk
+  pronunciation media was generated.
 
 ## Container / Piper evidence
 
-- Container CLI: Docker was available (Podman-backed Docker CLI); Podman was
-  also available.
-- Image build: PASS (`flashcard-slice6-phasea`).
-- Runtime dependency inspection: no `anthropic`, `openai`, or `google-genai`
-  package was present.
-- Piper version pin: `1.6.0`.
-- Voice: `de_DE-thorsten-high`; source revision:
-  `8aaa3c9839d2b669cb57a94e1ec92ae0928897e8`.
-- Model SHA-256:
-  `9df1c43c61149ef9b39e618e2b861fbe41e1fcea9390b2dac62e8761573ea4f1`;
-  verified during build and runtime inspection.
-- Piper runtime presence and bounded `Hallo` synthesis: PASS.
-- Notices/classifications recorded and mechanically checked: Piper engine
-  GPL-3.0-or-later; Piper voice-repository metadata MIT; Thorsten model-card
-  dataset classification CC0.
-- Bulk pronunciation media generated: no.
+- Available tooling: Docker (Podman-backed Docker CLI) and Podman.
+- Rebuild command: `docker build --progress=plain -t flashcard-slice6-phasea-attempt2 .`.
+  Result: PASS.
+- Piper: `piper-tts==1.6.0`; voice `de_DE-thorsten-high`; revision
+  `8aaa3c9839d2b669cb57a94e1ec92ae0928897e8`; model SHA-256
+  `9df1c43c61149ef9b39e618e2b861fbe41e1fcea9390b2dac62e8761573ea4f1`.
+- Engine license: PASS — installed pinned distribution metadata exactly equals
+  `GPL-3.0-or-later`.
+- Voice-repository license: PASS — pinned revision metadata has matching SHA and
+  `cardData.license == mit`.
+- Thorsten model/dataset license: PASS — pinned `MODEL_CARD` contains
+  `License: CC0`.
+- Runtime inspection: selected model exists with the required digest; Piper
+  bounded synthesis PASS; required notices present; no `anthropic`, `openai`, or
+  `google-genai` runtime package exists.
 
 ## Test and gate evidence
 
-- Targeted Stage 01–05 regression command: `pytest -q` over the five build
-  stage test modules: `107 passed` (Stage 01: 46; Stage 02: 54; Slice-6: 7).
-- Pre-commit `git diff --check`: PASS.
-- Pre-commit `make gate` exit: `0`.
+- A13 focused command:
+  `pytest -q tests/test_build_dict_stage03.py tests/test_build_dict_stage04.py tests/test_build_dict_stage05.py`:
+  `16 passed`.
+- Stage-01 through Stage-05 regression command: `116 passed` (Stage 01: 46;
+  Stage 02: 54; Stage 03: 4; Stage 04: 6; Stage 05: 6).
+- Attempt-2 pre-commit `git diff --check`: PASS.
+- Attempt-2 pre-commit `make gate`: PASS; 239 tests. A fresh committed-tree gate
+  is required and recorded in the mechanical receipt after the finalization
+  commit.
 
-```text
-.venv/bin/ruff check .
-All checks passed!
-.venv/bin/mypy --strict .
-Success: no issues found in 18 source files
-.venv/bin/pytest -q
-........................................................................ [ 31%]
-........................................................................ [ 62%]
-........................................................................ [ 93%]
-..............                                                           [100%]
-230 passed in 64.55s (0:01:04)
-.venv/bin/python tools/check_agents.py
-AGENTS checks passed: R1 (runtime LLM), R3 (resolver cache key), R7 (lecture coupling)
-```
+## Final scope and outstanding work
 
-Post-commit gate is executed and reported in the machine receipt returned with
-this implementation; its complete output is identical in contract scope to the
-fresh pre-commit gate above.
-
-## Handoff state
-
-- Changed tracked paths: `tools/build_dict.py`, `tests/test_build_dict_stage03.py`,
-  `tests/test_build_dict_stage04.py`, `tests/test_build_dict_stage05.py`,
-  `Dockerfile`, `.dockerignore`, and this report.
-- Allowlist check: pending final mechanical check before commit.
-- Final branch HEAD and push status: pending the authorized commit/push.
+- Changed tracked paths relative to Attempt 1: `tools/build_dict.py`,
+  `tests/test_build_dict_stage03.py`, `tests/test_build_dict_stage04.py`,
+  `tests/test_build_dict_stage05.py`, `Dockerfile`, and this report.
+- Allowlist: PASS. `git diff --check`: PASS. No generated SQLite/DB/queue,
+  checkpoint, model cache, credential, or private absolute path is committed.
+- Local/remote equality and push result are recorded in the final mechanical
+  receipt; this report contains no unfinalized status field.
 - Stop conditions hit: none.
-
-## Deliberately left undone
-
-- paid/live Stage-04 canary;
-- full real Stage-04 generation;
-- real selective semantic QA;
-- final real Stage-05 dictionary packaging;
-- release publication;
-- runtime pronunciation implementation.
+- Deliberately not done: paid/live Stage-04 canary; full real generation; real
+  semantic QA; final real Stage-05 package; release publication; runtime
+  pronunciation implementation.
