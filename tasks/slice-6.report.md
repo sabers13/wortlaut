@@ -105,3 +105,33 @@
 - Stop conditions hit: none. Deliberately undone: live canary, paid full bulk
   generation, real selective QA, real final packaging/release, and runtime
   pronunciation work.
+
+## Post-ceiling Cycle Attempt 2 — live Stage-04 semantic-prompt remediation
+
+- Failure remediated: the A15 live provider prompt now carries binding A4/A7
+  semantic-generation, derivation-ID, and QA/correction instructions rather than
+  relying on structural response validation alone.
+- Bulk pipeline version: `stage04-bulk-v2`; QA pipeline version:
+  `stage04-qa-v2`. The existing checkpoint compatibility identity includes both,
+  and a v1 identity is rejected by the v2 defaults.
+- The deterministic bulk prompt covers missing-English same-sense meanings,
+  German synonym-first learner wording with a short A2–B1-ish explanation
+  fallback, and sense-disambiguated plain-Unicode Persian translations. It also
+  defines source-text `derivation_input_ids` use.
+- The deterministic QA prompt checks semantic fidelity against the queue context
+  and source-backed inputs; it preserves acceptable candidates unchanged and
+  corrects invalid candidates before persistence under the same item identity
+  and target language. It returns final source-backed derivation IDs only.
+- Prompt semantics are pipeline-owned rather than model-product-owned; configured
+  model occupants remain separate request fields. The mocked Responses boundary
+  continues to require configured models, `store=false`, and strict JSON-schema
+  output without credential persistence or logging.
+- A15 generated-output classification approved: **CC BY-SA 4.0**. Basis:
+  Wiktionary CC BY-SA source-backed localized meanings. Attribution remains
+  traversable through `sense_meaning_derivation`; OpenAI output ownership does
+  not replace upstream source obligations.
+- Live requests in this retry: **0**. Paid credits: **no**. No live canary or
+  full Stage-04 queue was run, and no Stage-03 semantics changed.
+- Focused Stage-04 tests: **18 passed**. Stage-03/04/05 tests: **28 passed**.
+- Pre-commit gate: **251 passed**; ruff, strict mypy, and executable AGENTS
+  checks R1/R3/R7 passed.

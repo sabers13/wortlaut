@@ -530,6 +530,111 @@ def test_stage04_checkpoint_identity_changes_fail_closed(
             )
 
 
+def test_stage04_v1_checkpoint_identity_is_rejected_by_v2_defaults(
+    queue_and_input: tuple[Path, Path], tmp_path: Path
+) -> None:
+    database, queue = queue_and_input
+    checkpoint = tmp_path / "v1-checkpoint.json"
+    assert build_dict.STAGE04_BULK_PIPELINE_VERSION == "stage04-bulk-v2"
+    assert build_dict.STAGE04_QA_PIPELINE_VERSION == "stage04-qa-v2"
+    run_stage04(
+        database,
+        queue,
+        tmp_path / "v1.sqlite",
+        checkpoint,
+        "test-only",
+        transport=_fake_candidates,
+        qa_transport=lambda candidates: candidates,
+        bulk_pipeline_version="stage04-bulk-v1",
+        qa_pipeline_version="stage04-qa-v1",
+    )
+    with pytest.raises(BuildDictError, match="incompatible"):
+        run_stage04(
+            database,
+            queue,
+            tmp_path / "v2.sqlite",
+            checkpoint,
+            "test-only",
+            transport=_fake_candidates,
+            qa_transport=lambda candidates: candidates,
+        )
+
+
+def test_stage04_provider_prompts_are_semantic_versioned_and_deterministic(
+    queue_and_input: tuple[Path, Path]
+) -> None:
+    _database, queue = queue_and_input
+    items = read_stage03_queue(queue)
+    queue_by_id = {str(item["item_id"]): item for item in items}
+    bulk = build_dict._openai_prompt(
+        "bulk", build_dict.STAGE04_BULK_PIPELINE_VERSION, items, queue_by_id
+    )
+    qa = build_dict._openai_prompt(
+        "qa", build_dict.STAGE04_QA_PIPELINE_VERSION, items, queue_by_id
+    )
+    assert bulk == build_dict._openai_prompt(
+        "bulk", build_dict.STAGE04_BULK_PIPELINE_VERSION, items, queue_by_id
+    )
+    bulk_payload = cast(dict[str, Any], json.loads(bulk))
+    qa_payload = cast(dict[str, Any], json.loads(qa))
+    bulk_instruction = str(bulk_payload["instruction"])
+    qa_instruction = str(qa_payload["instruction"])
+
+    assert bulk_payload["pipeline"] == "stage04-bulk-v2"
+    assert qa_payload["pipeline"] == "stage04-qa-v2"
+    assert "English meaning" in bulk_instruction and "exact sense" in bulk_instruction
+    assert "simple/common German synonym" in bulk_instruction
+    assert "short learner-friendly German explanation" in bulk_instruction
+    assert "A2-B1" in bulk_instruction and "kind synonym only" in bulk_instruction
+    assert "Persian translation" in bulk_instruction and "disambiguated" in bulk_instruction
+    assert "plain Unicode Persian" in bulk_instruction and "no bidi controls" in bulk_instruction
+    assert "kind must be translation" in bulk_instruction
+    assert "derivation_input_ids" in bulk_instruction
+    assert "source-backed localized meaning text" in bulk_instruction
+    assert "CHECK semantic fidelity" in qa_instruction
+    assert "CORRECT it before persistence" in qa_instruction
+    assert "return it unchanged" in qa_instruction
+    assert "same item_id and target language" in qa_instruction
+    assert "source-backed localized meaning inputs" in qa_instruction
+    assert "complete valid derivation_input_ids" in qa_instruction
+    assert "no commentary" in bulk_instruction and "no chain-of-thought" in bulk_instruction
+    assert "no commentary" in qa_instruction and "no chain-of-thought" in qa_instruction
+    assert "gpt-5.6-luna" not in bulk and "gpt-5.6-terra" not in qa
+    assert all("queue_item" in record for record in bulk_payload["items"])
+    assert all(record["candidate"] is None for record in bulk_payload["items"])
+    assert all(record["candidate"] is not None for record in qa_payload["items"])
+
+
+def test_stage04_model_occupant_is_separate_from_constructed_prompt(
+    queue_and_input: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _database, queue = queue_and_input
+    queue_items = read_stage03_queue(queue)
+    captured: list[dict[str, object]] = []
+
+    def fake_post(payload: dict[str, object], _api_key: str) -> object:
+        captured.append(payload)
+        prompt = cast(dict[str, Any], json.loads(str(payload["input"])))
+        candidates = _fake_candidates(
+            [cast(dict[str, object], record["queue_item"]) for record in prompt["items"]]
+        )
+        return {"output_text": json.dumps({"candidates": candidates})}
+
+    monkeypatch.setattr(build_dict, "_post_openai_responses", fake_post)
+    first = build_dict.make_openai_transport(
+        "test-key", "configured-model-a", "bulk", "stage04-bulk-v2", queue_items
+    )
+    second = build_dict.make_openai_transport(
+        "test-key", "configured-model-b", "bulk", "stage04-bulk-v2", queue_items
+    )
+    assert first(queue_items[:1]) == second(queue_items[:1])
+    assert [payload["model"] for payload in captured] == [
+        "configured-model-a",
+        "configured-model-b",
+    ]
+    assert captured[0]["input"] == captured[1]["input"]
+
+
 def test_stage04_rejects_corrupt_partial_phase_state(
     queue_and_input: tuple[Path, Path], tmp_path: Path
 ) -> None:
@@ -703,6 +808,21 @@ def test_stage04_mocked_openai_live_mode_uses_structured_store_false_without_sec
         assert request.get_header("Authorization") == f"Bearer {secret}"
         assert payload["text"]["format"]["type"] == "json_schema"
         assert payload["text"]["format"]["strict"] is True
+        prompt = cast(dict[str, Any], json.loads(str(payload["input"])))
+        instruction = str(prompt["instruction"])
+        assert all("queue_item" in record for record in prompt["items"])
+        if payload["model"] == "configured-bulk":
+            assert prompt["pipeline"] == "test-bulk-v1"
+            assert "English meaning" in instruction
+            assert "simple/common German synonym" in instruction
+            assert "Persian translation" in instruction
+            assert "derivation_input_ids" in instruction
+        else:
+            assert prompt["pipeline"] == "test-qa-v1"
+            assert "CHECK semantic fidelity" in instruction
+            assert "CORRECT it before persistence" in instruction
+            assert "return it unchanged" in instruction
+            assert "same item_id and target language" in instruction
     assert secret not in checkpoint.read_text(encoding="utf-8")
     assert secret not in output.read_bytes().decode("latin1")
     assert secret not in captured.out and secret not in captured.err

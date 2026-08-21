@@ -175,8 +175,8 @@ PERSIAN_SCRIPT_PATTERN: Final[re.Pattern[str]] = re.compile(r"[\u0600-\u06ff]")
 GERMAN_TEXT_PATTERN: Final[re.Pattern[str]] = re.compile(r"[A-Za-zÄÖÜäöüß]")
 STAGE04_CHECKPOINT_FORMAT: Final[str] = "flashcard-stage04-checkpoint-v2"
 STAGE04_MAX_TEXT_LENGTH: Final[int] = 280
-STAGE04_BULK_PIPELINE_VERSION: Final[str] = "stage04-bulk-v1"
-STAGE04_QA_PIPELINE_VERSION: Final[str] = "stage04-qa-v1"
+STAGE04_BULK_PIPELINE_VERSION: Final[str] = "stage04-bulk-v2"
+STAGE04_QA_PIPELINE_VERSION: Final[str] = "stage04-qa-v2"
 STAGE04_PROVIDER_RESPONSE_SCHEMA_VERSION: Final[str] = "openai-responses-json-schema-v1"
 STAGE04_DEFAULT_BATCH_SIZE: Final[int] = 100
 STAGE04_DEFAULT_BULK_MODEL: Final[str] = "gpt-5.6-luna"
@@ -2178,7 +2178,10 @@ def _openai_candidate_schema() -> dict[str, object]:
 
 
 def _openai_prompt(
-    phase: str, items: list[dict[str, object]], queue_by_id: dict[str, dict[str, object]]
+    phase: str,
+    pipeline_version: str,
+    items: list[dict[str, object]],
+    queue_by_id: dict[str, dict[str, object]],
 ) -> str:
     """Build the versioned, deterministic provider prompt without hidden reasoning."""
     records: list[dict[str, object]] = []
@@ -2191,12 +2194,57 @@ def _openai_prompt(
                 "candidate": item if phase == "qa" else None,
             }
         )
-    instruction = (
-        "Return only the JSON-schema response. Preserve each item_id exactly. "
-        "Do not include analysis, reasoning, or credentials."
+    common_instruction = (
+        "Process every supplied queue item independently. Preserve item_id exactly, "
+        "the requested target language exactly, the exact semantic sense, and the "
+        "supplied source/context identity. Do not invent facts beyond the supplied "
+        "semantic context. Return only the strict JSON-schema response: no commentary, "
+        "markdown, reasoning, confidence scores, alternate candidates, no chain-of-thought, "
+        "or explanation. For every candidate, derivation_input_ids may contain only IDs "
+        "present in that queue item's derivation_inputs. Include every source-backed "
+        "localized meaning text input actually relied on to generate, translate, simplify, "
+        "or correct the final output; never invent an ID or cite an available input whose "
+        "text was not used. Use an empty list only when no localized source meaning text "
+        "was consumed and the result relied only on allowed non-text sense, grammar, or "
+        "context fields. Never create generated-to-generated provenance."
     )
+    if phase == "bulk":
+        instruction = (
+            f"{common_instruction} For job_class missing_en, produce a short, accurate "
+            "English meaning for this exact sense using the supplied source-backed "
+            "sense/context as grounding; language must be en, kind must be valid for the "
+            "generated meaning, and never broaden, narrow, or invent another sense. For "
+            "job_class de_learner_meaning, first prefer one simple/common German synonym "
+            "when it preserves the exact sense; otherwise produce one short learner-friendly "
+            "German explanation, aiming roughly at A2-B1 comprehension where practical. "
+            "Never simplify into another sense; language must be de; use kind synonym only "
+            "for an actual synonym, otherwise use kind definition. For job_class "
+            "fa_translation, produce a concise Persian translation of the exact sense, "
+            "disambiguated by supplied lemma, POS, gender, sense, and source meanings; "
+            "language must be fa, kind must be translation, text must be plain Unicode "
+            "Persian with no bidi controls, and do not transliterate instead of translating "
+            "unless the semantic item genuinely requires it."
+        )
+    elif phase == "qa":
+        instruction = (
+            f"{common_instruction} For every candidate, CHECK semantic fidelity against "
+            "the exact queue job class, lemma, POS, gender/context where present, sense "
+            "semantic identity/context, source-backed localized meaning inputs, and "
+            "target-language requirements. Check the same semantic sense; no semantic "
+            "broadening or narrowing; correct target language; valid kind; natural "
+            "learner-facing wording; the German synonym-first or short A2-B1-ish "
+            "explanation rule; Persian semantic accuracy and script; no control or bidi "
+            "content; and no hallucinated meaning. If the candidate is acceptable, return "
+            "it unchanged. If it is invalid, CORRECT it before persistence and return the "
+            "corrected final candidate under the same item_id and target language. QA is "
+            "correction-before-persistence, not a second generated lineage. Return the "
+            "complete valid derivation_input_ids set actually relied on by the final "
+            "corrected result."
+        )
+    else:
+        raise BuildDictError("OpenAI prompt phase is invalid")
     return _canonical_json(
-        {"pipeline": f"stage04-{phase}-v1", "instruction": instruction, "items": records}
+        {"pipeline": pipeline_version, "instruction": instruction, "items": records}
     )
 
 
@@ -2240,12 +2288,16 @@ def _post_openai_responses(payload: dict[str, object], api_key: str) -> object:
 
 
 def make_openai_transport(
-    api_key: str, model: str, phase: str, queue_items: list[dict[str, object]]
+    api_key: str,
+    model: str,
+    phase: str,
+    pipeline_version: str,
+    queue_items: list[dict[str, object]],
 ) -> Stage04Transport:
     """Create an explicit build-only OpenAI Responses transport for one Stage-04 phase."""
     if not api_key:
         raise BuildDictError("OpenAI live mode requires OPENAI_API_KEY")
-    if not model.strip() or phase not in {"bulk", "qa"}:
+    if not model.strip() or not pipeline_version.strip() or phase not in {"bulk", "qa"}:
         raise BuildDictError("OpenAI transport configuration is invalid")
     queue_by_id = {str(item["item_id"]): item for item in queue_items}
 
@@ -2253,7 +2305,7 @@ def make_openai_transport(
         payload: dict[str, object] = {
             "model": model,
             "store": False,
-            "input": _openai_prompt(phase, items, queue_by_id),
+            "input": _openai_prompt(phase, pipeline_version, items, queue_by_id),
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -2843,10 +2895,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if not api_key:
                     raise BuildDictError("OpenAI live mode requires OPENAI_API_KEY")
                 stage_transport = make_openai_transport(
-                    api_key, args.bulk_model, "bulk", queue_items
+                    api_key,
+                    args.bulk_model,
+                    "bulk",
+                    args.bulk_pipeline_version,
+                    queue_items,
                 )
                 stage_qa_transport = make_openai_transport(
-                    api_key, args.qa_model, "qa", queue_items
+                    api_key,
+                    args.qa_model,
+                    "qa",
+                    args.qa_pipeline_version,
+                    queue_items,
                 )
 
             run_stage04(
