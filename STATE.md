@@ -46,11 +46,13 @@ memory of a conversation.
   remain preserved. Slice-6 owns only the Piper image-build/runtime
   prerequisite; slice-7 owns runtime pronunciation; slice-8 owns pronunciation
   E2E smoke.
-* **Next implementation ownership is slice-6.** It owns stages 03–05, including
-  deterministic multilingual enrichment queue construction, maintainer-only
-  offline DE/EN/FA generation/validation/selective QA, final dictionary
-  packaging and the first Dockerfile with the Piper build prerequisite. Phase A
-  explicitly stops before any paid full Stage-04 generation run.
+* **ADR-0006 cold review #1 is BLOCKED with O1–O7 recorded.** `NEEDS COLD REVIEW`
+  remains. The blockers cover the actual Stage-01 source-sense lineage for
+  DE→FA, pre-acceptance authority, FA multi-translation cardinality/order,
+  deterministic DE source-row eligibility, ambiguous Batch-create recovery,
+  bounded multi-manifest Batch partitioning, and ownership/failure handling for
+  the Persian human-review sample. A separate ADR revision session must resolve
+  them before fresh cold review #2.
 * **Two-authority workflow remains binding.** Local Git/terminal is authoritative
   for working-tree/runtime/gate/local-asset facts; private `origin` is the
   persistent authoritative mirror for committed and pushed state.
@@ -73,9 +75,13 @@ memory of a conversation.
   - `git diff --check`: PASS.
 * The slice-6 brief persistence worker reran `make gate` successfully before
   committing `tasks/slice-6.md`.
-* The slice-5 closure worker runs the final authoritative post-merge/post-STATE
-  `make gate`; stdout and stderr are stored in `handoff/main-gate.txt` and become
-  startup evidence for the fresh slice-6 orchestrator.
+* **ADR-0006 cold-review close did not establish a new authoritative local
+  `make gate` result in this session.** The connected GitHub mirror is
+  authoritative for the committed governance result, but WORKFLOW's authority
+  split does not permit remote repository state to stand in for a fresh local
+  gate or local working-tree cleanliness. Fresh local gate evidence is therefore
+  required at the next supervised/local execution checkpoint before any
+  implementation dispatch.
 
 ## Escalation status
 
@@ -92,10 +98,14 @@ memory of a conversation.
 
 ## Sessions since last audit
 
-* 6    <!-- slice-5 normal closure increments the prior value 5 exactly once. Audit at >= 10 or when a phase-boundary trigger is established at fresh startup. -->
+* 6    <!-- non-slice ADR cold review does not increment this counter -->
 
 ## Blocked
 
+* **ADR-0006 / Slice-6 source-first enrichment is governance-blocked.** Cold
+  review #1 recorded O1–O7. Do not dispatch architecture-changing Slice-6 work
+  from the pending ADR. The next action is a separate ADR-0006 revision session,
+  followed by fresh cold review #2 under WORKFLOW §7 / AGENTS G7.
 * **ADR-0004 PART-B/runtime schema remains intentionally deferred to slice-7.**
   Remaining work includes note-local multilingual meaning state, durable
   dictionary bindings, active dictionary version+SHA state and D47 runtime
@@ -106,25 +116,22 @@ memory of a conversation.
   repair plus D47 replacement/stale-picker smoke verification.
 * **Compose integration remains independently blocked** by the lecture app's
   Phase-4 decomposition and required donor evidence; slice-9 owns that boundary.
-* **Build Stage 04 remains time-bound to mid-September 2026.** Stage 02 is now
-  accepted; slice-6 Stage 03 and its explicit Phase-A authorization boundary
-  precede any paid multilingual enrichment execution.
+* **Build Stage 04 remains time-bound to mid-September 2026.** The governance
+  blocker now precedes any paid canary or production run; no paid Persian or
+  DE/EN production work is authorized while ADR-0006 remains unaccepted.
 * **Non-blocking slice-3 review debt remains in `docs/backlog.md`.** T3 N1 is the
   synthetic fixture `genitive_sg` bind defect; T3 N2 is future fallback
   fingerprint hardening for potentially volatile upstream numeric bookkeeping.
 
 ## Next three actions
 
-1. **Open slice-6 with formal startup verification.** Verify this governance
-   close's final pushed main HEAD, clean local tree, origin sanity, fresh
-   `make gate`, STATE consistency, both audit triggers, and
-   `Depends: slice-5` merged.
-2. **Verify the accepted Stage-02 local input before dispatch.** Require SHA-256
-   `75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97`,
-   size `945410048`, `PRAGMA quick_check = ok`, and the accepted row counts
-   from `tasks/slice-6.md`. The asset remains local and uncommitted.
-3. **Dispatch slice-6 Phase A per `tasks/slice-6.md`** to
-   `gpt-5.6-terra / T3 / high` (fallback `opus-5 / T3 / high`). Phase A
-   implements/verifies stages 03–05, measures the real Stage-03 queue, uses
-   fake/local Stage-04 transport, verifies Stage-05 packaging and Docker/Piper,
-   and STOPS before any paid Stage-04 canary/full generation run.
+1. **Open a separate ADR-0006 revision session.** Read O1–O7 from
+   `docs/adr/0006-source-first-persian-and-batch-enrichment.md`; preserve the
+   objection text; resolve each objection explicitly in the ADR and required
+   cross-file governance contracts without implementing Slice-6.
+2. **After revision, open fresh cold review #2 — FOCUSED REMEDY VERIFICATION.**
+   Verify O1–O7 remedies plus direct knock-on contradictions only; optional
+   redesign/refinement is not a blocker under WORKFLOW §7.
+3. **Only after ADR-0006 acceptance**, resume Slice-6 from formal startup/local
+   verification against the accepted Stage-02 asset and fresh `make gate`
+   evidence. No paid API run is authorized by the governance review itself.
