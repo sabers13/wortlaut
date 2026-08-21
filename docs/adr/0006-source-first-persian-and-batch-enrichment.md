@@ -313,3 +313,83 @@ historical body of ADR-0004.
 No cold review is performed in this drafting session. A fresh cold orchestrator
 session must review this ADR under WORKFLOW §7. Its first review is the broad
 architecture challenge for this new ADR-0006 lineage.
+
+### Cold review #1 — broad architecture challenge
+
+**Reviewer:** fresh cold orchestrator session, 2026-08-21. Repository-only architecture review under WORKFLOW §7 / AGENTS G7, with current provider/source facts checked only where the ADR depends on them.
+
+**Verdict: BLOCKING OBJECTIONS — `NEEDS COLD REVIEW` stays.** ADR-0006 is a legitimate new lineage and does not reopen ADR-0004, and its fail-closed EN→FA, source-license, one-item-per-request, owner gap gate, copy-on-write, no-monitoring, and legacy-canary directions are coherent. The following seven defects are architecture-blocking rather than optional refinements.
+
+#### O1 — BLOCKING. The proposed DE→FA primary path is based on the wrong canonical source-sense lineage.
+
+**Concrete defect.** §3.2 says the German-Wiktionary candidate is promising because "the canonical German sense already originates in this edition and build metadata has source namespace/ref." That is false for the accepted Stage-01 implementation and asset. `tools/build_dict.py` appends raw senses only for the `is_en_edition` input, resolves `source_ref` from `raw_senses_en`, and materializes canonical `sense` rows from those English-edition Wiktionary senses. The German-edition input does not supply the persisted canonical sense identity. Current `sense.semantic_ref` / `sense.source_ref` therefore cannot, by themselves, prove an exact relation to a German-Wiktionary translation block.
+
+This also changes the meaning of D60: the accepted canonical German-lexeme sense is already sourced from the English Wiktionary edition, so an English-edition translation attached to that exact persisted source sense may be a direct source relation, whereas German Wiktionary is the path that requires a cross-edition bridge. The ADR currently assumes the opposite source topology.
+
+**Why blocking.** D59 correctly forbids lemma, ordinal, gloss-string, fuzzy, embedding and LLM matching. With those fallbacks forbidden and Stage-01 semantics frozen for slice-6, the advertised primary importer has no defined executable mapping to the actual canonical identity. A worker can only guess, reject all rows, or silently invent a cross-edition mapper.
+
+**Affected contract.** D57–D60; §3.1–§3.3; §7; `tasks/slice-6.md` A2/A4; accepted Stage-01 semantic identity in `tools/build_dict.py` / ADR-0004 D47.
+
+**Required remedy direction.** Rebase the source cascade on the canonical identity that actually exists. Either define and prove an exact stable cross-edition mapping from the persisted English-edition source sense to a German-Wiktionary sense, make German Wiktionary optional/fail-closed when that mapping is unavailable, or explicitly redesign/rebuild canonical Stage-01 identity in a separately authorized architecture change. Also distinguish a direct translation attached to the exact canonical English-edition sense from a genuinely cross-source EN bridge. Do not use lemma, ordinal, gloss text, fuzzy, embedding or LLM matching as the repair.
+
+#### O2 — BLOCKING. Pending ADR-0006 is simultaneously non-binding and given forward precedence over frozen ADR-0004.
+
+**Concrete defect.** ADR-0006's header and §10 correctly say its supersession activates only on acceptance and that ADR-0004 remains binding until then. In conflict, `tasks/slice-6.md` says pending ADR-0006 "controls every conflict with ADR-0004 ... until its cold review resolves," and `docs/plan.md` calls it the forward design constraint for slice-6 planning. `STATE.md` still points toward slice-6 Phase-A dispatch. These are not merely historical notes: the slice brief is executable worker authority and already requires the pending source-first architecture.
+
+**Why blocking.** A worker cannot know whether to implement frozen ADR-0004's generated-Persian path or unaccepted ADR-0006's source-first path. Treating a `NEEDS COLD REVIEW` ADR as binding before its review defeats the governance boundary; treating ADR-0004 as binding makes the current slice brief contradictory and capable of building the wrong architecture before acceptance.
+
+**Affected contract.** ADR-0006 header / §10; `tasks/slice-6.md` Authority and A2–A6; `docs/plan.md` slice-6 row and pending ADR-0006 amendment; `STATE.md` next-action contract; ADR-0004 accepted/frozen status.
+
+**Required remedy direction.** Make the pre-acceptance authority rule unambiguous across all forward contracts. Architecture-changing slice-6 implementation must remain blocked until ADR-0006 is accepted, or any pre-acceptance work must be explicitly limited to non-binding investigation/fixtures that cannot materialize the pending architecture. The accepted ADR alone may supersede ADR-0004.
+
+#### O3 — BLOCKING. Source mapping ambiguity is not separated from valid multi-translation cardinality, deduplication and precedence.
+
+**Concrete defect.** §3.1 says a "non-unique" required relation is rejected, while D61 and the existing `sense_meaning` model permit multiple ordered localized rows for one sense. A single exact source sense may legitimately contain several Persian translations that are synonyms, variant wording, or duplicate extraction rows. ADR-0006 does not define whether all exact translations are retained, how exact/normalized duplicates are collapsed, how deterministic `ord` is assigned, or whether a secondary source may add wording when the primary already safely yielded one or more rows.
+
+**Why blocking.** Without this distinction an importer can incorrectly reject a perfectly exact sense relation merely because it has several valid Persian strings, arbitrarily keep a first hit, or produce unstable rows/order across rebuilds. Those outcomes directly affect dictionary semantics, provenance, coverage counts and Stage-05 reproducibility.
+
+**Affected contract.** D57, D59, D61; §3.1, §3.4, §3.5; `sense_meaning` cardinality/ordering contract from ADR-0004 D36/D45 and PART-A schema.
+
+**Required remedy direction.** Define mapping uniqueness separately from translation-row multiplicity. State the deterministic rule for retaining a set of valid exact-sense FA translations, duplicate normalization/collapse, stable ordering, and source precedence. A secondary source should run only under an explicit rule when the primary produced no accepted set (or, if additive secondary wording is intended, that must be stated explicitly with provenance). Do not force one Persian string per sense unless deliberately chosen.
+
+#### O4 — BLOCKING. D65's source-first German eligibility predicate contains semantic/user-level judgments that are not mechanically decidable as specified.
+
+**Concrete defect.** D65/§4 requires a deterministic non-LLM predicate to decide that source text is "semantically correct, concise, learner-useful, and D33-compatible." Exact attachment to the canonical sense can establish source-sense membership, but "learner-useful" and approximate A2–B1 suitability are not made executable by saying the predicate is deterministic/conservative. Length or punctuation alone cannot prove those semantic quality properties, and no positive-evidence rule or mandatory uncertainty fallback is defined.
+
+**Why blocking.** This predicate decides whether source wording becomes the final learner-facing German meaning or whether a paid isolated generation job exists. An implementation-specific heuristic can silently accept complex, circular, meta-lexicographic or otherwise unsuitable source definitions merely to reduce cost, which violates D33's quality contract without any later universal QA to catch it.
+
+**Affected contract.** D65; §4; ADR-0004 D33; `tasks/slice-6.md` A2/A4.
+
+**Required remedy direction.** Define a deliberately conservative mechanically checkable positive-eligibility contract and an explicit fail-closed rule: any property that cannot be established by allowed deterministic source/structural evidence falls through to the isolated DE generation job. It is acceptable for this to create more DE work. Do not make a deterministic heuristic pretend to perform semantic/CEFR judgment it cannot prove.
+
+#### O5 — BLOCKING. `SUBMISSION_AMBIGUOUS` prevents duplicate submission but has no executable reconciliation path for a provider-created Batch whose ID was lost locally.
+
+**Concrete defect.** D68 persists the provider batch ID only after a known successful submission and says an ambiguous create must STOP. It does not define how a later owner/session determines whether the provider actually created the Batch after the process/network failed between provider creation and local ID persistence. In that state, merely stopping is safe against automatic rebilling but can permanently orphan paid work and valid results.
+
+The current OpenAI Batch contract exposes durable Batch IDs, the uploaded `input_file_id`, attachable metadata, list/retrieve operations, output/error artifacts and per-request completion/failure counts. ADR-0006 does not require any provider-side deterministic manifest correlation or ownership/reconciliation procedure that uses those facilities.
+
+**Why blocking.** The stated invariant is stronger than "never auto-retry": D68 says restart must neither duplicate possibly billed work nor lose valid partial work. The current state machine cannot satisfy both after provider creation/local-persist loss. Manual intervention is not executable when it has no exact reconciliation key or single-owner decision rule.
+
+**Affected contract.** D68–D69; §5.2; §9 Batch durability evidence; `tasks/slice-6.md` A6.
+
+**Required remedy direction.** Add a durable submission-ownership/reconciliation contract. Before create, persist the provider upload identity and a deterministic manifest correlation value; submit that correlation through provider-supported metadata/idempotency facilities when available. A later explicit reconciliation owner must be able to enumerate/retrieve provider batches and recover exactly one matching provider ID, or remain blocked on zero/multiple/contradictory matches. Ambiguous work must still never be automatically resubmitted. If the provider later lacks an adequate reconciliation facility, the architecture must state the fail-closed manual evidence/abandonment path rather than guessing.
+
+#### O6 — BLOCKING. "One Batch" is not bounded or partitioned against provider limits, so the production architecture is non-executable for a large queue.
+
+**Concrete defect.** D67/§5 describes a Batch manifest but does not define deterministic partitioning into multiple independently durable manifests. As of this review, the official OpenAI create-Batch contract permits at most 50,000 requests and 200 MB in one Batch input file. The existing historical Stage-03 measurement is on the order of 480,221 DE jobs before D65 source-first reduction, so a production queue can easily exceed one provider manifest even if source-first filtering substantially reduces it.
+
+**Why blocking.** A production run cannot rely on an implementation constant or accidental queue size to fit one provider object. Without a partition/restart contract, transport grouping can leak into semantic identity, a later manifest failure can invalidate or cause resubmission of earlier work, and restart cannot prove that completed partitions will not be billed again.
+
+**Affected contract.** D67–D69; §5.1–§5.2; §9; `tasks/slice-6.md` A6; cost/operational-complexity assumptions.
+
+**Required remedy direction.** Require deterministic bounded manifest partitioning under the provider limits verified at execution time, without freezing today's commercial limits into architecture. Partition identity/order must derive from the already-stable item stream/content, transport grouping must not change enrichment-item semantic identity, each manifest must be independently durable/reconcilable, completed manifests must never be resubmitted, and a later manifest failure must preserve earlier completed/rejected per-item results.
+
+#### O7 — BLOCKING. The bounded human review of source-backed Persian has no explicit acceptance owner or failure consequence.
+
+**Concrete defect.** D70 says a bounded human-review sample assesses Persian source extraction quality, while D62/D71 require a coverage report and owner visibility/acceptance. The ADR never states who receives the D70 sample, what evidence accompanies it, whether source acceptance depends on that review, or what must happen if the sample exposes wrong sense mapping/extraction despite passing deterministic structural checks.
+
+**Why blocking.** Source-backed FA deliberately receives no LLM semantic QA. The human sample is therefore the only stated semantic sanity check on the extraction/mapping implementation. If its result has no explicit stop/accept owner, a structurally valid but systematically mis-mapped source import can proceed to Stage-05 with no architecture-level decision point.
+
+**Affected contract.** D58, D62, D70–D71; §3.2, §3.5, §6, §9; `tasks/slice-6.md` A4.
+
+**Required remedy direction.** Make the source-acceptance packet explicitly include the deterministic human-review sample and its mapping/provenance evidence, identify the owner/orchestrator as the acceptance authority, and require STOP/rejection of the source mapping/build when review finds a material extraction or sense-binding defect. No arbitrary percentage threshold is required; the important contract is explicit evidence, owner acceptance, and fail-closed handling of a bad sample.
