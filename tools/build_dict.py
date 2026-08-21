@@ -21,7 +21,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Final, Sequence
+from typing import Any, Callable, Final, Sequence
 
 # Ensure repository root is on sys.path for direct script execution
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -167,9 +167,11 @@ INCLUDED_SENSE_DISTINCTION_FIELDS: Final[tuple[str, ...]] = (
     "taxonomic",
 )
 
-GENERATED_SOURCE_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^llm_generated_v[1-9][0-9]*$"
-)
+GENERATED_SOURCE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^llm_generated_v[1-9][0-9]*$")
+PERSIAN_SCRIPT_PATTERN: Final[re.Pattern[str]] = re.compile(r"[\u0600-\u06ff]")
+GERMAN_TEXT_PATTERN: Final[re.Pattern[str]] = re.compile(r"[A-Za-zÄÖÜäöüß]")
+STAGE04_CHECKPOINT_FORMAT: Final[str] = "flashcard-stage04-checkpoint-v1"
+STAGE04_MAX_TEXT_LENGTH: Final[int] = 280
 
 
 class BuildDictError(Exception):
@@ -193,12 +195,14 @@ def compute_lemma_semantic_ref(word: str, pos: str, gender: str | None) -> str:
     return f"lemma:v1:{hashlib.sha256(payload).hexdigest()}"
 
 
-LINKAGE_FIELDS: Final[frozenset[str]] = frozenset({
-    "form_of",
-    "alt_of",
-    "compound_of",
-    "taxonomic",
-})
+LINKAGE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "form_of",
+        "alt_of",
+        "compound_of",
+        "taxonomic",
+    }
+)
 
 
 def canonicalize_string_projection(s: str) -> str | None:
@@ -222,9 +226,7 @@ def canonicalize_projection_value(val: object, is_linkage: bool = False) -> obje
         return None
     if isinstance(val, str):
         return (
-            canonicalize_string_linkage(val)
-            if is_linkage
-            else canonicalize_string_projection(val)
+            canonicalize_string_linkage(val) if is_linkage else canonicalize_string_projection(val)
         )
     if isinstance(val, (int, float, bool)):
         return val
@@ -239,9 +241,7 @@ def canonicalize_projection_value(val: object, is_linkage: bool = False) -> obje
         # Deduplicate and sort by canonical JSON encoding
         seen: dict[str, Any] = {}
         for item in canon_items:
-            encoded = json.dumps(
-                item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            )
+            encoded = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             if encoded not in seen:
                 seen[encoded] = item
         sorted_items = [seen[k] for k in sorted(seen.keys())]
@@ -336,9 +336,9 @@ def compute_senseid_candidate(raw_sense: dict[str, Any]) -> str | None:
         return f"senseid:{clean_senseids[0]}"
     if len(clean_senseids) > 1:
         sorted_senseids = sorted(clean_senseids)
-        payload = json.dumps(
-            sorted_senseids, ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8")
+        payload = json.dumps(sorted_senseids, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
         return f"senseids:v1:{hashlib.sha256(payload).hexdigest()}"
     return None
 
@@ -367,9 +367,7 @@ def compute_wikidata_candidate(raw_sense: dict[str, Any]) -> str | None:
         return f"wikidata:{clean_qids[0]}"
     if len(clean_qids) > 1:
         sorted_qids = sorted(clean_qids)
-        payload = json.dumps(
-            sorted_qids, ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8")
+        payload = json.dumps(sorted_qids, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         return f"wikidata-set:v1:{hashlib.sha256(payload).hexdigest()}"
     return None
 
@@ -404,9 +402,7 @@ def resolve_sense_source_refs(raw_senses: Sequence[dict[str, Any]]) -> list[str]
     senseid_candidates = [compute_senseid_candidate(s) for s in raw_senses]
     wikidata_candidates = [compute_wikidata_candidate(s) for s in raw_senses]
 
-    senseid_counts: Counter[str] = Counter(
-        c for c in senseid_candidates if c is not None
-    )
+    senseid_counts: Counter[str] = Counter(c for c in senseid_candidates if c is not None)
 
     resolved: list[str | None] = [None] * len(raw_senses)
 
@@ -478,9 +474,7 @@ def validate_sense_meaning_derivations(conn: sqlite3.Connection) -> None:
                 f"Derivation edge references nonexistent generated meaning {gen_mid}"
             )
         if sm_id is None:
-            raise BuildDictError(
-                f"Derivation edge references nonexistent source meaning {src_mid}"
-            )
+            raise BuildDictError(f"Derivation edge references nonexistent source meaning {src_mid}")
         if gm_id == sm_id:
             raise BuildDictError(f"Derivation self-edge forbidden on meaning {gm_id}")
 
@@ -792,29 +786,19 @@ def build_stage01(
                     min(acc.praesens_3sg_candidates) if acc.praesens_3sg_candidates else None
                 )
                 praeteritum_3sg = (
-                    min(acc.praeteritum_3sg_candidates)
-                    if acc.praeteritum_3sg_candidates
-                    else None
+                    min(acc.praeteritum_3sg_candidates) if acc.praeteritum_3sg_candidates else None
                 )
                 partizip_ii = (
-                    min(acc.partizip_ii_candidates)
-                    if acc.partizip_ii_candidates
-                    else None
+                    min(acc.partizip_ii_candidates) if acc.partizip_ii_candidates else None
                 )
                 comparative = (
-                    min(acc.comparative_candidates)
-                    if acc.comparative_candidates
-                    else None
+                    min(acc.comparative_candidates) if acc.comparative_candidates else None
                 )
                 superlative = (
-                    min(acc.superlative_candidates)
-                    if acc.superlative_candidates
-                    else None
+                    min(acc.superlative_candidates) if acc.superlative_candidates else None
                 )
 
-                lemma_semantic_ref = compute_lemma_semantic_ref(
-                    acc.word, acc.pos, acc.gender
-                )
+                lemma_semantic_ref = compute_lemma_semantic_ref(acc.word, acc.pos, acc.gender)
                 if lemma_semantic_ref in seen_lemma_semantic_refs:
                     raise BuildDictError(
                         f"Duplicate lemma semantic_ref '{lemma_semantic_ref}' for '{acc.word}'"
@@ -1023,9 +1007,7 @@ class Stage02LookupOracle(LookupProtocol):
 
     _CACHE_SIZE: Final[int] = 100_000
 
-    def __init__(
-        self, db_path: Path | str, accelerator_path: Path | str | None = None
-    ) -> None:
+    def __init__(self, db_path: Path | str, accelerator_path: Path | str | None = None) -> None:
         self._source_path = Path(db_path).resolve()
         self._owns_accelerator = accelerator_path is None
         if accelerator_path is None:
@@ -1120,8 +1102,12 @@ class Stage02LookupOracle(LookupProtocol):
     @staticmethod
     def _record(row: tuple[Any, ...]) -> LemmaRecord:
         return LemmaRecord(
-            id=row[0], lemma=row[1], pos=row[2], gender=row[3],
-            semantic_ref=row[4], freq_rank=row[5],
+            id=row[0],
+            lemma=row[1],
+            pos=row[2],
+            gender=row[3],
+            semantic_ref=row[4],
+            freq_rank=row[5],
         )
 
     @lru_cache(maxsize=_CACHE_SIZE)
@@ -1210,9 +1196,7 @@ def parse_sentence_tsv(tsv_path: Path, lang_name: str) -> dict[int, str]:
                     f"must be a positive integer"
                 )
             if not text.strip():
-                raise BuildDictError(
-                    f"Blank sentence text in {tsv_path}:{line_no}"
-                )
+                raise BuildDictError(f"Blank sentence text in {tsv_path}:{line_no}")
             sid = int(id_str)
             if sid in sentences:
                 raise BuildDictError(
@@ -1326,18 +1310,12 @@ class Stage02ProjectionStore:
                         raise BuildDictError(f"Blank sentence text in {path}:{line_no}")
                     batch.append((int(id_str), text))
                     if len(batch) == 10_000:
-                        conn.executemany(
-                            f"INSERT INTO {table} (id, text) VALUES (?, ?)", batch
-                        )
+                        conn.executemany(f"INSERT INTO {table} (id, text) VALUES (?, ?)", batch)
                         batch.clear()
                 if batch:
-                    conn.executemany(
-                        f"INSERT INTO {table} (id, text) VALUES (?, ?)", batch
-                    )
+                    conn.executemany(f"INSERT INTO {table} (id, text) VALUES (?, ?)", batch)
         except sqlite3.IntegrityError as exc:
-            raise BuildDictError(
-                f"Duplicate {language} sentence id in {path}"
-            ) from exc
+            raise BuildDictError(f"Duplicate {language} sentence id in {path}") from exc
 
     @staticmethod
     def _parse_links(path: Path, conn: sqlite3.Connection) -> None:
@@ -1369,9 +1347,7 @@ class Stage02ProjectionStore:
                         )
                         batch.clear()
                 if batch:
-                    conn.executemany(
-                        "INSERT INTO de_en_link (de_id, en_id) VALUES (?, ?)", batch
-                    )
+                    conn.executemany("INSERT INTO de_en_link (de_id, en_id) VALUES (?, ?)", batch)
         except sqlite3.IntegrityError as exc:
             raise BuildDictError(f"Duplicate link pair in {path}") from exc
 
@@ -1437,9 +1413,7 @@ def validate_stage01_database(stage01_path: Path) -> None:
             raise BuildDictError(f"Stage 01 database PRAGMA quick_check failed: {check}")
         tables = {
             r[0]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         required_tables = {
             "lemma",
@@ -1476,9 +1450,7 @@ def validate_stage02_database(stage02_path: Path) -> None:
             raise BuildDictError(f"Stage 02 database PRAGMA quick_check failed: {check}")
         tables = {
             r[0]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         required_tables = {
             "lemma",
@@ -1622,9 +1594,7 @@ def build_stage02(
     try:
         # Validate inputs into a disk-backed store before opening the output.
         # This keeps the multi-million-row projections out of Python memory.
-        projection_store = Stage02ProjectionStore.create(
-            projection_path, de_tsv, en_tsv, links_tsv
-        )
+        projection_store = Stage02ProjectionStore.create(projection_path, de_tsv, en_tsv, links_tsv)
 
         # Copy Stage 01 to temp_out_path
         shutil.copyfile(stage01, temp_out_path)
@@ -1641,6 +1611,7 @@ def build_stage02(
         # Load spaCy
         try:
             import spacy
+
             nlp = spacy.load(spacy_model)
         except Exception as e:
             raise BuildDictError(f"Failed to load spaCy model '{spacy_model}': {e}") from e
@@ -1701,16 +1672,18 @@ def build_stage02(
             example_id = example_id_counter
             example_id_counter += 1
 
-            example_batch.append((
-                example_id,
-                de_text,
-                en_text,
-                "tatoeba",
-                str(de_id),
-                license_label,
-                token_count,
-                has_proper,
-            ))
+            example_batch.append(
+                (
+                    example_id,
+                    de_text,
+                    en_text,
+                    "tatoeba",
+                    str(de_id),
+                    license_label,
+                    token_count,
+                    has_proper,
+                )
+            )
 
             for lid in sorted(resolved_lemma_ids):
                 index_batch.append((lid, example_id))
@@ -1760,6 +1733,605 @@ def build_stage02(
             conn.close()
         if temp_out_path.exists():
             temp_out_path.unlink(missing_ok=True)
+
+
+def _canonical_json(value: object) -> str:
+    """Return the canonical JSON representation used for durable build identities."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _stable_digest(prefix: str, value: object) -> str:
+    """Create a namespaced SHA-256 identity without local paths or numeric IDs."""
+    payload = _canonical_json(value).encode("utf-8")
+    return f"{prefix}:{hashlib.sha256(payload).hexdigest()}"
+
+
+def _is_generated_source(source: str) -> bool:
+    return GENERATED_SOURCE_PATTERN.fullmatch(source) is not None
+
+
+def _meaning_queue_projection(row: sqlite3.Row) -> dict[str, str | int]:
+    """Project a source meaning into a stable, provenance-bearing queue input."""
+    value: dict[str, str | int] = {
+        "language": str(row["language"]),
+        "kind": str(row["kind"]),
+        "ord": int(row["ord"]),
+        "text": str(row["text"]),
+        "source": str(row["source"]),
+        "license": str(row["license"]),
+    }
+    value["input_id"] = _stable_digest("meaning-input:v1", value)
+    return value
+
+
+def _queue_item_id(payload: dict[str, object]) -> str:
+    """Return the durable Stage-03 item identifier for a semantic job."""
+    identity = {
+        key: payload[key]
+        for key in (
+            "lemma_semantic_ref",
+            "sense_semantic_ref",
+            "target_language",
+            "job_class",
+            "context",
+            "derivation_inputs",
+        )
+    }
+    return _stable_digest("enrichment-job:v1", identity)
+
+
+def build_stage03(stage02_path: Path | str, output_path: Path | str) -> dict[str, int]:
+    """Build a deterministic, network-free enrichment queue from a Stage-02 asset.
+
+    The JSONL records deliberately carry only semantic references and source data;
+    local SQLite IDs are not emitted because they are not cross-asset identity.
+    """
+    stage02 = Path(stage02_path)
+    output = Path(output_path)
+    if output.exists():
+        raise BuildDictError(f"Output path already exists: {output}")
+    validate_stage02_database(stage02)
+    before_hash = sha256_file(stage02)
+    before_size = stage02.stat().st_size
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = tempfile.NamedTemporaryFile(
+        dir=output.parent, prefix=f".{output.name}.", suffix=".tmp", delete=False
+    )
+    temp_path = Path(temp_file.name)
+    temp_file.close()
+    conn: sqlite3.Connection | None = None
+    counts: Counter[str] = Counter()
+    try:
+        conn = sqlite3.connect(f"file:{stage02.resolve()}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        sense_rows = conn.execute(
+            """
+            SELECT s.id AS sense_id, s.semantic_ref AS sense_semantic_ref,
+                   s.source_namespace, s.source_ref, s.ord AS sense_ord,
+                   l.semantic_ref AS lemma_semantic_ref, l.lemma, l.pos,
+                   l.gender, l.ipa, l.ipa_source
+            FROM sense s JOIN lemma l ON l.id = s.lemma_id
+            ORDER BY l.semantic_ref, s.semantic_ref
+            """
+        )
+        records: list[dict[str, object]] = []
+        for sense in sense_rows:
+            meaning_rows = conn.execute(
+                """
+                SELECT language, kind, ord, text, source, license
+                FROM sense_meaning
+                WHERE sense_id = ? AND source NOT GLOB 'llm_generated_v[0-9]*'
+                ORDER BY language, kind, ord, source, license, text
+                """,
+                (int(sense["sense_id"]),),
+            ).fetchall()
+            source_inputs = [_meaning_queue_projection(row) for row in meaning_rows]
+            context: dict[str, str | int | None] = {
+                "lemma": str(sense["lemma"]),
+                "pos": str(sense["pos"]),
+                "gender": None if sense["gender"] is None else str(sense["gender"]),
+                "ipa": None if sense["ipa"] is None else str(sense["ipa"]),
+                "ipa_source": None if sense["ipa_source"] is None else str(sense["ipa_source"]),
+                "source_namespace": str(sense["source_namespace"]),
+                "source_ref": str(sense["source_ref"]),
+                "sense_ord": int(sense["sense_ord"]),
+            }
+            languages = {str(row["language"]) for row in meaning_rows}
+            job_specs: list[tuple[str, str]] = []
+            if "en" not in languages:
+                job_specs.append(("en", "missing_en"))
+            # D33 applies per semantic sense, even when a source DE definition
+            # exists: that source text is preserved and a learner row is additive.
+            job_specs.append(("de", "de_learner_meaning"))
+            job_specs.append(("fa", "fa_translation"))
+            for target_language, job_class in job_specs:
+                record: dict[str, object] = {
+                    "queue_format": "flashcard-stage03-v1",
+                    "lemma_semantic_ref": str(sense["lemma_semantic_ref"]),
+                    "sense_semantic_ref": str(sense["sense_semantic_ref"]),
+                    "target_language": target_language,
+                    "job_class": job_class,
+                    "context": context,
+                    "derivation_inputs": source_inputs,
+                }
+                record["item_id"] = _queue_item_id(record)
+                records.append(record)
+        records.sort(key=lambda item: str(item["item_id"]))
+        with temp_path.open("w", encoding="utf-8", newline="\n") as queue_file:
+            for record in records:
+                queue_file.write(_canonical_json(record))
+                queue_file.write("\n")
+                counts[str(record["target_language"])] += 1
+                counts[f"class:{record['job_class']}"] += 1
+                if record["derivation_inputs"]:
+                    counts["with_derivation_inputs"] += 1
+                else:
+                    counts["without_derivation_inputs"] += 1
+        temp_path.replace(output)
+    finally:
+        if conn is not None:
+            conn.close()
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+    if sha256_file(stage02) != before_hash or stage02.stat().st_size != before_size:
+        raise BuildDictError("Stage 03 mutated its supplied Stage-02 input")
+    return dict(counts)
+
+
+def read_stage03_queue(queue_path: Path | str) -> list[dict[str, object]]:
+    """Load and strictly validate a Stage-03 queue before any Stage-04 work."""
+    queue = Path(queue_path)
+    if not queue.is_file():
+        raise BuildDictError(f"Stage 03 queue file not found: {queue}")
+    records: list[dict[str, object]] = []
+    item_ids: set[str] = set()
+    with queue.open(encoding="utf-8") as queue_file:
+        for line_number, line in enumerate(queue_file, start=1):
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise BuildDictError(f"Invalid queue JSON at line {line_number}") from exc
+            if not isinstance(item, dict):
+                raise BuildDictError(f"Queue item {line_number} is not an object")
+            required = {
+                "queue_format",
+                "item_id",
+                "lemma_semantic_ref",
+                "sense_semantic_ref",
+                "target_language",
+                "job_class",
+                "context",
+                "derivation_inputs",
+            }
+            if set(item) != required or item.get("queue_format") != "flashcard-stage03-v1":
+                raise BuildDictError(f"Queue item {line_number} has an incompatible schema")
+            if item.get("target_language") not in {"de", "en", "fa"}:
+                raise BuildDictError(f"Queue item {line_number} has an unsupported language")
+            if not isinstance(item["context"], dict) or not isinstance(
+                item["derivation_inputs"], list
+            ):
+                raise BuildDictError(f"Queue item {line_number} has invalid context")
+            expected = _queue_item_id(item)
+            item_id = item.get("item_id")
+            if not isinstance(item_id, str) or item_id != expected or item_id in item_ids:
+                raise BuildDictError(f"Queue item {line_number} has an invalid durable identity")
+            item_ids.add(item_id)
+            records.append(item)
+    if records != sorted(records, key=lambda item: str(item["item_id"])):
+        raise BuildDictError("Stage 03 queue ordering is not deterministic")
+    return records
+
+
+def _checkpoint_identity(
+    queue_sha256: str, generation_version: str, bulk_model: str, qa_model: str
+) -> dict[str, str]:
+    return {
+        "queue_sha256": queue_sha256,
+        "generation_version": generation_version,
+        "bulk_model": bulk_model,
+        "qa_model": qa_model,
+    }
+
+
+def _load_checkpoint(path: Path, identity: dict[str, str]) -> dict[str, dict[str, object]]:
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BuildDictError("Stage 04 checkpoint is corrupt") from exc
+    if not isinstance(value, dict) or value.get("format") != STAGE04_CHECKPOINT_FORMAT:
+        raise BuildDictError("Stage 04 checkpoint has an incompatible format")
+    if value.get("identity") != identity or not isinstance(value.get("completed"), dict):
+        raise BuildDictError("Stage 04 checkpoint is incompatible with this run")
+    completed_value = value["completed"]
+    if not isinstance(completed_value, dict) or not all(
+        isinstance(key, str) and isinstance(item, dict) for key, item in completed_value.items()
+    ):
+        raise BuildDictError("Stage 04 checkpoint has invalid completed results")
+    return {str(key): item for key, item in completed_value.items() if isinstance(item, dict)}
+
+
+def _write_checkpoint(
+    path: Path, identity: dict[str, str], completed: dict[str, dict[str, object]]
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        _canonical_json(
+            {"format": STAGE04_CHECKPOINT_FORMAT, "identity": identity, "completed": completed}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _validate_candidate(item: dict[str, object], candidate: dict[str, object]) -> list[str]:
+    """Validate one structured result before selective QA; return soft flags."""
+    expected_id = item["item_id"]
+    required_fields = {"item_id", "language", "kind", "text", "derivation_input_ids"}
+    if set(candidate) != required_fields:
+        raise BuildDictError(
+            f"Provider response has an invalid structured schema for {expected_id}"
+        )
+    if candidate.get("item_id") != expected_id:
+        raise BuildDictError(f"Provider response item identity mismatch for {expected_id}")
+    language = item["target_language"]
+    if candidate.get("language") != language:
+        raise BuildDictError(f"Provider response language mismatch for {expected_id}")
+    kind = candidate.get("kind")
+    allowed_kinds = {"definition", "synonym", "translation"}
+    if not isinstance(kind, str) or kind not in allowed_kinds:
+        raise BuildDictError(f"Provider response has invalid kind for {expected_id}")
+    if language == "fa" and kind != "translation":
+        raise BuildDictError(f"Persian response must be a translation for {expected_id}")
+    text = candidate.get("text")
+    if not isinstance(text, str) or not text.strip() or len(text) > STAGE04_MAX_TEXT_LENGTH:
+        raise BuildDictError(f"Provider response has invalid text for {expected_id}")
+    if any(unicodedata.category(char).startswith("C") for char in text):
+        raise BuildDictError(f"Provider response has control content for {expected_id}")
+    lemma = str((item["context"] if isinstance(item["context"], dict) else {}).get("lemma", ""))
+    if text.strip().casefold() == lemma.strip().casefold():
+        raise BuildDictError(f"Provider response echoes the lemma for {expected_id}")
+    if language == "fa" and PERSIAN_SCRIPT_PATTERN.search(text) is None:
+        raise BuildDictError(f"Persian response lacks Persian script for {expected_id}")
+    if language == "de" and GERMAN_TEXT_PATTERN.search(text) is None:
+        raise BuildDictError(f"German response lacks German/Latin text for {expected_id}")
+    input_ids = candidate.get("derivation_input_ids")
+    if not isinstance(input_ids, list) or not all(isinstance(value, str) for value in input_ids):
+        raise BuildDictError(f"Provider response has invalid derivation inputs for {expected_id}")
+    derivation_inputs = item["derivation_inputs"]
+    if not isinstance(derivation_inputs, list):
+        raise BuildDictError(f"Queue derivation inputs are invalid for {expected_id}")
+    available = {
+        str(source["input_id"])
+        for source in derivation_inputs
+        if isinstance(source, dict) and isinstance(source.get("input_id"), str)
+    }
+    if len(set(input_ids)) != len(input_ids) or not set(input_ids) <= available:
+        raise BuildDictError(
+            f"Provider response cites unavailable derivation input for {expected_id}"
+        )
+    flags: list[str] = []
+    if language == "de" and len(text.split()) > 12:
+        flags.append("long_de")
+    if language == "fa" and not PERSIAN_SCRIPT_PATTERN.search(text):
+        flags.append("non_persian")
+    return flags
+
+
+def _audit_item_ids(item_ids: list[str], queue_sha256: str) -> set[str]:
+    """Choose a deterministic small audit sample independent of provider ordering."""
+    if not item_ids:
+        return set()
+    sample_size = min(25, max(1, len(item_ids) // 100))
+    ranked = sorted(
+        item_ids,
+        key=lambda item_id: hashlib.sha256(f"{queue_sha256}:{item_id}".encode()).hexdigest(),
+    )
+    return set(ranked[:sample_size])
+
+
+def validate_generated_derivations(conn: sqlite3.Connection) -> None:
+    """Enforce ADR-0004 D45 on generated rows and their source inputs."""
+    bad = conn.execute(
+        """
+        SELECT count(*) FROM sense_meaning_derivation d
+        JOIN sense_meaning g ON g.id=d.generated_meaning_id
+        JOIN sense_meaning s ON s.id=d.source_meaning_id
+        WHERE g.source NOT GLOB 'llm_generated_v[0-9]*'
+           OR s.source GLOB 'llm_generated_v[0-9]*'
+           OR g.sense_id != s.sense_id
+        """
+    ).fetchone()[0]
+    if bad:
+        raise BuildDictError(f"Generated derivation validation found {bad} invalid edges")
+
+
+Stage04Transport = Callable[[list[dict[str, object]]], list[dict[str, object]]]
+
+
+def run_stage04(
+    stage02_path: Path | str,
+    queue_path: Path | str,
+    output_path: Path | str,
+    checkpoint_path: Path | str,
+    generated_license: str,
+    generation_version: str = "llm_generated_v1",
+    bulk_model: str = "bulk",
+    qa_model: str = "qa",
+    transport: Stage04Transport | None = None,
+    qa_transport: Stage04Transport | None = None,
+) -> dict[str, int]:
+    """Run copy-on-write Stage 04 using an injected maintainer transport.
+
+    There is intentionally no default network transport.  Phase-A callers pass a
+    deterministic fake transport; a future paid-run authorization can wire a
+    provider at this narrow build-only boundary without altering runtime code.
+    """
+    stage02 = Path(stage02_path)
+    queue = Path(queue_path)
+    output = Path(output_path)
+    checkpoint = Path(checkpoint_path)
+    if output.exists():
+        raise BuildDictError(f"Output path already exists: {output}")
+    if not GENERATED_SOURCE_PATTERN.fullmatch(generation_version):
+        raise BuildDictError("Generation version must be a versioned generated source marker")
+    if not generated_license.strip():
+        raise BuildDictError("Generated output license/classification must be explicit")
+    if transport is None:
+        raise BuildDictError(
+            "No Stage 04 transport configured; refusing implicit live provider use"
+        )
+    validate_stage02_database(stage02)
+    before_hash, before_size = sha256_file(stage02), stage02.stat().st_size
+    queue_items = read_stage03_queue(queue)
+    queue_sha = sha256_file(queue)
+    identity = _checkpoint_identity(queue_sha, generation_version, bulk_model, qa_model)
+    completed = _load_checkpoint(checkpoint, identity)
+    item_by_id = {str(item["item_id"]): item for item in queue_items}
+    if not set(completed) <= set(item_by_id):
+        raise BuildDictError("Stage 04 checkpoint contains results outside this queue")
+    pending = [item for item in queue_items if str(item["item_id"]) not in completed]
+    if pending:
+        returned = transport(pending)
+        if not isinstance(returned, list):
+            raise BuildDictError("Stage 04 transport returned a non-list response")
+        returned_by_id: dict[str, dict[str, object]] = {}
+        for candidate in returned:
+            if not isinstance(candidate, dict) or not isinstance(candidate.get("item_id"), str):
+                raise BuildDictError("Stage 04 transport returned an invalid candidate")
+            returned_by_id[str(candidate["item_id"])] = candidate
+        if set(returned_by_id) != {str(item["item_id"]) for item in pending}:
+            raise BuildDictError("Stage 04 transport did not return exactly the pending items")
+        # Validate before checkpointing so arbitrary provider payload fields,
+        # including an accidental credential echo, cannot enter local storage.
+        for item in pending:
+            _validate_candidate(item, returned_by_id[str(item["item_id"])])
+        completed.update(returned_by_id)
+        _write_checkpoint(checkpoint, identity, completed)
+    candidates: list[tuple[dict[str, object], dict[str, object], list[str]]] = []
+    for item in queue_items:
+        candidate = completed[str(item["item_id"])]
+        flags = _validate_candidate(item, candidate)
+        candidates.append((item, candidate, flags))
+    candidate_ids = [str(item["item_id"]) for item, _candidate, _flags in candidates]
+    seen_text: set[tuple[str, str, str]] = set()
+    for item, candidate, _flags in candidates:
+        duplicate_key = (
+            str(item["sense_semantic_ref"]),
+            str(candidate["language"]),
+            str(candidate["text"]).strip().casefold(),
+        )
+        if duplicate_key in seen_text:
+            raise BuildDictError("Stage 04 provider response has duplicate localized text")
+        seen_text.add(duplicate_key)
+    audit_ids = _audit_item_ids(candidate_ids, queue_sha)
+    qa_ids = {str(item["item_id"]) for item, _candidate, flags in candidates if flags} | audit_ids
+    if qa_ids and qa_transport is None:
+        raise BuildDictError("Stage 04 QA transport is required for the selected audit set")
+    if qa_ids and qa_transport is not None:
+        qa_requests = [
+            candidate for item, candidate, _flags in candidates if str(item["item_id"]) in qa_ids
+        ]
+        qa_results = qa_transport(qa_requests)
+        if not isinstance(qa_results, list):
+            raise BuildDictError("Stage 04 QA transport returned a non-list response")
+        replacements = {
+            str(candidate["item_id"]): candidate
+            for candidate in qa_results
+            if isinstance(candidate, dict) and isinstance(candidate.get("item_id"), str)
+        }
+        if set(replacements) != qa_ids:
+            raise BuildDictError("Stage 04 QA transport did not return exactly the selected items")
+        candidates = [
+            (item, replacements.get(str(item["item_id"]), candidate), flags)
+            for item, candidate, flags in candidates
+        ]
+        for item, candidate, _flags in candidates:
+            _validate_candidate(item, candidate)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = tempfile.NamedTemporaryFile(
+        dir=output.parent, prefix=f".{output.name}.", suffix=".tmp", delete=False
+    )
+    temp_path = Path(temporary.name)
+    temporary.close()
+    conn: sqlite3.Connection | None = None
+    try:
+        shutil.copyfile(stage02, temp_path)
+        conn = sqlite3.connect(temp_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        sense_ids = {
+            str(row["semantic_ref"]): int(row["id"])
+            for row in conn.execute("SELECT id, semantic_ref FROM sense")
+        }
+        source_rows = {
+            _meaning_queue_projection(row)["input_id"]: int(row["id"])
+            for row in conn.execute(
+                "SELECT id, language, kind, ord, text, source, license FROM sense_meaning "
+                "WHERE source NOT GLOB 'llm_generated_v[0-9]*'"
+            )
+        }
+        for item, candidate, _flags in candidates:
+            sense_ref = str(item["sense_semantic_ref"])
+            sense_id = sense_ids.get(sense_ref)
+            if sense_id is None:
+                raise BuildDictError("Stage 04 queue sense does not exist in supplied input")
+            language = str(candidate["language"])
+            kind = str(candidate["kind"])
+            next_ord = conn.execute(
+                "SELECT COALESCE(MAX(ord), -1)+1 FROM sense_meaning "
+                "WHERE sense_id=? AND language=? AND kind=?",
+                (sense_id, language, kind),
+            ).fetchone()[0]
+            cursor = conn.execute(
+                """INSERT INTO sense_meaning (sense_id, language, kind, ord, text, source, license)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    sense_id,
+                    language,
+                    kind,
+                    next_ord,
+                    str(candidate["text"]),
+                    generation_version,
+                    generated_license,
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise BuildDictError("Stage 04 did not obtain a generated meaning row identity")
+            generated_id = int(cursor.lastrowid)
+            derivation_input_ids = candidate.get("derivation_input_ids")
+            if not isinstance(derivation_input_ids, list):
+                raise BuildDictError("Stage 04 candidate lost its validated derivation inputs")
+            for input_id in derivation_input_ids:
+                source_id = source_rows.get(str(input_id))
+                if source_id is None:
+                    raise BuildDictError(
+                        "Stage 04 derivation input cannot be found in supplied input"
+                    )
+                conn.execute(
+                    "INSERT INTO sense_meaning_derivation "
+                    "(generated_meaning_id, source_meaning_id) "
+                    "VALUES (?, ?)",
+                    (generated_id, source_id),
+                )
+        validate_generated_derivations(conn)
+        conn.commit()
+        conn.close()
+        conn = None
+        validate_stage05_database(temp_path)
+        temp_path.replace(output)
+    finally:
+        if conn is not None:
+            conn.close()
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+    if sha256_file(stage02) != before_hash or stage02.stat().st_size != before_size:
+        raise BuildDictError("Stage 04 mutated its supplied Stage-02 input")
+    return {
+        "completed": len(candidates),
+        "qa_selected": len(qa_ids),
+        "audit_selected": len(audit_ids),
+    }
+
+
+def validate_stage05_database(dictionary_path: Path | str) -> None:
+    """Validate a completed enriched dictionary before final packaging."""
+    path = Path(dictionary_path)
+    validate_stage02_database(path)
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
+        bad_refs = conn.execute(
+            "SELECT (SELECT count(*) FROM lemma WHERE trim(semantic_ref)='') + "
+            "(SELECT count(*) FROM sense WHERE trim(semantic_ref)='')"
+        ).fetchone()[0]
+        if bad_refs:
+            raise BuildDictError(f"Stage 05 database has {bad_refs} blank semantic refs")
+        bad_meanings = conn.execute(
+            "SELECT count(*) FROM sense_meaning WHERE trim(language)='' OR trim(kind)='' "
+            "OR trim(text)='' OR trim(source)='' OR trim(license)=''"
+        ).fetchone()[0]
+        if bad_meanings:
+            raise BuildDictError(f"Stage 05 database has {bad_meanings} bad localized attributions")
+        orphan_meanings = conn.execute(
+            "SELECT count(*) FROM sense_meaning m LEFT JOIN sense s ON s.id=m.sense_id "
+            "WHERE s.id IS NULL"
+        ).fetchone()[0]
+        orphan_derivations = conn.execute(
+            "SELECT count(*) FROM sense_meaning_derivation d "
+            "LEFT JOIN sense_meaning g ON g.id=d.generated_meaning_id "
+            "LEFT JOIN sense_meaning s ON s.id=d.source_meaning_id "
+            "WHERE g.id IS NULL OR s.id IS NULL"
+        ).fetchone()[0]
+        if orphan_meanings or orphan_derivations:
+            raise BuildDictError("Stage 05 database has orphan meaning or derivation rows")
+        validate_generated_derivations(conn)
+        foreign_keys = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if foreign_keys:
+            raise BuildDictError("Stage 05 database has foreign key violations")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def package_stage05(
+    enriched_path: Path | str, output_dir: Path | str, version: str
+) -> dict[str, object]:
+    """Publish a new versioned package and deterministic metadata, never in place."""
+    if not re.fullmatch(r"v[1-9][0-9]*", version):
+        raise BuildDictError("Package version must have the semantic form vN")
+    source = Path(enriched_path)
+    directory = Path(output_dir)
+    filename = f"dictionary_{version}.sqlite"
+    package = directory / filename
+    metadata_path = directory / f"dictionary_{version}.metadata.json"
+    attribution_path = directory / f"dictionary_{version}.attribution.json"
+    if package.exists() or metadata_path.exists() or attribution_path.exists():
+        raise BuildDictError(f"Package version already exists: {version}")
+    validate_stage05_database(source)
+    source_hash, source_size = sha256_file(source), source.stat().st_size
+    directory.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, package)
+    try:
+        validate_stage05_database(package)
+        sha256 = sha256_file(package)
+        size = package.stat().st_size
+        if sha256 != source_hash or size != source_size:
+            raise BuildDictError("Stage 05 package copy does not match validated input")
+        conn = sqlite3.connect(f"file:{package.resolve()}?mode=ro", uri=True)
+        try:
+            attribution = [
+                {"source": row[0], "license": row[1], "rows": row[2]}
+                for row in conn.execute(
+                    "SELECT source, license, count(*) FROM ("
+                    "SELECT source, license FROM sense_meaning UNION ALL "
+                    "SELECT source, license FROM sense UNION ALL "
+                    "SELECT source, license FROM example"
+                    ") WHERE source IS NOT NULL AND license IS NOT NULL "
+                    "GROUP BY source, license ORDER BY source, license"
+                )
+            ]
+        finally:
+            conn.close()
+        metadata: dict[str, object] = {
+            "version": version,
+            "filename": filename,
+            "sha256": sha256,
+            "bytes": size,
+        }
+        metadata_path.write_text(_canonical_json(metadata) + "\n", encoding="utf-8")
+        attribution_path.write_text(
+            _canonical_json({"attribution": attribution}) + "\n", encoding="utf-8"
+        )
+        return metadata
+    except Exception:
+        package.unlink(missing_ok=True)
+        metadata_path.unlink(missing_ok=True)
+        attribution_path.unlink(missing_ok=True)
+        raise
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1849,6 +2421,56 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Number of worker processes for spaCy nlp.pipe (default: 8)",
     )
 
+    stage03_parser = subparsers.add_parser(
+        "stage03",
+        help="Stage 03: Build deterministic, network-free enrichment queue",
+    )
+    stage03_parser.add_argument(
+        "--stage02", type=Path, required=True, help="Accepted Stage-02 SQLite"
+    )
+    stage03_parser.add_argument("--output", type=Path, required=True, help="New JSONL queue path")
+
+    stage04_parser = subparsers.add_parser(
+        "stage04",
+        help="Stage 04: Apply a deterministic maintainer response fixture to an enriched copy",
+    )
+    stage04_parser.add_argument(
+        "--stage02", type=Path, required=True, help="Accepted Stage-02 SQLite"
+    )
+    stage04_parser.add_argument("--queue", type=Path, required=True, help="Stage-03 JSONL queue")
+    stage04_parser.add_argument(
+        "--output", type=Path, required=True, help="New enriched SQLite path"
+    )
+    stage04_parser.add_argument(
+        "--checkpoint", type=Path, required=True, help="Ignored local checkpoint path"
+    )
+    stage04_parser.add_argument(
+        "--generated-license", required=True, help="Explicit generated output classification"
+    )
+    stage04_parser.add_argument(
+        "--responses", type=Path, required=True, help="Local fake response JSON array"
+    )
+    stage04_parser.add_argument(
+        "--qa-responses", type=Path, help="Optional local fake QA response JSON array"
+    )
+    stage04_parser.add_argument("--generation-version", default="llm_generated_v1")
+    stage04_parser.add_argument("--bulk-model", default="bulk")
+    stage04_parser.add_argument("--qa-model", default="qa")
+
+    stage05_parser = subparsers.add_parser(
+        "stage05",
+        help="Stage 05: Package a validated enriched dictionary copy",
+    )
+    stage05_parser.add_argument(
+        "--enriched", type=Path, required=True, help="Validated enriched SQLite"
+    )
+    stage05_parser.add_argument(
+        "--output-dir", type=Path, required=True, help="New package directory"
+    )
+    stage05_parser.add_argument(
+        "--version", required=True, help="Semantic package version, e.g. v1"
+    )
+
     args = parser.parse_args(sys.argv[1:] if argv is None else list(argv))
 
     if args.command == "stage01":
@@ -1879,6 +2501,58 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         except Exception as e:
             sys.stderr.write(f"Error during stage 02 build: {e}\n")
+            return 1
+
+    if args.command == "stage03":
+        try:
+            build_stage03(args.stage02, args.output)
+            return 0
+        except Exception as e:
+            sys.stderr.write(f"Error during stage 03 build: {e}\n")
+            return 1
+
+    if args.command == "stage04":
+        try:
+            responses_value = json.loads(args.responses.read_text(encoding="utf-8"))
+            if not isinstance(responses_value, list):
+                raise BuildDictError("Stage 04 responses fixture must be a JSON array")
+            qa_value: object | None = None
+            if args.qa_responses is not None:
+                qa_value = json.loads(args.qa_responses.read_text(encoding="utf-8"))
+                if not isinstance(qa_value, list):
+                    raise BuildDictError("Stage 04 QA responses fixture must be a JSON array")
+
+            def local_transport(_items: list[dict[str, object]]) -> list[dict[str, object]]:
+                return responses_value
+
+            def local_qa_transport(_items: list[dict[str, object]]) -> list[dict[str, object]]:
+                if not isinstance(qa_value, list):
+                    raise BuildDictError("No local QA fixture configured")
+                return qa_value
+
+            run_stage04(
+                args.stage02,
+                args.queue,
+                args.output,
+                args.checkpoint,
+                args.generated_license,
+                args.generation_version,
+                args.bulk_model,
+                args.qa_model,
+                local_transport,
+                local_qa_transport if qa_value is not None else None,
+            )
+            return 0
+        except Exception as e:
+            sys.stderr.write(f"Error during stage 04 build: {e}\n")
+            return 1
+
+    if args.command == "stage05":
+        try:
+            package_stage05(args.enriched, args.output_dir, args.version)
+            return 0
+        except Exception as e:
+            sys.stderr.write(f"Error during stage 05 build: {e}\n")
             return 1
 
     return 1
