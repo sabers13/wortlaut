@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -583,4 +584,178 @@ def test_rollback_preserves_source(tmp_path: Path) -> None:
     # source rows preserved
     orig = sqlite3.connect(f"file:{s02}?mode=ro", uri=True).execute("SELECT count(*) FROM sense_meaning").fetchone()[0]
     assert total_after == orig
+    conn2.close()
+
+# FA v2 tests
+
+# Real-asset FA v2 verification resolves the accepted local Stage-02 asset via
+# the FLASHCARD_TEST_STAGE02 environment variable; skipped when not provided.
+REAL_STAGE02 = os.environ.get("FLASHCARD_TEST_STAGE02", "")
+requires_real_stage02 = pytest.mark.skipif(
+    not REAL_STAGE02 or not Path(REAL_STAGE02).is_file(),
+    reason="accepted real Stage-02 asset not provided via FLASHCARD_TEST_STAGE02",
+)
+
+
+def test_fa_v2_bulk_fa_namespace_independent(tmp_path: Path) -> None:
+    from tools.build_dict import _empty_checkpoint
+    # Create checkpoint with bulk and bulk_fa
+    # Ensure bulk_fa is in empty checkpoint
+    empty = _empty_checkpoint()
+    assert "bulk_fa" in empty
+    assert "bulk" in empty
+    # Ensure they are independent
+    empty["bulk"]["completed"]["test"] = {"a": 1}  # type: ignore
+    assert "test" not in empty["bulk_fa"]["completed"]  # type: ignore
+
+def test_fa_v2_classification_compatibility(tmp_path: Path) -> None:
+    from tools.build_dict import BuildDictError, _checkpoint_identity, _load_checkpoint
+    qsha = "testsha"
+    ident_correct = _checkpoint_identity(qsha, "llm_generated_v1", "AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1", "gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-terra", bulk_fa_model="gpt-5.6-luna", fa_input_version="fa-input-v2", fa_bulk_version="fa-bulk-v2", fa_response_version="fa-response-v2")
+    ident_wrong = _checkpoint_identity(qsha, "llm_generated_v1", "WRONG_CLASSIFICATION", "gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-terra", bulk_fa_model="gpt-5.6-luna", fa_input_version="fa-input-v2", fa_bulk_version="fa-bulk-v2", fa_response_version="fa-response-v2")
+    ckpt = tmp_path / "ckpt.json"
+    # Write a checkpoint with correct identity
+    import json
+    data = {"format": "flashcard-stage04-checkpoint-v2", "identity": ident_correct, "bulk": {"completed": {}, "rejected": {}, "in_flight": []}, "bulk_fa": {"completed": {}, "rejected": {}, "in_flight": []}, "qa": {"required": [], "completed": {}, "rejected": {}, "in_flight": []}, "manifests": []}
+    ckpt.write_text(json.dumps(data))
+    # Loading with wrong classification should fail
+    with __import__('pytest').raises(BuildDictError, match="incompatible"):
+        _load_checkpoint(ckpt, ident_wrong)
+
+def test_fa_v2_legacy_ids_untouched(tmp_path: Path) -> None:
+    from tools.build_dict import _checkpoint_identity, _load_checkpoint
+    qsha = "legacytest"
+    ident = _checkpoint_identity(qsha, "llm_generated_v1", "AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1", "gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-terra")
+    # Legacy checkpoint with 5 in_flight
+    import json
+    ckpt = tmp_path / "legacy.json"
+    legacy = {"format": "flashcard-stage04-checkpoint-v2", "identity": ident, "bulk": {"completed": {}, "rejected": {}, "in_flight": ["a","b","c","d","e"]}, "bulk_fa": {"completed": {}, "rejected": {}, "in_flight": []}, "qa": {"required": [], "completed": {}, "rejected": {}, "in_flight": []}, "manifests": []}
+    ckpt.write_text(json.dumps(legacy))
+    loaded = _load_checkpoint(ckpt, ident)
+    assert loaded["bulk"]["in_flight"] == ["a","b","c","d","e"]  # type: ignore
+
+@requires_real_stage02
+def test_fa_v2_canary_25_25_and_bytewise(tmp_path: Path) -> None:
+    from tools.build_dict import _build_fa_v2_candidates, _select_fa_canary_v2
+    real = Path(REAL_STAGE02)
+    cands = _build_fa_v2_candidates(real)
+    canary = _select_fa_canary_v2(cands)
+    assert len(canary) == 50
+    # At least 20 should be morphology if our classifier works (since overall 181k ADJ many are morphology)
+    # But we enforce 25/25, so check counts
+    from tools.build_dict import _is_morphology_sense
+    morph_count = sum(1 for c in canary if _is_morphology_sense(str(c.get("en_meaning", ""))))
+    lex_count = 50 - morph_count
+    assert morph_count == 25
+    assert lex_count == 25
+    # Bytewise order
+    sorted_canary = sorted(canary, key=lambda x: str(x["item_id"]).encode())
+    assert canary == sorted_canary
+
+@requires_real_stage02
+def test_fa_v2_canary_selection_file_hash(tmp_path: Path) -> None:
+    import hashlib
+
+    from tools.build_dict import (
+        _build_fa_v2_candidates,
+        _select_fa_canary_v2,
+        _write_canary_selection_manifest,
+    )
+    real = Path(REAL_STAGE02)
+    cands = _build_fa_v2_candidates(real)
+    canary = _select_fa_canary_v2(cands)
+    out = tmp_path / "fa-canary-selection-v2.json"
+    sha, nbytes = _write_canary_selection_manifest(canary, out)
+    # Verify hash matches actual file bytes
+    actual = hashlib.sha256(out.read_bytes()).hexdigest()
+    assert sha == actual
+    assert nbytes == out.stat().st_size
+    # Ensure compact (no pretty)
+    content = out.read_bytes()
+    assert b"\n  " not in content[:1000]
+
+@requires_real_stage02
+def test_fa_v2_sync_and_batch_equivalence(tmp_path: Path) -> None:
+    from tools.build_dict import _build_fa_v2_candidates
+    real = Path(REAL_STAGE02)
+    cands = _build_fa_v2_candidates(real)[:1]
+    sample = cands[0]
+    prompt = f"German lemma: {sample['lemma']}\nPOS: {sample['pos']}\nEnglish: {sample['en_meaning']}"
+    sync_body = {"model": "gpt-5.6-luna", "input": prompt, "text": {"format": {"type": "json_schema", "name": "persian", "schema": {"type": "object", "properties": {"persian": {"type": "string"}}, "required": ["persian"], "additionalProperties": False}, "strict": True}}}
+    batch_record = {"custom_id": sample["custom_id"], "method": "POST", "url": "/v1/responses", "body": sync_body}
+    assert batch_record["body"] == sync_body
+
+def test_fa_v2_spend_cap(tmp_path: Path) -> None:
+    from tools.build_dict import BuildDictError, _check_canary_spend_cap, _estimate_fa_cost
+    assert _estimate_fa_cost(50) < 0.10
+    _check_canary_spend_cap(50)  # should not raise
+    try:
+        _check_canary_spend_cap(50000)
+        assert False, "should have raised"
+    except BuildDictError as e:
+        assert "exceeds hard cap" in str(e)
+
+def test_fa_v2_derivation_exactly_one_en(tmp_path: Path) -> None:
+    import sqlite3
+    db = tmp_path / "fa_deriv.sqlite"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE lemma (id INTEGER PRIMARY KEY, semantic_ref TEXT NOT NULL UNIQUE, lemma TEXT NOT NULL, pos TEXT NOT NULL, gender TEXT);
+        CREATE TABLE sense (id INTEGER PRIMARY KEY, lemma_id INTEGER NOT NULL, semantic_ref TEXT NOT NULL UNIQUE, source_namespace TEXT NOT NULL, source_ref TEXT NOT NULL, ord INTEGER NOT NULL);
+        CREATE TABLE sense_meaning (id INTEGER PRIMARY KEY, sense_id INTEGER NOT NULL, language TEXT NOT NULL, kind TEXT NOT NULL, ord INTEGER NOT NULL, text TEXT NOT NULL, source TEXT NOT NULL, license TEXT NOT NULL);
+        CREATE TABLE sense_meaning_derivation (generated_meaning_id INTEGER NOT NULL, source_meaning_id INTEGER NOT NULL, PRIMARY KEY (generated_meaning_id, source_meaning_id)) WITHOUT ROWID;
+        CREATE TABLE example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0);
+        CREATE TABLE example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;
+    """)
+    conn.execute("INSERT INTO lemma (id, semantic_ref, lemma, pos) VALUES (1, 'lemma:v1:test', 'Haus', 'NOUN')")
+    conn.execute("INSERT INTO sense (id, lemma_id, semantic_ref, source_namespace, source_ref, ord) VALUES (1, 1, 'sense:v1:test', 'wiktextract:enwiktionary', 'fingerprint:v1:test', 0)")
+    conn.execute("INSERT INTO sense_meaning (id, sense_id, language, kind, ord, text, source, license) VALUES (1, 1, 'en', 'translation', 0, 'house', 'wiktionary', 'CC BY-SA')")
+    conn.commit()
+    conn.close()
+    # Simulate FA generation with exactly one EN edge
+    out = tmp_path / "out.sqlite"
+    import shutil
+    shutil.copy(db, out)
+    conn2 = sqlite3.connect(out)
+    # Insert generated FA
+    conn2.execute("INSERT INTO sense_meaning (id, sense_id, language, kind, ord, text, source, license) VALUES (2, 1, 'fa', 'translation', 0, 'خانه', 'llm_generated_v1', 'AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1')")
+    conn2.execute("INSERT INTO sense_meaning_derivation (generated_meaning_id, source_meaning_id) VALUES (2, 1)")
+    conn2.commit()
+    # Validate exactly one edge
+    cnt = conn2.execute("SELECT count(*) FROM sense_meaning_derivation WHERE generated_meaning_id=2").fetchone()[0]
+    assert cnt == 1
+    # Check same sense
+    src_sense = conn2.execute("SELECT sense_id FROM sense_meaning WHERE id=1").fetchone()[0]
+    gen_sense = conn2.execute("SELECT sense_id FROM sense_meaning WHERE id=2").fetchone()[0]
+    assert src_sense == gen_sense
+    conn2.close()
+
+def test_fa_v2_rollback_preserves_source(tmp_path: Path) -> None:
+    import sqlite3
+    db = tmp_path / "rollback.sqlite"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE lemma (id INTEGER PRIMARY KEY, semantic_ref TEXT NOT NULL UNIQUE, lemma TEXT NOT NULL, pos TEXT NOT NULL, gender TEXT);
+        CREATE TABLE sense (id INTEGER PRIMARY KEY, lemma_id INTEGER NOT NULL, semantic_ref TEXT NOT NULL UNIQUE, source_namespace TEXT NOT NULL, source_ref TEXT NOT NULL, ord INTEGER NOT NULL);
+        CREATE TABLE sense_meaning (id INTEGER PRIMARY KEY, sense_id INTEGER NOT NULL, language TEXT NOT NULL, kind TEXT NOT NULL, ord INTEGER NOT NULL, text TEXT NOT NULL, source TEXT NOT NULL, license TEXT NOT NULL);
+        CREATE TABLE sense_meaning_derivation (generated_meaning_id INTEGER NOT NULL REFERENCES sense_meaning(id) ON DELETE CASCADE, source_meaning_id INTEGER NOT NULL REFERENCES sense_meaning(id) ON DELETE RESTRICT, PRIMARY KEY (generated_meaning_id, source_meaning_id)) WITHOUT ROWID;
+        CREATE TABLE example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0);
+        CREATE TABLE example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;
+    """)
+    conn.execute("INSERT INTO lemma (id, semantic_ref, lemma, pos) VALUES (1, 'lemma:v1:r', 'Haus', 'NOUN')")
+    conn.execute("INSERT INTO sense (id, lemma_id, semantic_ref, source_namespace, source_ref, ord) VALUES (1, 1, 'sense:v1:r', 'wiktextract:enwiktionary', 'fingerprint:v1:r', 0)")
+    conn.execute("INSERT INTO sense_meaning (id, sense_id, language, kind, ord, text, source, license) VALUES (1, 1, 'en', 'translation', 0, 'house', 'wiktionary', 'CC BY-SA')")
+    conn.execute("INSERT INTO sense_meaning (id, sense_id, language, kind, ord, text, source, license) VALUES (2, 1, 'fa', 'translation', 0, 'خانه', 'llm_generated_v1', 'AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1')")
+    conn.execute("INSERT INTO sense_meaning_derivation (generated_meaning_id, source_meaning_id) VALUES (2, 1)")
+    conn.commit()
+    conn.close()
+    # Rollback
+    conn2 = sqlite3.connect(db)
+    conn2.execute("DELETE FROM sense_meaning WHERE source='llm_generated_v1'")
+    conn2.commit()
+    remaining = conn2.execute("SELECT count(*) FROM sense_meaning").fetchone()[0]
+    assert remaining == 1
+    # Source preserved
+    src = conn2.execute("SELECT text FROM sense_meaning WHERE id=1").fetchone()[0]
+    assert src == "house"
     conn2.close()

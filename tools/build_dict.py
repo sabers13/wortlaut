@@ -2086,6 +2086,71 @@ STAGE04_DEFAULT_BATCH_SIZE: Final[int] = 100
 STAGE04_DEFAULT_PROVIDER_MAX_BYTES: Final[int] = 200 * 1024 * 1024
 STAGE04_DEFAULT_PROVIDER_MAX_REQUESTS: Final[int] = 50000
 
+FA_JOB_CLASS: Final[str] = "fa_generated_meaning"
+FA_ITEM_VERSION: Final[str] = "fa-generation-job:v2"
+FA_INPUT_VERSION: Final[str] = "fa-input-v2"
+FA_BULK_VERSION: Final[str] = "fa-bulk-v2"
+FA_RESPONSE_VERSION: Final[str] = "fa-response-v2"
+FA_CANARY_STRATA_VERSION: Final[str] = "fa-canary-strata-v1"
+OUTPUT_CLASSIFICATION: Final[str] = "AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1"
+MAX_FA_SCALARS: Final[int] = 160
+MAX_FA_TOKENS: Final[int] = 24
+CANARY_HARD_SPEND_CAP_USD: Final[float] = 0.10
+
+
+def _estimate_fa_cost(
+    num_items: int,
+    mean_input_tokens: float = 146.5,
+    mean_output_tokens: float = 5.0,
+    bulk_input_price: float = 0.10,
+    bulk_output_price: float = 0.60,
+) -> float:
+    """Estimate FA Batch cost for num_items, fail closed if exceeds cap."""
+    total_input = num_items * mean_input_tokens
+    total_output = num_items * mean_output_tokens
+    cost = (total_input / 1_000_000) * bulk_input_price + (total_output / 1_000_000) * bulk_output_price  # noqa: E501
+    return cost
+
+
+def _check_canary_spend_cap(num_items: int = 50) -> None:
+    """Fail closed if estimated canary cost exceeds hard cap."""
+    est = _estimate_fa_cost(num_items)
+    if est > CANARY_HARD_SPEND_CAP_USD:
+        raise BuildDictError(f"Canary estimated cost ${est:.4f} exceeds hard cap ${CANARY_HARD_SPEND_CAP_USD:.2f}")  # noqa: E501
+
+
+def _write_canary_selection_manifest(
+    candidates: list[dict[str, object]], path: Path
+) -> tuple[str, int]:
+    """Write canary selection as exact canonical compact JSON bytes, hash actual file bytes."""
+    # Ensure bytewise order
+    candidates_sorted = sorted(candidates, key=lambda x: str(x["item_id"]).encode())
+    data = json.dumps(
+        candidates_sorted, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Write atomically
+    tmp = tempfile.NamedTemporaryFile(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
+    )
+    tmp_path = Path(tmp.name)
+    tmp.close()
+    try:
+        with tmp_path.open("wb") as f:
+            f.write(data)
+        # Verify hash
+        actual_sha = hashlib.sha256(tmp_path.read_bytes()).hexdigest()
+        expected_sha = hashlib.sha256(data).hexdigest()
+        if actual_sha != expected_sha:
+            raise BuildDictError("Canary selection hash mismatch")
+        if path.exists():
+            raise BuildDictError(f"Output path already exists: {path}")
+        tmp_path.replace(path)
+        return actual_sha, len(data)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
 
 def _validate_persian_unicode(text: str) -> str | None:
     """Validate Persian Unicode per ADR-0006. Return error code or None on pass."""
@@ -2180,6 +2245,159 @@ def _compute_queue_item_id(
         sort_keys=False,
     ).encode("utf-8")
     return f"queue:v1:{hashlib.sha256(payload).hexdigest()[:32]}"
+
+
+def _compute_fa_v2_item_id(lemma_ref: str, sense_ref: str) -> str:
+    """Compute durable FA v2 item id per fa-generation-job:v2 spec."""
+    payload = json.dumps(
+        [lemma_ref, sense_ref, "fa", FA_JOB_CLASS],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=False,
+    ).encode("utf-8")
+    return f"{FA_ITEM_VERSION}:{hashlib.sha256(payload).hexdigest()}"
+
+
+MORPHOLOGY_PATTERNS: Final[tuple[str, ...]] = (
+    "inflection of",
+    "plural of",
+    "singular of",
+    "genitive",
+    "nominative",
+    "accusative",
+    "dative",
+    "subjunctive",
+    "indicative",
+    "imperative",
+    "participle",
+    "comparative degree",
+    "superlative degree",
+    "first-person",
+    "second-person",
+    "third-person",
+)
+
+
+def _is_morphology_sense(en_text: str | None) -> bool:
+    """Deterministic morphology classifier fa-canary-strata-v1."""
+    if not en_text:
+        return False
+    lower = en_text.lower()
+    return any(pat in lower for pat in MORPHOLOGY_PATTERNS)
+
+
+def _validate_fa_v2_output(text: str, lemma_text: str) -> str | None:
+    """Validate single Persian output per v2 contract."""
+    stripped = text.strip()
+    if not stripped:
+        return "empty"
+    if len(stripped) < 1:
+        return "too_short"
+    if len(stripped) > MAX_FA_SCALARS:
+        return "too_long"
+    tokens = stripped.split()
+    if len(tokens) > MAX_FA_TOKENS:
+        return "too_many_tokens"
+    # Must contain at least one Arabic-script character
+    has_arabic = any("\u0600" <= ch <= "\u06FF" or "\u0750" <= ch <= "\u077F" for ch in stripped)
+    if not has_arabic:
+        return "non_persian"
+    if stripped.lower() == lemma_text.strip().lower():
+        return "echo_lemma"
+    # Persian unicode
+    err = _validate_persian_unicode(stripped)
+    if err is not None:
+        return err
+    # No markdown or commentary
+    if stripped.startswith("#") or "```" in stripped or stripped.startswith("- "):
+        return "has_markdown"
+    return None
+
+
+def _build_fa_v2_candidates(stage02_path: Path) -> list[dict[str, object]]:
+    """Build deterministic FA v2 candidate manifest (read-only, no numeric IDs)."""
+    conn = sqlite3.connect(f"file:{stage02_path.resolve()}?mode=ro", uri=True)
+    try:
+        # Map sense_id to en text for filtering
+        # Need sense_id, but we can get via query that includes id
+        senses_with_id = conn.execute(
+            "SELECT s.id, s.semantic_ref, l.semantic_ref, l.lemma, l.pos, l.gender "
+            "FROM sense s JOIN lemma l ON l.id=s.lemma_id "
+            "ORDER BY s.semantic_ref ASC, s.id ASC"
+        ).fetchall()
+        en_text_by_id: dict[int, str] = {}
+        for sid, txt in conn.execute("SELECT sense_id, text FROM sense_meaning WHERE language='en' ORDER BY sense_id, ord ASC"):  # noqa: E501
+            if sid not in en_text_by_id:
+                en_text_by_id[sid] = txt
+        candidates: list[dict[str, object]] = []
+        for sid, sref, lref, lemma, pos, gender in senses_with_id:
+            en_txt = en_text_by_id.get(sid)
+            if not en_txt or not en_txt.strip():
+                continue  # Exclude candidates missing EN (exactly one EN edge required)
+            item_id = _compute_fa_v2_item_id(lref, sref)
+            candidates.append(
+                {
+                    "item_id": item_id,
+                    "custom_id": f"batch:{item_id}",
+                    "lemma_semantic_ref": lref,
+                    "sense_semantic_ref": sref,
+                    "lemma": lemma,
+                    "pos": pos,
+                    "gender": gender,
+                    "en_meaning": en_txt,
+                }
+            )
+        candidates.sort(key=lambda x: str(x["item_id"]).encode())
+        # Ensure unique
+        seen: set[str] = set()
+        for c in candidates:
+            iid = str(c["item_id"])
+            if iid in seen:
+                raise BuildDictError(f"Duplicate FA v2 item_id {iid}")
+            seen.add(iid)
+            if str(c.get("job_class", FA_JOB_CLASS)) == "fa_translation":
+                raise BuildDictError("Historical fa_translation must not be reused")
+        # Strip to durable manifest (no numeric IDs)
+        final: list[dict[str, object]] = []
+        for c in candidates:
+            final.append(
+                {
+                    "item_id": c["item_id"],
+                    "custom_id": c["custom_id"],
+                    "lemma_semantic_ref": c["lemma_semantic_ref"],
+                    "sense_semantic_ref": c["sense_semantic_ref"],
+                    "lemma": c["lemma"],
+                    "pos": c["pos"],
+                    "gender": c["gender"],
+                    "en_meaning": c["en_meaning"],
+                    "job_class": FA_JOB_CLASS,
+                }
+            )
+        return final
+    finally:
+        conn.close()
+
+
+def _select_fa_canary_v2(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Select 25 morphology + 25 lexical deterministically, then bytewise order."""
+    morph: list[dict[str, object]] = []
+    lexical: list[dict[str, object]] = []
+    for c in candidates:
+        en = str(c.get("en_meaning", ""))
+        if _is_morphology_sense(en):
+            morph.append(c)
+        else:
+            lexical.append(c)
+    morph_sorted = sorted(morph, key=lambda x: hashlib.sha256(str(x["item_id"]).encode()).hexdigest())  # noqa: E501
+    lexical_sorted = sorted(lexical, key=lambda x: hashlib.sha256(str(x["item_id"]).encode()).hexdigest())  # noqa: E501
+    selected = morph_sorted[:25] + lexical_sorted[:25]
+    # If not enough in one stratum, fill from other
+    if len(selected) < 50:
+        remaining = [c for c in candidates if c not in selected]
+        remaining_sorted = sorted(remaining, key=lambda x: hashlib.sha256(str(x["item_id"]).encode()).hexdigest())  # noqa: E501
+        selected.extend(remaining_sorted[: 50 - len(selected)])
+    selected.sort(key=lambda x: str(x["item_id"]).encode())
+    return selected
 
 
 def validate_stage02_for_stage03(stage02_path: Path) -> None:
@@ -2508,10 +2726,27 @@ def _validate_generated_candidate(
 ) -> str | None:
     if not text or not text.strip():
         return "empty"
-    if language not in ("de", "en"):
+    if language not in ("de", "en", "fa"):
         return "invalid_language"
     if kind not in ("definition", "synonym", "translation"):
         return "invalid_kind"
+    if language == "fa":
+        # v2 bounds: 1-160 scalars, 1-24 tokens
+        stripped = text.strip()
+        if len(stripped) > MAX_FA_SCALARS:
+            return "too_long"
+        if len(stripped.split()) > MAX_FA_TOKENS:
+            return "too_many_tokens"
+        # Use dedicated FA v2 validation for script etc.
+        err = _validate_fa_v2_output(text, lemma_text)
+        if err is not None:
+            return err
+        # Also check duplicate/echo already done below, but need to handle
+        if existing_texts is not None and stripped in existing_texts:
+            return "duplicate"
+        if stripped.lower() == lemma_text.strip().lower():
+            return "echo_lemma"
+        return None
     if len(text.strip()) > STAGE04_MAX_TEXT_LENGTH:
         return "too_long"
     if existing_texts is not None and text.strip() in existing_texts:
@@ -2542,8 +2777,12 @@ def _checkpoint_identity(
     bulk_de_model: str,
     bulk_en_model: str,
     qa_model: str,
+    bulk_fa_model: str | None = None,
+    fa_input_version: str | None = None,
+    fa_bulk_version: str | None = None,
+    fa_response_version: str | None = None,
 ) -> dict[str, str]:
-    return {
+    base: dict[str, str] = {
         "format": STAGE04_CHECKPOINT_FORMAT,
         "queue_sha256": queue_sha256,
         "generation_marker": generation_marker,
@@ -2555,12 +2794,22 @@ def _checkpoint_identity(
         "qa_pipeline_version": STAGE04_QA_PIPELINE_VERSION,
         "response_schema_version": STAGE04_RESPONSE_SCHEMA_VERSION,
     }
+    if bulk_fa_model is not None:
+        base["bulk_fa_model"] = bulk_fa_model
+    if fa_input_version is not None:
+        base["fa_input_version"] = fa_input_version
+    if fa_bulk_version is not None:
+        base["fa_bulk_version"] = fa_bulk_version
+    if fa_response_version is not None:
+        base["fa_response_version"] = fa_response_version
+    return base
 
 def _empty_checkpoint() -> dict[str, object]:
     return {
         "format": STAGE04_CHECKPOINT_FORMAT,
         "identity": {},
         "bulk": {"completed": {}, "rejected": {}, "in_flight": []},
+        "bulk_fa": {"completed": {}, "rejected": {}, "in_flight": []},
         "qa": {"required": [], "completed": {}, "rejected": {}, "in_flight": []},
         "manifests": [],
     }
@@ -2572,6 +2821,7 @@ def _load_checkpoint(path: Path, expected_identity: dict[str, str]) -> dict[str,
             "format": STAGE04_CHECKPOINT_FORMAT,
             "identity": dict(expected_identity),
             "bulk": {"completed": {}, "rejected": {}, "in_flight": []},
+            "bulk_fa": {"completed": {}, "rejected": {}, "in_flight": []},
             "qa": {"required": [], "completed": {}, "rejected": {}, "in_flight": []},
             "manifests": [],
         }
@@ -2593,13 +2843,18 @@ def _load_checkpoint(path: Path, expected_identity: dict[str, str]) -> dict[str,
             raise BuildDictError("Stage 04 checkpoint is incompatible with this run")
     # Validate phase schemas
     bulk = data.get("bulk")
+    bulk_fa = data.get("bulk_fa")
     qa = data.get("qa")
     if not isinstance(bulk, dict) or not isinstance(qa, dict):
         raise BuildDictError("Stage 04 checkpoint has invalid phase state")
-    for phase_name, phase, required_keys in [
+    # bulk_fa is optional for backward compat, but if present validate it
+    phases: list[tuple[str, dict[str, object], set[str]]] = [
         ("bulk", bulk, {"completed", "rejected", "in_flight"}),
         ("qa", qa, {"required", "completed", "rejected", "in_flight"}),
-    ]:
+    ]
+    if isinstance(bulk_fa, dict):
+        phases.append(("bulk_fa", bulk_fa, {"completed", "rejected", "in_flight"}))
+    for phase_name, phase, required_keys in phases:
         if set(phase.keys()) != required_keys:
             raise BuildDictError("Stage 04 checkpoint has invalid phase schema")
         if not isinstance(phase["completed"], dict) or not isinstance(phase["rejected"], dict) or not isinstance(phase["in_flight"], list):  # noqa: E501
