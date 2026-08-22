@@ -2062,9 +2062,13 @@ GENERATED_MARKER_PATTERN: Final[re.Pattern[str]] = re.compile(r"^llm_generated_v
 STAGE03_QUEUE_FORMAT: Final[str] = "flashcard-stage03-queue-v2"
 STAGE04_CHECKPOINT_FORMAT: Final[str] = "flashcard-stage04-checkpoint-v3"
 STAGE04_MAX_TEXT_LENGTH: Final[int] = 280
-STAGE04_BULK_PIPELINE_VERSION: Final[str] = "stage04-bulk-v2"
-STAGE04_QA_PIPELINE_VERSION: Final[str] = "stage04-qa-v2"
+STAGE04_BULK_PIPELINE_VERSION: Final[str] = "stage04-bulk-v3"
+STAGE04_QA_PIPELINE_VERSION: Final[str] = "stage04-qa-v3"
 STAGE04_RESPONSE_SCHEMA_VERSION: Final[str] = "openai-responses-json-schema-v2"
+STAGE04_BULK_REASONING_EFFORT: Final[str] = "none"
+STAGE04_QA_REASONING_EFFORT: Final[str] = "low"
+STAGE04_MAX_OUTPUT_TOKENS: Final[int] = 512
+STAGE04_INPUT_TOKEN_SAFETY_MULTIPLIER: Final[float] = 2.0
 STAGE04_DEFAULT_BULK_DE_MODEL: Final[str] = "gpt-5.6-luna"
 STAGE04_DEFAULT_BULK_EN_MODEL: Final[str] = "gpt-5.6-luna"
 STAGE04_DEFAULT_QA_MODEL: Final[str] = "gpt-5.6-terra"
@@ -2225,10 +2229,12 @@ def _build_de_prompt_text(item: dict[str, object]) -> str:
 
 
 def de_learner_meaning_request_body(item: dict[str, object], model: str) -> dict[str, object]:
-    """Single-source logical request body for de_learner_meaning (stage04-bulk-v2).
+    """Single-source logical request body for de_learner_meaning (stage04-bulk-v3).
 
     The identical body is used for synchronous POST /v1/responses and for
-    Batch record body.
+    Batch record body. The body carries explicit deterministic reasoning
+    configuration and a provider-enforced output-token ceiling; the API
+    max_output_tokens bound covers visible output plus reasoning tokens.
     """
     if not model or not model.strip():
         raise BuildDictError("Model must be non-empty for DE request body")
@@ -2239,6 +2245,8 @@ def de_learner_meaning_request_body(item: dict[str, object], model: str) -> dict
     return {
         "model": model,
         "input": prompt,
+        "reasoning": {"effort": STAGE04_BULK_REASONING_EFFORT},
+        "max_output_tokens": STAGE04_MAX_OUTPUT_TOKENS,
         "text": {"format": dict(DE_LEARNER_SCHEMA)},
     }
 
@@ -2266,6 +2274,8 @@ def en_meaning_request_body(item: dict[str, object], model: str) -> dict[str, ob
     return {
         "model": model,
         "input": prompt,
+        "reasoning": {"effort": STAGE04_BULK_REASONING_EFFORT},
+        "max_output_tokens": STAGE04_MAX_OUTPUT_TOKENS,
         "text": {"format": dict(EN_MEANING_SCHEMA)},
     }
 
@@ -2311,8 +2321,56 @@ def de_learner_qa_request_body(item: dict[str, object], candidate_text: str, mod
     return {
         "model": model,
         "input": "\n".join(lines),
+        "reasoning": {"effort": STAGE04_QA_REASONING_EFFORT},
+        "max_output_tokens": STAGE04_MAX_OUTPUT_TOKENS,
         "text": {"format": dict(DE_LEARNER_SCHEMA)},
     }
+
+
+def stage04_worst_case_request_cost_usd(
+    input_token_estimate: int,
+    max_output_tokens: int,
+    input_price_per_mtok: float,
+    output_price_per_mtok: float,
+    input_safety_multiplier: float = STAGE04_INPUT_TOKEN_SAFETY_MULTIPLIER,
+) -> float:
+    """Deterministic pre-transmission worst-case cost of ONE paid request.
+
+    The API output-token ceiling covers visible output plus reasoning tokens,
+    so ALL ``max_output_tokens`` are charged at the authorized model output
+    rate, and the input estimate is inflated by the accepted safety multiplier.
+    Model prices are operational execution inputs supplied by the live
+    execution plan and must be reverified before live work; they are never
+    code constants here.
+    """
+    if input_token_estimate < 0 or max_output_tokens <= 0:
+        raise BuildDictError("Token estimates must be non-negative/max-positive")
+    if input_price_per_mtok < 0 or output_price_per_mtok < 0:
+        raise BuildDictError("Authorized prices must be non-negative")
+    if input_safety_multiplier < 1.0:
+        raise BuildDictError("Input safety multiplier must be >= 1.0")
+    worst_input_tokens = input_token_estimate * input_safety_multiplier
+    return (worst_input_tokens / 1_000_000.0) * input_price_per_mtok + (
+        max_output_tokens / 1_000_000.0
+    ) * output_price_per_mtok
+
+
+def stage04_pretransmission_guard_blocks(
+    recorded_spend_usd: float,
+    authorized_hard_cap_usd: float,
+    next_request_worst_case_usd: float,
+) -> bool:
+    """True => the next request MUST NOT be transmitted (fail closed).
+
+    The live synchronous canary worker refuses to transmit when recorded spend
+    plus the worst-case cost of the next request would exceed the authorized
+    hard cap; otherwise transmission is permitted.
+    """
+    if recorded_spend_usd < 0 or authorized_hard_cap_usd < 0:
+        raise BuildDictError("Spend figures must be non-negative")
+    if next_request_worst_case_usd < 0:
+        raise BuildDictError("Worst-case cost must be non-negative")
+    return recorded_spend_usd + next_request_worst_case_usd > authorized_hard_cap_usd
 
 
 def credential_format_ok(value: str) -> bool:
@@ -3050,6 +3108,42 @@ def _validate_generated_candidate(
     return None
 
 
+def _returned_response_rejection_code(cand: dict[str, object]) -> str | None:
+    """Fail-closed completion check for a complete returned provider response.
+
+    The live transport tags each returned item with the provider Response
+    envelope metadata: ``response_status`` and, when present,
+    ``incomplete_details``. A response whose status is not ``completed``, or
+    whose incomplete_details reports max_output_tokens exhaustion, is never a
+    valid generated candidate; its partial JSON must not be extracted. Returns
+    the deterministic rejection error code, or None when the response is
+    completed (envelope keys are then removed from the working candidate).
+    """
+    status = cand.get("response_status")
+    incomplete = cand.get("incomplete_details")
+    reason = ""
+    if isinstance(incomplete, dict):
+        reason = str(incomplete.get("reason", "") or "").strip()
+    elif incomplete is not None:
+        # Malformed details payload fails closed rather than being ignored.
+        return "invalid_response_envelope"
+    if reason:
+        return f"incomplete_{reason}"
+    if isinstance(status, str):
+        if status != "completed":
+            return f"provider_status_{status}"
+        return None
+    if "response_status" in cand or "incomplete_details" in cand:
+        # Malformed envelope metadata fails closed rather than being ignored.
+        return "invalid_response_envelope"
+    return None
+
+
+def _pop_response_envelope(cand: dict[str, object]) -> dict[str, object]:
+    """Return a copy of the candidate without provider envelope metadata."""
+    return {k: v for k, v in cand.items() if k not in ("response_status", "incomplete_details")}
+
+
 def _checkpoint_identity(
     queue_sha256: str,
     generation_marker: str,
@@ -3069,6 +3163,15 @@ def _checkpoint_identity(
         "bulk_pipeline_version": STAGE04_BULK_PIPELINE_VERSION,
         "qa_pipeline_version": STAGE04_QA_PIPELINE_VERSION,
         "response_schema_version": STAGE04_RESPONSE_SCHEMA_VERSION,
+        # Reasoning effort and the output-token ceiling materially affect model
+        # execution (the API max_output_tokens bound covers visible output plus
+        # reasoning tokens), so they participate in checkpoint compatibility.
+        "bulk_de_reasoning_effort": STAGE04_BULK_REASONING_EFFORT,
+        "bulk_de_max_output_tokens": str(STAGE04_MAX_OUTPUT_TOKENS),
+        "bulk_en_reasoning_effort": STAGE04_BULK_REASONING_EFFORT,
+        "bulk_en_max_output_tokens": str(STAGE04_MAX_OUTPUT_TOKENS),
+        "qa_reasoning_effort": STAGE04_QA_REASONING_EFFORT,
+        "qa_max_output_tokens": str(STAGE04_MAX_OUTPUT_TOKENS),
     }
     return base
 
@@ -3440,6 +3543,21 @@ def build_stage04(
                 cand = result.get(iid)
                 if not isinstance(cand, dict):
                     raise BuildDictError(f"Invalid candidate schema for {iid}")
+                # Completion safety: a returned response whose status is not
+                # completed (e.g. max_output_tokens exhaustion) is never a valid
+                # generated candidate; its partial output is not extracted.
+                envelope_code = _returned_response_rejection_code(cand)
+                if envelope_code is not None:
+                    rejected_to_record[iid] = {
+                        "phase": "bulk",
+                        "error_code": envelope_code,
+                        "attempt_count": int(bulk_rejected.get(iid, {}).get("attempt_count", 0)) + 1
+                        if isinstance(bulk_rejected.get(iid), dict)
+                        else 1,
+                        "evidence": {"candidate": {"response_status": str(cand.get("response_status", ""))[:50]}},  # noqa: E501
+                    }
+                    continue
+                cand = _pop_response_envelope(cand)
                 # Provider must NOT override language; reject if present
                 if "language" in cand:
                     err = "provider_language_override"
@@ -3686,6 +3804,16 @@ def build_stage04(
                 cand = result.get(iid)
                 if not isinstance(cand, dict):
                     raise BuildDictError(f"Invalid QA candidate schema for {iid}")
+                envelope_code = _returned_response_rejection_code(cand)
+                if envelope_code is not None:
+                    rejected_qa[iid] = {
+                        "phase": "qa",
+                        "error_code": envelope_code,
+                        "attempt_count": 1,
+                        "evidence": {"candidate": {"response_status": str(cand.get("response_status", ""))[:50]}},  # noqa: E501
+                    }
+                    continue
+                cand = _pop_response_envelope(cand)
                 if "language" in cand:
                     err = "provider_language_override"
                     rejected_qa[iid] = {

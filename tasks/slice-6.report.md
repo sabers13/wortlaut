@@ -747,3 +747,145 @@ Exact Attempt-2 changed paths: `tests/test_build_dict_stage03.py, tests/test_bui
 **Disposition:** `POST_CEILING_SEMANTIC_REPAIR_COMPLETE` — implementation repair verified and pushed; awaiting Slice-6 orchestrator acceptance of the post-ceiling semantic repair, followed by a new zero-spend German canary preparation against `queue:v2`.
 
 *No private absolute paths, no API keys, no credentials recorded. Old queue:v1 SHA `e542f2f96b3966690fe2fcebb145440deba7a8ec9aa7dd2d0c93ba3540ef7aa1` is pre-repair and invalid for live generation. New queue:v2 SHA `114dd20f1e071708ca43ff433284ce1be0e9662763db5a589930a8f5a045cf2a` (334605426 bytes) carries 577141 EN derivation inputs.*
+
+---
+
+## ADR-0007 Canary paid-request boundedness repair — Attempt 1
+
+**Status:** Narrow zero-spend logical-request-contract repair complete. No provider
+credential read, no network call, no live provider request of any kind. Stopped
+before the paid boundary. The already-frozen canary-v2 selection was NOT reselected.
+
+**Defect recorded:** Zero-spend German canary-v2 preparation produced request and
+Batch artifacts whose bodies carried no `max_output_tokens` and no explicit
+`reasoning.effort`. Under the current OpenAI Responses API, `max_output_tokens`
+bounds VISIBLE OUTPUT + REASONING TOKENS together; absent bounds leave model
+execution non-deterministic and unbudgeted.
+
+### Frozen / unchanged inputs
+
+- Canary-v2 selection remains ACCEPTED/FROZEN — `CANARY_SELECTION_SHA256`
+  `1ffa5e76c7315467a39a5b7b953e07fba924b37dbc77512130e720adb3ab7475`, 40385 bytes,
+  50 items. Not reselected; no selection identity input changed.
+- Queue remains `flashcard-stage03-queue-v2`,
+  SHA `114dd20f1e071708ca43ff433284ce1be0e9662763db5a589930a8f5a045cf2a`, 480221 items.
+- Generation marker remains `llm_generated_v1`.
+- Checkpoint file format remains `flashcard-stage04-checkpoint-v3` (not bumped
+  cosmetically; the new strict identity components alone invalidate old state).
+- Response schema version remains `openai-responses-json-schema-v2`.
+
+### Invalidated prepared artifacts
+
+- Old canary requests (`0035db54b824d3fcf0886a13120d049c0b08e9affe0526615fdb4d1880d10a1f`)
+  and old Batch manifest (`220f9ef45a697edebff512ac79b8365b71b3b5d3b443796ef16bf3f4bdd4ff19`)
+  are INVALIDATED FOR LIVE TRANSMISSION. Neither was ever transmitted. They lack the
+  repaired body fields and cannot be regenerated under the new pipeline identity.
+  Regeneration against the frozen selection requires a fresh zero-spend preparation run.
+
+### Repair shipped
+
+- Single-source logical body builders remain authoritative; no transport-only
+  alternative body exists:
+  - every Luna bulk DE/EN logical body now contains exactly
+    `"reasoning": {"effort": "none"}` and `"max_output_tokens": 512`;
+  - every Terra QA logical body now contains exactly
+    `"reasoning": {"effort": "low"}` and `"max_output_tokens": 512`;
+  - all pre-existing fields unchanged: model, exact semantic input, strict
+    `text.format` json_schema (`strict=true`, `additionalProperties=false`),
+    exact same-sense EN meaning context, opaque identity refs, German learner
+    instructions.
+- Sync/Batch equivalence preserved: the exact same body object is embedded in
+  Batch records (`custom_id`/`method=POST`/`url=/v1/responses`/`body`); bytewise
+  canonical equality of sync vs embedded body is proven by test, including through
+  the manifest payload serialization path.
+- Pipeline identities bumped: `stage04-bulk-v2` → `stage04-bulk-v3`,
+  `stage04-qa-v2` → `stage04-qa-v3`.
+
+### Checkpoint compatibility additions
+
+Identity now additionally carries six explicit components (values):
+`bulk_de_reasoning_effort=none`, `bulk_de_max_output_tokens=512`,
+`bulk_en_reasoning_effort=none`, `bulk_en_max_output_tokens=512`,
+`qa_reasoning_effort=low`, `qa_max_output_tokens=512`. Changing any reasoning-effort
+or max-output-token component invalidates checkpoint reuse (tested). Any
+pre-repair DE checkpoint (v2 pipelines, missing the six components) fails closed
+as incompatible (tested). Historical Persian checkpoint remains untouched:
+not cleared, not migrated, not resubmitted.
+
+### Incomplete-response handling
+
+Returned provider responses are completion-checked before candidate extraction:
+`response_status != "completed"` → durable rejection `provider_status_<status>`;
+`incomplete_details.reason = "max_output_tokens"` → durable rejection
+`incomplete_max_output_tokens`; malformed envelope metadata fails closed
+(`invalid_response_envelope`). Partial JSON is never silently extracted or
+persisted; the existing deterministic returned-response rejected handling applies
+(durable rejected state with attempt count, `in_flight` cleared) and execution
+STOPs before any further paid bounded unit (A6). Proven for bulk and QA phases.
+
+### Pre-transmission spend guard (synthetic-price tests only)
+
+Deterministic pure functions, prices supplied as operational execution input
+(never code constants; must be reverified before live work):
+
+- `stage04_worst_case_request_cost_usd(input_token_estimate, max_output_tokens,
+  input_price_per_mtok, output_price_per_mtok, input_safety_multiplier=2.0)` —
+  all output tokens (visible + reasoning) charged at the output rate against the
+  request's own `max_output_tokens` ceiling; input estimate inflated by the
+  accepted safety multiplier; negative/degenerate inputs fail closed.
+- `stage04_pretransmission_guard_blocks(recorded_spend_usd, authorized_hard_cap_usd,
+  next_request_worst_case_usd)` — True ⇒ the live synchronous worker MUST NOT
+  transmit (`recorded_spend + worst_case_next > authorized_hard_cap`);
+  boundary arithmetic tested (exactly-at-cap permitted, beyond-cap blocked).
+
+### Hard-cap acceptance arithmetic (evidence only; zero-spend readiness rerun remains authoritative)
+
+At verified rates Luna $0.20/$1.20 per MTok, Terra $2.00/$12.00 per MTok, and
+`max_output_tokens=512` on every request, with conservative inputs (measured v3
+canary body maximum ≈344 input tokens; QA assumed ≤600 raw; committed ×2 safety
+multiplier): worst case per Luna request $0.0001376 in + $0.0006144 out =
+$0.000752; per Terra request $0.0024 in + $0.006144 out = $0.008544. Canary of
+50 Luna + up to 50 Terra QA: 50×$0.000752 + 50×$0.008544 = **$0.4648 ≤ USD 0.50**
+with margin. All output/reasoning tokens are charged at ceiling on every request.
+
+### Executable evidence
+
+- New Stage-04 repair tests (13): DE reasoning none/max 512; EN reasoning none/max
+  512; QA reasoning low/max 512; sync≡Batch bytewise canonical equivalence incl.
+  bounds; strict schema + exact semantic context unchanged with bounds present;
+  reasoning-effort change invalidates checkpoint; max-token change invalidates
+  checkpoint; pre-repair checkpoint fails closed; incomplete max_output_tokens
+  response never persisted + STOP before further paid unit; non-completed status
+  fails closed; incomplete QA response never persisted; spend guard blocks
+  over-cap; spend guard permits within-cap (+ fail-closed argument checks).
+- Targeted: `pytest -q tests/test_build_dict_stage04.py` — **43 passed**
+  (30 prior + 13 new); `pytest -q tests/test_build_dict_stage03.py` — **16 passed**
+  (unchanged; prompt-context regression green).
+- Full gate: `make gate` — Ruff PASS, mypy --strict PASS (18 source files),
+  pytest **286 passed**, check_agents R1/R3/R7 PASS — PASS (single final run).
+- `git diff --check`: PASS.
+- Allowlist: PASS — only `tools/build_dict.py`, `tests/test_build_dict_stage04.py`,
+  `tasks/slice-6.report.md`.
+- No network: all coverage uses fake/local deterministic transports; new code paths
+  perform no I/O. No credential read: no credential path touched by implementation
+  or tests.
+
+**Changed paths:** `tools/build_dict.py`, `tests/test_build_dict_stage04.py`,
+`tasks/slice-6.report.md`
+
+**Branch/push:** Base `slice/6` before repair:
+`44dbfdb0dfd0449eab88c0fe53431da73a14aec7`; base `main`
+`2f2486a5021465842ada8e5cc3d43e9a030e6955` unchanged. Final HEAD recorded in the
+return receipt after push.
+
+**Provider calls:** `0`. **Paid spend:** `USD 0`.
+
+**Work left undone / Next authority:** Slice-6 orchestrator acceptance of this
+repair, then zero-spend regeneration of request/Batch artifacts for the frozen
+50-item selection under `stage04-bulk-v3`/`stage04-qa-v3` identities, then owner
+paid authorization with a fresh readiness/cost rerun. The invalidated request and
+Batch hashes above must never be transmitted.
+
+**Disposition:** `CANARY_PAID_REQUEST_BOUNDS_REPAIR_COMPLETE`
+
+*No private absolute paths, no API keys, no credentials recorded.*

@@ -1,5 +1,5 @@
 """Fake/local DE/EN Stage 04 safety tests — v2 repair."""
-# mypy: disable-error-code="attr-defined,unused-ignore,operator,index,type-var,arg-type"
+# mypy: disable-error-code="attr-defined,unused-ignore,operator,index,type-var,arg-type,override"
 
 import hashlib
 import json
@@ -12,6 +12,9 @@ from tests.test_build_dict_stage03 import make_stage02, make_stage02_with_en_cou
 from tools.build_dict import (
     STAGE01_SCHEMA_SQL,
     STAGE02_EXAMPLE_SCHEMA_SQL,
+    STAGE04_BULK_REASONING_EFFORT,
+    STAGE04_MAX_OUTPUT_TOKENS,
+    STAGE04_QA_REASONING_EFFORT,
     BuildDictError,
     _checkpoint_identity,
     _deterministic_audit_sample,
@@ -25,6 +28,8 @@ from tools.build_dict import (
     de_learner_qa_request_body,
     en_meaning_request_body,
     retry_rejected,
+    stage04_pretransmission_guard_blocks,
+    stage04_worst_case_request_cost_usd,
 )
 from tools.resolver_hash import get_resolver_hash
 
@@ -189,7 +194,8 @@ def test_fake_bulk_qa_persists_generated_rows_and_derivations(tmp_path: Path) ->
     assert manifest["custom_ids"] == [f"batch:{item_id}" for item_id in manifest["item_ids"]]
     # Verify response schema version is v2
     assert state["identity"]["response_schema_version"] == "openai-responses-json-schema-v2"
-    assert state["identity"]["bulk_pipeline_version"] == "stage04-bulk-v2"
+    assert state["identity"]["bulk_pipeline_version"] == "stage04-bulk-v3"
+    assert state["identity"]["qa_pipeline_version"] == "stage04-qa-v3"
 
 
 def test_complete_invalid_result_is_rejected_and_not_resubmitted(tmp_path: Path) -> None:
@@ -464,15 +470,21 @@ def test_checkpoint_compatibility_components_and_fail_closed(tmp_path: Path) -> 
     build_stage04(queue, stage02, tmp_path / "out.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=fake, batch_size=2)
     state = json.loads(checkpoint.read_text(encoding="utf-8"))
     identity = state["identity"]
-    for key in ["queue_sha256", "generation_marker", "generated_license", "bulk_de_model", "bulk_en_model", "qa_model", "bulk_pipeline_version", "qa_pipeline_version", "response_schema_version"]:
+    for key in ["queue_sha256", "generation_marker", "generated_license", "bulk_de_model", "bulk_en_model", "qa_model", "bulk_pipeline_version", "qa_pipeline_version", "response_schema_version", "bulk_de_reasoning_effort", "bulk_de_max_output_tokens", "bulk_en_reasoning_effort", "bulk_en_max_output_tokens", "qa_reasoning_effort", "qa_max_output_tokens"]:
         assert key in identity, f"missing {key}"
     assert identity["generation_marker"] == "llm_generated_v1"
     assert identity["bulk_de_model"] == "gpt-5.6-luna"
     assert identity["bulk_en_model"] == "gpt-5.6-luna"
     assert identity["qa_model"] == "gpt-5.6-terra"
-    assert identity["bulk_pipeline_version"] == "stage04-bulk-v2"
-    assert identity["qa_pipeline_version"] == "stage04-qa-v2"
+    assert identity["bulk_pipeline_version"] == "stage04-bulk-v3"
+    assert identity["qa_pipeline_version"] == "stage04-qa-v3"
     assert identity["response_schema_version"] == "openai-responses-json-schema-v2"
+    assert identity["bulk_de_reasoning_effort"] == "none"
+    assert identity["bulk_de_max_output_tokens"] == "512"
+    assert identity["bulk_en_reasoning_effort"] == "none"
+    assert identity["bulk_en_max_output_tokens"] == "512"
+    assert identity["qa_reasoning_effort"] == "low"
+    assert identity["qa_max_output_tokens"] == "512"
     assert identity["format"] == "flashcard-stage04-checkpoint-v3"
     with pytest.raises(BuildDictError, match="incompatible"):
         build_stage04(queue, stage02, tmp_path / "out2.sqlite", checkpoint, "OTHER_LICENSE", transport=fake)
@@ -482,6 +494,22 @@ def test_checkpoint_compatibility_components_and_fail_closed(tmp_path: Path) -> 
         build_stage04(queue, stage02, tmp_path / "out4.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=fake, qa_pipeline_version="stage04-qa-v1")
     with pytest.raises(BuildDictError, match="incompatible"):
         build_stage04(queue, stage02, tmp_path / "out5.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=fake, bulk_de_model="other-model")
+    # Reasoning effort participates in checkpoint compatibility
+    state_mutated = dict(state)
+    mutated_identity = dict(identity)
+    mutated_identity["qa_reasoning_effort"] = "high"
+    state_mutated["identity"] = mutated_identity
+    checkpoint.write_text(json.dumps(state_mutated, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    with pytest.raises(BuildDictError, match="incompatible"):
+        build_stage04(queue, stage02, tmp_path / "out6.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=fake)
+    # max_output_tokens participates in checkpoint compatibility
+    state_mutated2 = dict(state)
+    mutated_identity2 = dict(identity)
+    mutated_identity2["bulk_de_max_output_tokens"] = "1024"
+    state_mutated2["identity"] = mutated_identity2
+    checkpoint.write_text(json.dumps(state_mutated2, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    with pytest.raises(BuildDictError, match="incompatible"):
+        build_stage04(queue, stage02, tmp_path / "out7.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=fake)
 
 
 def test_batch_manifest_partitioning_and_custom_id_join(tmp_path: Path) -> None:
@@ -964,3 +992,302 @@ def test_canary_artifact_single_source(tmp_path: Path) -> None:
     # SHA mismatch fails
     with pytest.raises(BuildDictError):
         _render_canary_receipt(sel_path, "0"*64)
+
+
+# ---- Canary paid-request boundedness repair tests (bulk/QA v3) ----
+
+
+def _canonical_bytes(v: object) -> bytes:
+    return json.dumps(v, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def test_de_bulk_body_reasoning_none_and_max_512(tmp_path: Path) -> None:
+    stage02, queue, items = queue_fixture(tmp_path)
+    de_item = next(v for v in items.values() if v["language"] == "de")
+    body = de_learner_meaning_request_body(de_item, "gpt-5.6-luna")
+    assert body["reasoning"] == {"effort": "none"}
+    assert body["reasoning"]["effort"] == STAGE04_BULK_REASONING_EFFORT
+    assert body["max_output_tokens"] == 512
+    assert body["max_output_tokens"] == STAGE04_MAX_OUTPUT_TOKENS
+
+
+def test_en_bulk_body_reasoning_none_and_max_512(tmp_path: Path) -> None:
+    conn = sqlite3.connect(tmp_path / "db.sqlite")
+    conn.executescript(STAGE01_SCHEMA_SQL + STAGE02_EXAMPLE_SCHEMA_SQL)
+    conn.execute("INSERT INTO lemma (id, semantic_ref, lemma, pos, gender, source, license) VALUES (1, 'lemma:v1:e', 'E', 'NOUN', NULL, 'wiktionary', 'CC BY-SA')")
+    conn.execute("INSERT INTO sense VALUES (1, 1, 'sense:v1:e:1', 'enwiktionary', 'E-1', 0, NULL, 'wiktionary', 'CC BY-SA')")
+    conn.execute("INSERT INTO sense_meaning VALUES (1, 1, 'de', 'definition', 0, 'siehe E', 'wiktionary', 'CC BY-SA')")
+    conn.commit()
+    conn.close()
+    q = tmp_path / "q.json"
+    build_stage03(tmp_path / "db.sqlite", q)
+    en_items = [x for x in json.loads(q.read_text(encoding="utf-8"))["items"] if x["language"] == "en"]
+    if not en_items:
+        pytest.skip("no EN job in fixture")
+    body = en_meaning_request_body(en_items[0], "gpt-5.6-luna")
+    assert body["reasoning"] == {"effort": "none"}
+    assert body["reasoning"]["effort"] == STAGE04_BULK_REASONING_EFFORT
+    assert body["max_output_tokens"] == 512
+    assert body["max_output_tokens"] == STAGE04_MAX_OUTPUT_TOKENS
+
+
+def test_qa_body_reasoning_low_and_max_512(tmp_path: Path) -> None:
+    stage02, queue, items = queue_fixture(tmp_path)
+    de_item = next(v for v in items.values() if v["language"] == "de")
+    body = de_learner_qa_request_body(de_item, "ein Testkandidat", "gpt-5.6-terra")
+    assert body["reasoning"] == {"effort": "low"}
+    assert body["reasoning"]["effort"] == STAGE04_QA_REASONING_EFFORT
+    assert body["max_output_tokens"] == 512
+    assert body["max_output_tokens"] == STAGE04_MAX_OUTPUT_TOKENS
+
+
+def test_sync_batch_body_bytewise_identical_with_bounds(tmp_path: Path) -> None:
+    stage02, queue, items = queue_fixture(tmp_path)
+    de_item = next(v for v in items.values() if v["language"] == "de")
+    sync_body = de_learner_meaning_request_body(de_item, "gpt-5.6-luna")
+    from tools.build_dict import _request_body_for_item
+
+    # The Batch record embeds the exact same logical body object
+    batch_record = {
+        "custom_id": f"batch:{de_item['item_id']}",
+        "method": "POST",
+        "url": "/v1/responses",
+        "body": sync_body,
+    }
+    record_bytes = json.dumps(batch_record, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    embedded_body = json.loads(record_bytes.decode("utf-8"))["body"]
+    # Bytewise canonical equality of the logical body (sync vs Batch envelope)
+    assert _canonical_bytes(embedded_body) == _canonical_bytes(sync_body)
+    # The manifest payload path uses the identical single-source builder
+    body2 = _request_body_for_item(de_item, "gpt-5.6-luna", "gpt-5.6-luna")
+    assert _canonical_bytes(body2) == _canonical_bytes(sync_body)
+    qa_sync = de_learner_qa_request_body(de_item, "Kandidat", "gpt-5.6-terra")
+    qa_batch = {"custom_id": f"batch:{de_item['item_id']}", "method": "POST", "url": "/v1/responses", "body": qa_sync}
+    assert _canonical_bytes(json.loads(_canonical_bytes(qa_batch))["body"]) == _canonical_bytes(qa_sync)
+
+
+def test_strict_schema_and_semantic_context_unchanged_with_bounds(tmp_path: Path) -> None:
+    stage02, queue, items = queue_fixture(tmp_path)
+    de_item = next(v for v in items.values() if v["language"] == "de")
+    body = de_learner_meaning_request_body(de_item, "gpt-5.6-luna")
+    fmt = body["text"]["format"]
+    # Strict schema remains unchanged
+    assert fmt["type"] == "json_schema"
+    assert fmt["strict"] is True
+    assert fmt["name"] == "de_learner_meaning"
+    assert fmt["schema"]["additionalProperties"] is False
+    assert set(fmt["schema"]["required"]) == {"meaning", "kind"}
+    assert fmt["schema"]["properties"]["kind"]["enum"] == ["synonym", "definition"]
+    # Exact source semantic context remains unchanged
+    assert "Work only on the supplied single semantic sense" in body["input"]
+    for en in de_item["derivation_inputs"]:
+        assert str(en["text"]) in body["input"]
+    assert "lemma_semantic_ref" in body["input"]
+    assert "sense_semantic_ref" in body["input"]
+    qa_body = de_learner_qa_request_body(de_item, "Kandidat", "gpt-5.6-terra")
+    assert qa_body["text"]["format"]["name"] == "de_learner_meaning"
+    assert qa_body["text"]["format"]["strict"] is True
+
+
+def test_reasoning_effort_change_invalidates_checkpoint_compatibility(tmp_path: Path) -> None:
+    stage02, queue, items = queue_fixture(tmp_path)
+    checkpoint = tmp_path / "ckpt.json"
+    fake = FakeTransport()
+    fake.items = items
+    build_stage04(queue, stage02, tmp_path / "out.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=fake)
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    for key, value in [
+        ("bulk_de_reasoning_effort", "low"),
+        ("bulk_en_reasoning_effort", "medium"),
+        ("qa_reasoning_effort", "none"),
+    ]:
+        mutated = dict(state)
+        mutated["identity"] = dict(state["identity"])
+        mutated["identity"][key] = value
+        checkpoint.write_text(json.dumps(mutated, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        with pytest.raises(BuildDictError, match="incompatible"):
+            build_stage04(queue, stage02, tmp_path / f"out-{key}.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=fake)
+
+
+def test_max_output_tokens_change_invalidates_checkpoint_compatibility(tmp_path: Path) -> None:
+    stage02, queue, items = queue_fixture(tmp_path)
+    checkpoint = tmp_path / "ckpt.json"
+    fake = FakeTransport()
+    fake.items = items
+    build_stage04(queue, stage02, tmp_path / "out.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=fake)
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    for key in ["bulk_de_max_output_tokens", "bulk_en_max_output_tokens", "qa_max_output_tokens"]:
+        mutated = dict(state)
+        mutated["identity"] = dict(state["identity"])
+        mutated["identity"][key] = "256"
+        checkpoint.write_text(json.dumps(mutated, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        with pytest.raises(BuildDictError, match="incompatible"):
+            build_stage04(queue, stage02, tmp_path / f"out-{key}.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=fake)
+
+
+def test_pre_repair_checkpoint_fails_closed(tmp_path: Path) -> None:
+    """A checkpoint written before the boundedness repair must fail closed."""
+    stage02, queue, items = queue_fixture(tmp_path)
+    pre_repair_identity = {
+        "format": "flashcard-stage04-checkpoint-v3",
+        "queue_sha256": hashlib.sha256(Path(queue).read_bytes()).hexdigest(),
+        "generation_marker": "llm_generated_v1",
+        "generated_license": "TEST_SYNTHETIC_LICENSE_v1",
+        "bulk_de_model": "gpt-5.6-luna",
+        "bulk_en_model": "gpt-5.6-luna",
+        "qa_model": "gpt-5.6-terra",
+        "bulk_pipeline_version": "stage04-bulk-v2",
+        "qa_pipeline_version": "stage04-qa-v2",
+        "response_schema_version": "openai-responses-json-schema-v2",
+    }
+    pre_repair_state = {
+        "format": "flashcard-stage04-checkpoint-v3",
+        "identity": pre_repair_identity,
+        "bulk": {"completed": {}, "rejected": {}, "in_flight": []},
+        "qa": {"required": [], "completed": {}, "rejected": {}, "in_flight": []},
+        "manifests": [],
+    }
+    ckpt = tmp_path / "pre-repair.json"
+    ckpt.write_text(json.dumps(pre_repair_state, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    fake = FakeTransport()
+    fake.items = items
+    with pytest.raises(BuildDictError, match="incompatible"):
+        build_stage04(queue, stage02, tmp_path / "out.sqlite", ckpt, "TEST_SYNTHETIC_LICENSE_v1", transport=fake)
+
+
+def test_incomplete_max_output_tokens_response_is_never_persisted(tmp_path: Path) -> None:
+    stage02, queue, items = make_stage02_with_n(tmp_path, 3, prefix="incomplete")
+    sorted_ids = sorted(items.keys())
+
+    class IncompleteSecondTransport(FakeTransport):
+        def send_bulk(self, item_ids: list[str]) -> dict[str, dict[str, object]]:
+            self.bulk_submitted.extend(item_ids)
+            if self._bulk_call_count >= 1:
+                iid = item_ids[0]
+                return {
+                    iid: {
+                        "meaning": "teilweise",
+                        "kind": "definition",
+                        "response_status": "incomplete",
+                        "incomplete_details": {"reason": "max_output_tokens"},
+                    }
+                }
+            self._bulk_call_count += 1
+            return {iid: {"meaning": f"ein Gebäude {iid[-6:]}", "kind": "definition"} for iid in item_ids}
+
+    fake = IncompleteSecondTransport()
+    fake.items = items
+    checkpoint = tmp_path / "ckpt.json"
+    out = tmp_path / "out.sqlite"
+    with pytest.raises(BuildDictError, match="rejected"):
+        build_stage04(queue, stage02, out, checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=fake, batch_size=1)
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    bad_id = sorted_ids[1]
+    assert bad_id in state["bulk"]["rejected"]
+    assert state["bulk"]["rejected"][bad_id]["error_code"] == "incomplete_max_output_tokens"
+    assert bad_id not in state["bulk"]["completed"]
+    assert not state["bulk"]["completed"].get(bad_id)
+    # STOP before further paid work: the third request was never transmitted
+    assert len(fake.bulk_submitted) == 2
+    assert sorted_ids[2] not in fake.bulk_submitted
+    # Partial JSON was never persisted as a valid generated row
+    assert not out.exists() or sqlite3.connect(out).execute(
+        "SELECT count(*) FROM sense_meaning WHERE source='llm_generated_v1'"
+    ).fetchone()[0] == 0
+
+
+def test_noncompleted_status_without_details_fails_closed(tmp_path: Path) -> None:
+    stage02, queue, items = make_stage02_with_n(tmp_path, 1, prefix="status-fail")
+
+    class FailedStatusTransport(FakeTransport):
+        def send_bulk(self, item_ids: list[str]) -> dict[str, dict[str, object]]:
+            self.bulk_submitted.extend(item_ids)
+            return {
+                iid: {
+                    "meaning": f"ein Gebäude {iid[-6:]}",
+                    "kind": "definition",
+                    "response_status": "failed",
+                }
+                for iid in item_ids
+            }
+
+    fake = FailedStatusTransport()
+    fake.items = items
+    checkpoint = tmp_path / "ckpt.json"
+    with pytest.raises(BuildDictError, match="rejected"):
+        build_stage04(queue, stage02, tmp_path / "out.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=fake, batch_size=1)
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    bad_id = sorted(items.keys())[0]
+    assert state["bulk"]["rejected"][bad_id]["error_code"] == "provider_status_failed"
+    assert not state["bulk"]["completed"]
+    assert not state["qa"]["completed"]
+
+
+def test_incomplete_qa_response_is_never_persisted(tmp_path: Path) -> None:
+    stage02, queue, items = make_stage02_with_n(tmp_path, 4, prefix="qa-incomplete")
+    checkpoint = tmp_path / "ckpt.json"
+
+    class QAIncompleteTransport(FakeTransport):
+        def send_qa(self, item_ids: list[str]) -> dict[str, dict[str, object]]:
+            self.qa_submitted.extend(item_ids)
+            return {
+                iid: {
+                    "meaning": f"qa-valid-{iid[-6:]}",
+                    "kind": "definition",
+                    "response_status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                }
+                for iid in item_ids
+            }
+
+    fake = QAIncompleteTransport()
+    fake.items = items
+    with pytest.raises(BuildDictError, match="rejected"):
+        build_stage04(queue, stage02, tmp_path / "out.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=fake, batch_size=4)
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    required = state["qa"]["required"]
+    for rid in required:
+        assert rid not in state["qa"]["completed"]
+        assert state["qa"]["rejected"][rid]["error_code"] == "incomplete_max_output_tokens"
+
+
+def test_pretransmission_spend_guard_blocks_over_cap() -> None:
+    # Synthetic prices only — never real public pricing constants.
+    worst = stage04_worst_case_request_cost_usd(
+        input_token_estimate=400,
+        max_output_tokens=512,
+        input_price_per_mtok=2.00,
+        output_price_per_mtok=12.00,
+    )
+    # 400*2 input tokens at $2/M + all 512 output tokens at $12/M
+    assert abs(worst - ((800 / 1e6) * 2.00 + (512 / 1e6) * 12.00)) < 1e-12
+    assert stage04_pretransmission_guard_blocks(
+        recorded_spend_usd=0.50 - worst * 0.5,
+        authorized_hard_cap_usd=0.50,
+        next_request_worst_case_usd=worst,
+    )
+    with pytest.raises(BuildDictError):
+        stage04_worst_case_request_cost_usd(100, 512, -1.0, 12.00)
+    with pytest.raises(BuildDictError):
+        stage04_pretransmission_guard_blocks(-1.0, 0.50, worst)
+
+
+def test_pretransmission_spend_guard_permits_within_cap() -> None:
+    worst_luna = stage04_worst_case_request_cost_usd(
+        input_token_estimate=344,
+        max_output_tokens=512,
+        input_price_per_mtok=0.20,
+        output_price_per_mtok=1.20,
+    )
+    assert not stage04_pretransmission_guard_blocks(
+        recorded_spend_usd=0.10,
+        authorized_hard_cap_usd=0.50,
+        next_request_worst_case_usd=worst_luna,
+    )
+    # Boundary: exactly reaching the cap is still permitted; anything beyond blocks.
+    assert not stage04_pretransmission_guard_blocks(0.50 - worst_luna, 0.50, worst_luna)
+    assert stage04_pretransmission_guard_blocks(0.50 - worst_luna + 1e-9, 0.50, worst_luna)
+    with pytest.raises(BuildDictError):
+        stage04_worst_case_request_cost_usd(100, 0, 0.20, 1.20)
+    with pytest.raises(BuildDictError):
+        stage04_worst_case_request_cost_usd(100, 512, 0.20, 1.20, input_safety_multiplier=0.5)
