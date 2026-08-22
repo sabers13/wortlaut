@@ -18,8 +18,8 @@ and `tasks/<NEXT>.md` naming key on the slice ID, never the order number.
 | slice-3 | 4 | — | Stage 01 output carries the schema/attribution contract Gate 2 consumes, including the accepted ADR-0004 PART-A alignment. Order 4 closes normally after its required migration-risk full-diff review passes, then Gate 2 may begin. |
 | slice-4 | 5 | — | §6 order 5's thresholds govern verbatim. A design gate, not a §5 retry ladder: `<85%` returns to governance. |
 | slice-5 | 6 | — | Stage 02 imports `app/resolve.py`; cache keys include its SHA-256 (AGENTS R2/R3). |
-| slice-6 | 7 | — | **ADR-0006 is `ACCEPTED / FROZEN`; its §10 supersession record is active.** ADR-0004 remains frozen and binding except where §10 explicitly supersedes it. Stages 03–05 use direct exact Persian evidence on the persisted English-edition canonical source sense, optional German-Wiktionary fallback only through an exact bridge, source acceptance/coverage STOP, conservative DE source eligibility with generation on uncertainty, and bounded correlated Batch manifests. The Piper image-build prerequisite remains separately scoped; no paid production run proceeds until all ADR gates are met. |
-| slice-7 | 8 | — | ADR-0003 review/mastery semantics and AGENTS R12/R13 land before browser integration; render/API supports note's selected DE/EN/FA meaning set, Persian RTL, tri-state noun plural on back (ADR-0004 §10), PART-B durable bindings, D47 atomic dictionary activation/relink, and stale-picker HTTP 409 before UI/browser completion; owns runtime pronunciation feature (note-local custom record/upload persistence, stable pronunciation identity, human-media policy and exact-id discovery, precedence, human/Piper cache, crash-safe replacement and API/render integration). |
+| slice-6 | 7 | — | **ADR-0007 is `NEEDS COLD REVIEW` (owner decision removes Persian from v1 scope).** Stages 03–05 perform deterministic DE/EN offline enrichment (missing English meanings, source-first German learner meanings with D65 positive eligibility, validation, selective QA, and bounded correlated Batch manifests) and final packaging, plus the Piper image-build prerequisite. Persian source cascade, bridging, and canary gates are removed from forward scope. No paid production run proceeds until all ADR gates are met. |
+| slice-7 | 8 | — | ADR-0003 review/mastery semantics and AGENTS R12/R13 land before browser integration; render/API supports note's selected DE/EN meaning set, tri-state noun plural on back (ADR-0004 §10), PART-B durable bindings, D47 atomic dictionary activation/relink, and stale-picker HTTP 409 before UI/browser completion (Persian RTL removed by ADR-0007); owns runtime pronunciation feature (note-local custom record/upload persistence, stable pronunciation identity, human-media policy and exact-id discovery, precedence, human/Piper cache, crash-safe replacement and API/render integration). |
 | slice-8 | 9 | — | `reference/smoke_test.py` path defect repaired; assertions match ADR-0002 §4/§5, ADR-0003 §5, and ADR-0004 D47 replacement/stale-picker scenarios; owns end-to-end pronunciation smoke (override/revert, browser-local unsaved preview, unsafe media, identity/replacement cases, human-cache integrity corruption, offline/remote failure and Piper fallback). |
 | slice-9 | 10 | Lecture app Phase 4 decomposition complete | Read-only, out-of-ladder donor inspection (WORKFLOW §12 / AGENTS G6) writes `tasks/adr-0002-donor-notes.md` first; any contradiction returns to governance. Compose work starts only if donor evidence agrees and the host blocker is gone. |
 
@@ -77,22 +77,21 @@ one blocking condition and three scope notes; the sequence is unchanged.
 - **slice-5 is unchanged**: build stage 02 / Tatoeba index, importing
   `app/resolve.py` and keying its cache on the resolver SHA-256 (AGENTS R2/R3).
 - **slice-6 / order 7:** This ADR-0004 amendment originally left Stages 03–05
-  multilingual enrichment unchanged. Accepted ADR-0006 now supersedes ADR-0004
-  only as listed in ADR-0006 §10. The first Docker/runtime foundation additionally
-  installs and verifies the pinned Piper engine plus selected German voice/model
-  at image-build time and records their separate distribution classifications/required
-  notices. This is prerequisite only: no pronunciation API/cache/custom
-  media/human discovery/UI and no bulk audio generation/database. The
-  mid-September 2026 API-credit constraint on stage 04 is unchanged.
+  multilingual enrichment unchanged. Accepted ADR-0006 and pending ADR-0007 supersede
+  ADR-0004 as listed in their supersession records. Stages 03–05 perform maintainer-operated
+  offline enrichment for German and English only (DE learner meanings and missing EN meanings),
+  validation, selective QA, Batch packaging, and the Piper image-build prerequisite.
+  Persian source cascade, bridging, and canary gates are removed from forward scope.
+  The mid-September 2026 API-credit constraint on stage 04 is unchanged.
 - **slice-7 / order 8 (runtime app work):** In addition to the existing
   ADR-0003/ADR-0004 runtime work (PART-B durable dictionary bindings, active
-  dictionary version+SHA metadata, `note_meaning_lang`, `note_user_meaning`,
+  dictionary version+SHA metadata, `note_meaning_lang`, `note_user_meaning` for DE/EN,
   supersession of scalar `note.gloss_user`, D43/D46 read/render behaviour,
-  user-meaning precedence, Persian RTL, tri-state noun plural rendering, the
+  user-meaning precedence, tri-state noun plural rendering, the
   language-bearing `/vocab/gloss` POST/DELETE endpoint, stable picker refs plus
   dictionary asset token, stale-token HTTP 409 rejection, D47 atomic
   activation/relink/rollback, and AGENTS R12/R13 runtime enforcement before
-  browser integration), under accepted ADR-0005 it owns the runtime
+  browser integration; Persian RTL removed by ADR-0007), under accepted ADR-0005 it owns the runtime
   pronunciation feature: note-local custom record/upload persistence, stable
   pronunciation identity, human-media policy and exact-id discovery, precedence,
   human/Piper cache, crash-safe replacement and API/render integration.
@@ -128,14 +127,8 @@ ADR-0006 is `ACCEPTED / FROZEN` after Cold Review #2 — FOCUSED REMEDY
 VERIFICATION. It does not reopen ADR-0004. Its §10 supersession record is active;
 ADR-0004 remains binding everywhere not explicitly superseded there.
 
-- Persian is ingested source-first from the direct exact
-  English-edition canonical source relation; German-Wiktionary is optional
-  fallback only through a proven exact cross-edition bridge, then coverage report
-  and owner STOP.
-  Persian LLM generation is zero unless a later explicit owner decision permits
-  a separately bounded policy.
-- Stage-03 must not reuse the historical 480,221 Persian LLM jobs. Persian source
-  ingestion occurs before final generated DE/EN queue materialization.
+- Persian source cascade and Batch specifications are established. (Note:
+  Persian is subsequently deferred from active v1 scope under pending ADR-0007).
 - Existing suitable source-backed German learner meanings are preserved; only
   unsuitable/missing learner wording produces one isolated German request.
 - Every generated item stays one model request. Production Batch
@@ -143,9 +136,26 @@ ADR-0004 remains binding everywhere not explicitly superseded there.
   per-manifest durability, exact-one ambiguous reconciliation, and fail-closed
   output joining. Current provider/model support, limits, and cost are checked
   immediately before paid use, not frozen architecture.
-- The historical Persian canary remains preserved and retired evidence. The
-  former Persian model-comparison prerequisite is historical unless a future
-  owner decision authorizes Persian LLM fallback.
+- The historical Persian canary remains preserved and retired evidence.
+
+## Governance drafting — ADR-0007 (2026-08-22)
+
+`docs/adr/0007-defer-persian-learner-meanings.md` was drafted with initial status
+`NEEDS COLD REVIEW`.
+
+By deliberate owner decision, Persian (`fa`) is removed from the active v1 flashcard
+product scope and deferred to a future major release:
+- Active meaning languages in v1 are strictly `{de, en}`;
+- Legal non-empty per-note selected subsets are `{de}`, `{en}`, and `{de, en}`;
+- All Persian source ingestion, cross-edition bridging, LLM generation, Persian QA,
+  canaries, and RTL rendering requirements are removed from the active v1 scope;
+- Normalized `sense_meaning` and `note_user_meaning` architecture is preserved for
+  DE and EN;
+- German learner meanings follow ADR-0004 D33 / ADR-0006 D65;
+- Bounded, correlated Batch transport is preserved for DE/EN generation;
+- Historical Persian investigations, prompt repairs, and canary spend
+  (USD 0.0008764) are preserved as immutable audit records;
+- Slice 6 is paused for architecture-changing work until ADR-0007 is accepted.
 
 ### Operational defaults for the offline build (non-normative)
 

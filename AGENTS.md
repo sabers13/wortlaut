@@ -73,10 +73,10 @@ backlog work.
   newline corrupts every record after it (ADR-0001 D14/§7).
 
 - **R11 — Attribution is per row, always filled.** `[reviewed]` Every `sense`
-  row, every **localized meaning** row (the DE/EN/FA learner-meaning texts hanging
-  off a sense — ADR-0004 §6, pending cold review), and every `example` row carries
+  row, every **localized meaning** row (the DE/EN learner-meaning texts hanging
+  off a sense — ADR-0004 §6 / ADR-0007, pending cold review), and every `example` row carries
   a non-empty `source` and `license`. Provenance lives on the localized meaning
-  row, not on the sense, because German, English and Persian meanings for one
+  row, not on the sense, because German and English meanings for one
   sense routinely come from different sources under different licenses.
   A computed derived-compound meaning block does not create a synthetic
   persisted provenance row; provenance is the ordered set of the exact component
@@ -282,9 +282,9 @@ backlog work.
 - **C3 — German-only, by decision.** "German-only" names the **target
   vocabulary language**: German is the only language whose words become notes. It
   does **not** mean learner-facing meanings must be written in German, nor that
-  they must be written in English. A note may display its meaning in German,
-  English and/or Persian — a per-note, non-empty selection rendered over
-  structured fields (ADR-0004, pending cold review) — and that is a display
+  they must be written in English. A note may display its meaning in German
+  and/or English — a per-note, non-empty selection rendered over
+  structured fields (ADR-0004 / ADR-0007, pending cold review) — and that is a display
   contract, not a generalisation of the app. What stays rejected is unchanged: no
   generic note types, no cloze, no configurable templates (ADR-0001 D18, §17.8),
   and no second target language. Proposals to generalise, including making the

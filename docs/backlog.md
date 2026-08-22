@@ -35,16 +35,12 @@ them. REJECTED items are listed so they do not resurface.
   `tasks/adr-0002-donor-notes.md`; any contradiction returns to governance. When
   that repo decomposes Phase 4, add one line to *its* backlog pointing here; do
   not file flashcard ADRs into it before then (ADR-0002 §3).
-- **Paid Stage-04 production remains owner-gated under accepted ADR-0006 D71.**
-  ADR-0006 is `ACCEPTED / FROZEN`; architecture-changing Slice-6 implementation
-  is governance-unblocked but still requires formal Slice-6 startup/local
-  verification. API credit expires **mid-September 2026**. ADR acceptance alone
-  authorizes no paid production run. Direct Persian evidence on the exact
-  English-edition canonical source sense is primary; German-Wiktionary is
-  optional fallback through an exact bridge only. Source-acceptance packet and
-  owner acceptance are required before coverage acceptance. Preserve only
+- **Paid Stage-04 production remains owner-gated under ADR-0006/ADR-0007.**
+  Architecture-changing Slice-6 implementation is paused pending ADR-0007 cold review.
+  API credit expires **mid-September 2026**. ADR acceptance alone
+  authorizes no paid production run. Forward generation is DE/EN only: preserve only
   positively eligible source-backed German wording; uncertainty generates one
-  isolated DE item. Generated DE/EN work remains one semantic item per request;
+  isolated DE item; fill missing EN meanings. Generated DE/EN work remains one semantic item per request;
   future production requires bounded deterministic Batch manifests, durable
   correlation and exact-one ambiguous reconciliation. Current provider
   capabilities/limits/cost are execution-time facts. The versioned generated
@@ -75,12 +71,16 @@ them. REJECTED items are listed so they do not resurface.
 - Derived card state via `review_log` replay (also the mechanism that keeps
   ADR-0003's confidence mapping revisable).
 - espeak-ng startup check (fail loudly, prefer Wiktionary IPA).
-- Multilingual contribution/voting policy (cite: ADR-0004 D42). The existing
+- **Persian learner meanings — deferred by ADR-0007.** Safe exact source-sense
+  mapping was not established during Stage-03 source investigations; LLM fallback
+  was evaluated/canaried (historical spend USD 0.0008764) but owner rejected its
+  cost and complexity for v1. Persian is deferred from active v1 product scope;
+  reconsider only through a future explicit owner decision and architecture review.
+- Multilingual contribution/voting policy (cite: ADR-0004 D42 / ADR-0007). The existing
   `gloss_contribution` scope — English, one vote per user per lemma, promotion
   at dictionary build (ADR-0001 D10) — stays exactly as accepted and is
-  deliberately **not** generalised to German or Persian. Whether and how
-  learners contribute DE/FA meanings, and how promotion interacts with three
-  provenance regimes, is an undecided design problem, not an oversight.
+  deliberately **not** generalised to German. Whether and how learners contribute
+  DE meanings is an undecided design problem, not an oversight.
 
 ## Standing
 
