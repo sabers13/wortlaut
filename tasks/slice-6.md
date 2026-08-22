@@ -866,9 +866,9 @@ STOP and return to the slice-6 orchestrator if:
 - satisfying the task requires modifying `app/`, runtime/user schema, ADRs,
   `reference/schema.sql`, AGENTS, WORKFLOW, STATE, or another path outside the
   allowlist;
-- Stage-03 queue semantics cannot be reconciled with accepted ADR-0006, pending
-  ADR-0007, and unsuperseded portions of accepted ADR-0004 without a new
-  architecture decision;
+- Stage-03 queue semantics cannot be reconciled with accepted ADR-0006,
+  accepted/frozen ADR-0007, and unsuperseded portions of accepted ADR-0004
+  without a new architecture decision;
 - Stage-04 would require runtime LLM/API dependency;
 - a provider secret would need to be committed, printed or written to an image;
 - provenance cannot satisfy D45/R11;

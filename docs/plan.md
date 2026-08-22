@@ -157,7 +157,9 @@ product scope and deferred to a future major release:
 - Bounded, correlated Batch transport is preserved for DE/EN generation;
 - Historical Persian investigations, prompt repairs, and canary spend
   (USD 0.0008764) are preserved as immutable audit records;
-- Slice 6 is paused for architecture-changing work until ADR-0007 is accepted.
+- Slice 6 implementation/design-reset is governance-cleared and may resume under
+  this accepted DE/EN-only architecture; ADR acceptance itself authorizes no
+  paid provider execution.
 
 ### Operational defaults for the offline build (non-normative)
 
