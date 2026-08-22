@@ -2088,14 +2088,92 @@ STAGE04_DEFAULT_PROVIDER_MAX_REQUESTS: Final[int] = 50000
 
 FA_JOB_CLASS: Final[str] = "fa_generated_meaning"
 FA_ITEM_VERSION: Final[str] = "fa-generation-job:v2"
-FA_INPUT_VERSION: Final[str] = "fa-input-v2"
-FA_BULK_VERSION: Final[str] = "fa-bulk-v2"
+FA_INPUT_VERSION: Final[str] = "fa-input-v3"
+FA_BULK_VERSION: Final[str] = "fa-bulk-v3"
 FA_RESPONSE_VERSION: Final[str] = "fa-response-v2"
 FA_CANARY_STRATA_VERSION: Final[str] = "fa-canary-strata-v1"
 OUTPUT_CLASSIFICATION: Final[str] = "AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1"
 MAX_FA_SCALARS: Final[int] = 160
 MAX_FA_TOKENS: Final[int] = 24
 CANARY_HARD_SPEND_CAP_USD: Final[float] = 0.10
+
+FA_V3_INSTRUCTIONS: Final[str] = (
+    "Translate the meaning of exactly this ONE canonical German sense into Persian.\n"
+    "Return the shortest natural meaning that faithfully preserves that exact sense.\n"
+    "Use neutral standard written Persian (فارسی معیار).\n"
+    "Return Persian meaning text only.\n"
+    "Do not repeat the German lemma merely as explanation.\n"
+    "Do not include German or English dictionary commentary.\n"
+    "Do not include Latin-script grammatical labels such as Nominativ, Akkusativ, Dativ, "
+    "Genitiv, Singular, or Plural; translate required grammatical information into concise "
+    "Persian instead.\n"
+    "Do not add etymology, examples, parenthetical dictionary commentary, or alternative "
+    "unrelated senses.\n"
+    "Do not merge multiple meanings: the output is for exactly this one sense only.\n"
+    "For an ordinary lexical sense: produce one concise Persian lexical equivalent or a short "
+    "meaning phrase.\n"
+    "For a morphology/inflection sense: do NOT invent a lexical translation of another sense; "
+    "provide only a concise Persian grammatical description of the exact morphology represented "
+    "by the supplied English source meaning.\n"
+    "Prefer brevity well below the mechanical maximum of 160 Unicode scalars and 24 "
+    "whitespace-delimited tokens."
+)
+
+
+def fa_v3_request_input(lemma: str, pos: str, en_meaning: str) -> str:
+    """Actual transmitted instruction text for fa_generated_meaning (fa-input-v3).
+
+    This function is the single committed source of the live prompt semantics;
+    synchronous and Batch logical request bodies must both serialize exactly this.
+    """
+    return (
+        f"German lemma: {lemma}\nPOS: {pos}\nExact English sense: {en_meaning}\n\n"
+        f"{FA_V3_INSTRUCTIONS}"
+    )
+
+
+def fa_v3_request_body(item: dict[str, object], model: str) -> dict[str, object]:
+    """Logical provider request body (fa-bulk-v3) for one semantic item.
+
+    The identical body is used for the standard synchronous Responses transport
+    and inside the Batch envelope ({custom_id, method, url, body}); only the
+    transport envelope differs.
+    """
+    return {
+        "model": model,
+        "input": fa_v3_request_input(
+            str(item["lemma"]), str(item["pos"]), str(item["en_meaning"])
+        ),
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "persian",
+                "schema": {
+                    "type": "object",
+                    "properties": {"persian": {"type": "string"}},
+                    "required": ["persian"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            }
+        },
+    }
+
+
+def credential_format_ok(value: str) -> bool:
+    """Local/no-network credential-format sanity check (never prints/persists).
+
+    Rejects empty values, surrounding quotes left in by naive .env parsing
+    (Attempt-1 operational defect), and embedded whitespace.
+    """
+    if not value:
+        return False
+    v = value.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+        return False
+    if any(c.isspace() for c in v):
+        return False
+    return True
 
 
 def _estimate_fa_cost(
@@ -2304,6 +2382,11 @@ def _validate_fa_v2_output(text: str, lemma_text: str) -> str | None:
         return "non_persian"
     if stripped.lower() == lemma_text.strip().lower():
         return "echo_lemma"
+    # Exact German lemma embedded inside a longer output is dictionary commentary
+    # (Attempt-1 defect), not a Persian meaning. Substring match of the full lemma
+    # only; no broader ASCII ban (legitimate acronyms/identifiers remain allowed).
+    if lemma_text.strip().lower() in stripped.lower():
+        return "lemma_repetition"
     # Persian unicode
     err = _validate_persian_unicode(stripped)
     if err is not None:

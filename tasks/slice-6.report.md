@@ -275,3 +275,71 @@ committed suite stays machine-portable while running fully on the maintainer mac
 classification `AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1` applies to future generated
 rows marked `llm_generated_v1`; no such row exists yet. TEST_SYNTHETIC_LICENSE_v1 remains
 synthetic test-only.*
+
+---
+
+# ATTEMPT 2 ADDENDUM (fa-input-v3 prompt-contract repair)
+
+## ATTEMPT 1: FAILURE 1
+
+- **Failure trigger:** live authorized 50-item Persian canary (cap USD 0.50), Luna generation
+  item 4 of 50 (`fa-generation-job:v2:090a4de75143a9eb2965e3aae65749fa8873dc2d64f162f3af552167250adcc3`,
+  lemma `fettiger`, morphology stratum) returned but failed deterministic validation
+  `too_long` (>160 Unicode scalars). Contract-mandated STOP before item 5.
+- **Known paid spend:** USD **0.0008764** (cumulative project spend; not reset).
+  Provider usage: Luna input 200 tok, output 697 tok.
+- **Generation:** 3 completed · 1 rejected · 0 ambiguous/in_flight.
+- **QA:** 0 sent (contract forbids QA on partial generation sets).
+- **Root cause:** the binding brevity/exact-output instruction existed only in design
+  evidence; the actually transmitted request body contained just
+  `lemma / POS / English meaning`. Passing outputs additionally demonstrated
+  German/Latin grammatical-label leakage ("(Nominativ/Akkusativ)", "einweihen (فعل)")
+  and sense broadening on a polysemous lexical item.
+- **Operational notes (unbilled):** first runner launch crashed pre-transmission;
+  second launch hit HTTP 401 because `.env` stores the credential wrapped in double
+  quotes and the untracked loader sent them verbatim; parser fixed locally, evidence
+  preserved (`checkpoint.401-evidence.json`). Credential-format sanity check is now a
+  committed helper (`credential_format_ok`) for all future runs.
+- **Disposition:** WORKFLOW §5 Failure-1 → same-tier T3 retry as **Attempt 2**.
+  Attempt-1 paid states are historical evidence under their old compatibility identity,
+  preserved in maintainer-local storage, never migrated or reused.
+
+## Repair shipped in Attempt 2
+
+- `FA_INPUT_VERSION` → `fa-input-v3`; `FA_BULK_VERSION` → `fa-bulk-v3`;
+  `FA_RESPONSE_VERSION` unchanged at `fa-response-v2` (schema semantics unchanged);
+  semantic item identity unchanged (`fa-generation-job:v2`, same canonical payload).
+- New committed single-source request builders `fa_v3_request_input()` /
+  `fa_v3_request_body()`: the transmitted instruction now explicitly requires
+  shortest-natural faithful meaning for exactly one canonical sense, standard written
+  Persian (فارسی معیار), meaning text only, no lemma repetition as explanation, no
+  German/English dictionary commentary, no Latin-script grammatical labels
+  (Nominativ/Akkusativ/Dativ/Genitiv/Singular/Plural), no etymology/examples/
+  parenthetical commentary/alternative senses, no merging of meanings, concise lexical
+  equivalent for lexical senses, concise Persian grammatical description only for
+  morphology senses, and preference for brevity well below the mechanical maximum.
+- Deterministic validation strengthened, never weakened: new exact-substring
+  `lemma_repetition` rejection catches embedded German lemma commentary
+  (Attempt-1 defect class); no overbroad ASCII ban (legitimate acronyms pass).
+  `too_long` bound unchanged at ≤160 scalars / ≤24 tokens.
+- Checkpoint compatibility now rejects fa-input-v2/fa-bulk-v2 state when v3 is requested
+  (tested, including explicit "Attempt-1 completed state not reusable" test).
+- Canary selection reverified byte-exact unchanged from Attempt 1:
+  SHA `396e3e03f16bb4f1bd769173abba31d9b8d80dc26fd9ed376bcd785ade25dc16`,
+  bytes 26789, 25 morphology + 25 lexical, bytewise execution order, 480221 candidates,
+  identical semantic item IDs.
+- 16 new executable tests prove the repair against the actual serialized logical body
+  (brevity/exact-one-sense/no-merging/standard-Persian/morphology/commentary/Latin-label
+  prohibitions, sync≡Batch logical body, v2→v3 checkpoint rejection, semantic-ID and
+  selection stability, validation bounds, lemma_repetition, acronym safety,
+  credential_format_ok).
+
+## v3 token/cost re-measurement (planning evidence only; no provider call)
+
+- tiktoken o200k_base over exact committed v3 request bodies for the frozen 50 canary items:
+  mean **326.1**, P50 **326**, P95 **334**, max **344** (sum 16,306).
+- Conservative future whole-canary bound at current standard short-context prices
+  (luna $0.20/$1.20, terra $2.00/$12.00 per MTok):
+  gen-in (2×measured sum) $0.0065 + gen-out (≤500 tok/req) $0.0300 +
+  QA-in (≤(P95+120)×2/req) $0.0908 + QA-out (≤600 tok/req) $0.3600
+  = **$0.4873 ≤ $0.50 cap** — provable with completion-safe margins.

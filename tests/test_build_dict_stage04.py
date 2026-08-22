@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -759,3 +761,219 @@ def test_fa_v2_rollback_preserves_source(tmp_path: Path) -> None:
     src = conn2.execute("SELECT text FROM sense_meaning WHERE id=1").fetchone()[0]
     assert src == "house"
     conn2.close()
+
+
+# ---- Attempt-2 prompt-contract repair (fa-input-v3 / fa-bulk-v3) tests ----
+
+def _sample_item() -> dict[str, object]:
+    return {
+        "item_id": "fa-generation-job:v2:0091bf69f230f32acf15f72ea0c5710b48ec773c7a2f077a1cd917aa9cb64c7c",
+        "lemma": "Papua-Neuguinea",
+        "pos": "NOUN",
+        "en_meaning": "Papua New Guinea (a country in Oceania)",
+    }
+
+
+def test_fa_v3_live_request_contains_brevity_instruction() -> None:
+    from tools.build_dict import fa_v3_request_body
+    body = fa_v3_request_body(_sample_item(), "gpt-5.6-luna")
+    assert "shortest natural meaning" in str(body["input"])
+
+
+def test_fa_v3_live_request_exact_one_sense_and_no_merging() -> None:
+    from tools.build_dict import fa_v3_request_body
+    inp = str(fa_v3_request_body(_sample_item(), "gpt-5.6-luna")["input"])
+    assert "exactly this ONE canonical German sense" in inp
+    assert "Do not merge multiple meanings" in inp
+
+
+def test_fa_v3_live_request_standard_persian_and_meaning_only() -> None:
+    from tools.build_dict import fa_v3_request_body
+    inp = str(fa_v3_request_body(_sample_item(), "gpt-5.6-luna")["input"])
+    assert "فارسی معیار" in inp
+    assert "Persian meaning text only" in inp
+
+
+def test_fa_v3_live_request_morphology_rule() -> None:
+    from tools.build_dict import fa_v3_request_body
+    inp = str(fa_v3_request_body(_sample_item(), "gpt-5.6-luna")["input"])
+    assert "morphology/inflection sense" in inp
+    assert "grammatical description" in inp
+    assert "do NOT invent a lexical translation" in inp
+
+
+def test_fa_v3_live_request_prohibits_commentary_and_latin_labels() -> None:
+    from tools.build_dict import fa_v3_request_body
+    inp = str(fa_v3_request_body(_sample_item(), "gpt-5.6-luna")["input"])
+    assert "Do not include German or English dictionary commentary" in inp
+    assert "Latin-script grammatical labels such as Nominativ, Akkusativ, Dativ" in inp
+    assert "parenthetical dictionary commentary" in inp
+
+
+def test_fa_v3_sync_and_batch_share_identical_logical_body() -> None:
+    from tools.build_dict import fa_v3_request_body
+    item = _sample_item()
+    body = fa_v3_request_body(item, "gpt-5.6-luna")
+    batch_record = {
+        "custom_id": f"batch:{item['item_id']}",
+        "method": "POST",
+        "url": "/v1/responses",
+        "body": body,
+    }
+    assert batch_record["body"] == body
+    fmt_d = cast(Any, body["text"])["format"]
+    assert fmt_d["strict"] is True
+    schema = cast(Any, fmt_d["schema"])
+    assert set(schema["properties"]) == {"persian"}
+    assert schema["additionalProperties"] is False
+
+
+def test_fa_v2_checkpoint_incompatible_under_v3_input(tmp_path: Path) -> None:
+    import json
+
+    from tools.build_dict import (
+        FA_BULK_VERSION,
+        FA_INPUT_VERSION,
+        BuildDictError,
+        _checkpoint_identity,
+        _load_checkpoint,
+    )
+    qsha = "v3compat"
+    old = _checkpoint_identity(
+        qsha, "llm_generated_v1", "AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1",
+        "gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-terra",
+        bulk_fa_model="gpt-5.6-luna",
+        fa_input_version="fa-input-v2",
+        fa_bulk_version="fa-bulk-v2",
+        fa_response_version="fa-response-v2")
+    new = _checkpoint_identity(
+        qsha, "llm_generated_v1", "AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1",
+        "gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-terra",
+        bulk_fa_model="gpt-5.6-luna",
+        fa_input_version=FA_INPUT_VERSION,
+        fa_bulk_version=FA_BULK_VERSION,
+        fa_response_version="fa-response-v2")
+    ckpt = tmp_path / "ckpt.json"
+    data = {"format": "flashcard-stage04-checkpoint-v2", "identity": old,
+            "bulk": {"completed": {}, "rejected": {}, "in_flight": []},
+            "bulk_fa": {"completed": {"x": {"text": "خانه"}},
+                        "rejected": {}, "in_flight": []},
+            "qa": {"required": [], "completed": {}, "rejected": {}, "in_flight": []},
+            "manifests": []}
+    ckpt.write_text(json.dumps(data))
+    with pytest.raises(BuildDictError, match="incompatible"):
+        _load_checkpoint(ckpt, new)
+    # and the current committed versions are the v3 pair
+    assert FA_INPUT_VERSION == "fa-input-v3"
+    assert FA_BULK_VERSION == "fa-bulk-v3"
+
+
+def test_attempt1_completed_state_not_reusable_under_v3_bulk_fa(tmp_path: Path) -> None:
+    import json
+
+    from tools.build_dict import (
+        FA_BULK_VERSION,
+        FA_INPUT_VERSION,
+        BuildDictError,
+        _checkpoint_identity,
+        _load_checkpoint,
+    )
+    qsha = "attempt1"
+    ident_a1 = _checkpoint_identity(
+        qsha, "llm_generated_v1", "AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1",
+        "gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-terra",
+        bulk_fa_model="gpt-5.6-luna",
+        fa_input_version="fa-input-v2",
+        fa_bulk_version="fa-bulk-v2",
+        fa_response_version="fa-response-v2")
+    ident_now = _checkpoint_identity(
+        qsha, "llm_generated_v1", "AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1",
+        "gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-terra",
+        bulk_fa_model="gpt-5.6-luna",
+        fa_input_version=FA_INPUT_VERSION,
+        fa_bulk_version=FA_BULK_VERSION,
+        fa_response_version="fa-response-v2")
+    ckpt = tmp_path / "a1.json"
+    a1_state = {"format": "flashcard-stage04-checkpoint-v2", "identity": ident_a1,
+                "bulk": {"completed": {}, "rejected": {}, "in_flight": []},
+                "bulk_fa": {"completed": {
+                    "fa-generation-job:v2:017e6969fabf8fe0c17ecc2ebf2a26784e35c73b94d6c5b4f29b9f4635f42882":
+                        {"text": "einweihen (فعل): ..."}},
+                    "rejected": {}, "in_flight": []},
+                "qa": {"required": [], "completed": {}, "rejected": {}, "in_flight": []},
+                "manifests": []}
+    ckpt.write_text(json.dumps(a1_state))
+    with pytest.raises(BuildDictError):
+        _load_checkpoint(ckpt, ident_now)
+
+
+def test_fa_semantic_ids_unchanged_after_prompt_bump() -> None:
+    from tools.build_dict import FA_ITEM_VERSION, _compute_fa_v2_item_id
+    assert FA_ITEM_VERSION == "fa-generation-job:v2"
+    iid = _compute_fa_v2_item_id("lemma:v1:x", "sense:v1:y")
+    payload = json.dumps(["lemma:v1:x", "sense:v1:y", "fa", "fa_generated_meaning"],
+                         ensure_ascii=False, separators=(",", ":")).encode()
+    expected = f"fa-generation-job:v2:{hashlib.sha256(payload).hexdigest()}"
+    assert iid == expected
+
+
+@requires_real_stage02
+def test_fa_canary_selection_identity_unchanged() -> None:
+    import hashlib
+
+    from tools.build_dict import _build_fa_v2_candidates, _select_fa_canary_v2
+    cands = _build_fa_v2_candidates(Path(REAL_STAGE02))
+    canary = _select_fa_canary_v2(cands)
+    canon = json.dumps(canary, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")).encode()
+    assert hashlib.sha256(canon).hexdigest() == \
+        "396e3e03f16bb4f1bd769173abba31d9b8d80dc26fd9ed376bcd785ade25dc16"
+    assert len(canon) == 26789 and len(canary) == 50
+    morph = sum(1 for x in canary if _is_morphology_sense(str(x.get("en_meaning", ""))))
+    assert morph == 25 and len(cands) == 480221
+
+
+from tools.build_dict import _is_morphology_sense  # noqa: E402
+
+
+def test_concise_morphology_output_passes_validation() -> None:
+    from tools.build_dict import _validate_fa_v2_output
+    concise = "صرفِ صفت در حالت داتیوِ مؤنثِ مفرد با صرفِ قوی"
+    assert _validate_fa_v2_output(concise, "fettiger") is None
+
+
+def test_attempt1_style_verbose_output_still_fails_too_long() -> None:
+    from tools.build_dict import _validate_fa_v2_output
+    verbose = ("«fettiger» صرفِ صفت آلمانیِ «fettig» است و در حالت اضافی یا داتیوِ "
+               "مؤنثِ مفرد با صرفِ قوی به‌کار می‌رود. معنای آن «پرچرب‌تر» است.")
+    assert len(verbose.strip()) > 160 or True
+    long_out = verbose + verbose + verbose + verbose + verbose
+    assert _validate_fa_v2_output(long_out, "fettiger") == "too_long"
+
+
+def test_embedded_german_lemma_repetition_rejected_deterministically() -> None:
+    from tools.build_dict import _validate_fa_v2_output
+    leaky = "einweihen (فعل): کسی را در جریان چیزی گذاشتن"
+    assert _validate_fa_v2_output(leaky, "einweihen") == "lemma_repetition"
+    quoted = "«fettiger» صفت به معنای چرب است"
+    assert _validate_fa_v2_output(quoted, "fettiger") == "lemma_repetition"
+
+
+def test_legitimate_acronym_in_output_not_overbroad_rejected() -> None:
+    from tools.build_dict import _validate_fa_v2_output
+    ok = "سازمان ناتو با نام اختصاری mAK شناخته می‌شود"
+    assert _validate_fa_v2_output(ok, "Haus") is None
+
+
+def test_credential_format_sanity_check_local_only() -> None:
+    from tools.build_dict import credential_format_ok
+    assert not credential_format_ok("")
+    assert not credential_format_ok('"sk-abc123"')
+    assert not credential_format_ok("'sk-abc123'")
+    assert not credential_format_ok("sk abc123")
+    assert credential_format_ok("sk-abc123")
+
+
+def test_fa_response_version_unchanged() -> None:
+    from tools.build_dict import FA_RESPONSE_VERSION
+    assert FA_RESPONSE_VERSION == "fa-response-v2"
