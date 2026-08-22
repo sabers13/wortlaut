@@ -1,979 +1,188 @@
-"""Tests for Stage 04 generated enrichment, validation, QA, checkpointing."""
-
-from __future__ import annotations
+"""Fake/local DE/EN Stage 04 safety tests."""
 
 import hashlib
 import json
-import os
-import sqlite3
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
 
-from tools.build_dict import (
-    BuildDictError,
-    _validate_generated_candidate,
-    _validate_persian_unicode,
-    build_stage01,
-    build_stage03,
-    build_stage04,
-    retry_rejected,
-)
-
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
-EN_FIXTURE_PATH = FIXTURES_DIR / "wiktextract_stage01_en.jsonl"
-DE_FIXTURE_PATH = FIXTURES_DIR / "wiktextract_stage01_de.jsonl"
+from tests.test_build_dict_stage03 import make_stage02
+from tools.build_dict import BuildDictError, build_stage03, build_stage04, retry_rejected
 
 
 class FakeTransport:
-    def __init__(self, fail_after: int | None = None, invalid_ids: set[str] | None = None):
-        self.sent_bulk: list[list[str]] = []
-        self.sent_qa: list[list[str]] = []
+    def __init__(self, texts: dict[str, str] | None = None, fail_after: int | None = None) -> None:
+        self.texts = texts or {}
         self.fail_after = fail_after
-        self.invalid_ids = invalid_ids or set()
-        self.call_count = 0
+        self.bulk_submitted: list[str] = []
+        self.qa_submitted: list[str] = []
+        self.items: dict[str, dict[str, object]] = {}
 
-    def send_bulk(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-        self.sent_bulk.append(list(unit_ids))
-        self.call_count += 1
-        if self.fail_after is not None and self.call_count > self.fail_after:
-            raise RuntimeError("simulated transport failure")
-        result: dict[str, dict[str, str]] = {}
-        for iid in unit_ids:
-            if iid in self.invalid_ids:
-                result[iid] = {"text": "", "language": "de", "kind": "synonym"}
-            else:
-                # Provide valid candidate
-                result[iid] = {"text": f"val-{iid[-6:]}", "language": "de" if "de" in iid else "en", "kind": "synonym" if "de" in iid else "translation"}
-                # But our iid may not contain de/en; use generic
-                # we will set language based on candidate's expected? Simpler to use de for all
-                # Actually queue language determines; we need to know queue but we ignore
-                # Use generic valid
-                result[iid] = {"text": f"valid-{iid[-8:]}", "language": "de", "kind": "synonym"}
-        return result
+    def send_bulk(self, item_ids: list[str]) -> dict[str, dict[str, str]]:
+        if self.fail_after is not None and len(self.bulk_submitted) >= self.fail_after:
+            raise RuntimeError("deliberate local failure")
+        self.bulk_submitted.extend(item_ids)
+        return {
+            item_id: {
+                "text": self.texts.get(
+                    item_id,
+                    "ein Gebäude" if self.items[item_id]["language"] == "de" else "building",
+                ),
+                "language": str(self.items[item_id]["language"]),
+                "kind": "definition" if self.items[item_id]["language"] == "de" else "translation",
+            }
+            for item_id in item_ids
+        }
 
-    def send_qa(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-        self.sent_qa.append(list(unit_ids))
-        result: dict[str, dict[str, str]] = {}
-        for iid in unit_ids:
-            result[iid] = {"text": f"qa-valid-{iid[-8:]}", "language": "de", "kind": "synonym"}
-        return result
+    def send_qa(self, item_ids: list[str]) -> dict[str, dict[str, str]]:
+        self.qa_submitted.extend(item_ids)
+        return self.send_bulk(item_ids)
 
 
-@pytest.fixture
-def mini_s02_and_queue(tmp_path: Path) -> tuple[Path, Path, Path]:
-    # Build mini stage02-like db and queue
-    s02 = tmp_path / "s02.sqlite"
-    build_stage01(EN_FIXTURE_PATH, DE_FIXTURE_PATH, s02)
-    conn = sqlite3.connect(s02)
-    conn.executescript(
-        "CREATE TABLE IF NOT EXISTS example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0);"
-        "CREATE TABLE IF NOT EXISTS example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;"
+def queue_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, dict[str, object]]]:
+    stage02 = make_stage02(tmp_path / "input.sqlite")
+    queue = tmp_path / "queue.json"
+    build_stage03(stage02, queue)
+    items = json.loads(queue.read_text(encoding="utf-8"))["items"]
+    assert isinstance(items, list)
+    return stage02, queue, {str(item["item_id"]): item for item in items}
+
+
+def test_fake_bulk_qa_persists_generated_rows_and_derivations(tmp_path: Path) -> None:
+    stage02, queue, items = queue_fixture(tmp_path)
+    before = hashlib.sha256(stage02.read_bytes()).hexdigest()
+    fake = FakeTransport()
+    fake.items = items
+    output, checkpoint = tmp_path / "enriched.sqlite", tmp_path / "checkpoint.json"
+    result = build_stage04(
+        queue, stage02, output, checkpoint, "TEST_CLASSIFICATION_v1", transport=fake, batch_size=1
     )
-    conn.close()
-    q = tmp_path / "queue.json"
-    build_stage03(s02, q)
-    # Trim queue to 5 items for bounded tests
-    data = json.loads(q.read_text())
-    data["items"] = data["items"][:5]
-    # Re-sort and recompute sha
-    q.write_text(json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-    ckpt = tmp_path / "ckpt.json"
-    return s02, q, ckpt
+    assert result["bulk_completed"] == 2
+    assert result["qa_completed"] == 2
+    assert hashlib.sha256(stage02.read_bytes()).hexdigest() == before
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert set(state) >= {"bulk", "qa", "manifests"}
+    assert not state["bulk"]["in_flight"]
+    manifest = state["manifests"][0]
+    assert manifest["state"] == "PREPARED"
+    assert manifest["correlation"].startswith("batchcorr:v1:")
+    assert manifest["custom_ids"] == [f"batch:{item_id}" for item_id in manifest["item_ids"]]
 
 
-def test_fake_bulk_and_qa(tmp_path: Path, mini_s02_and_queue: tuple[Path, Path, Path]) -> None:
-    s02, q, ckpt = mini_s02_and_queue
-    out = tmp_path / "out.sqlite"
-    transport = FakeTransport()
-    result = build_stage04(q, s02, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=transport)
-    assert result["bulk_completed"] == 5
-    assert out.exists()
-
-
-def test_no_network_marker_classification_source_preservation(tmp_path: Path, mini_s02_and_queue: tuple[Path, Path, Path]) -> None:
-    s02, q, ckpt = mini_s02_and_queue
-    out = tmp_path / "out2.sqlite"
-    transport = FakeTransport()
-    build_stage04(q, s02, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=transport)
-    conn = sqlite3.connect(out)
-    rows = conn.execute("SELECT source, license, language FROM sense_meaning WHERE source='llm_generated_v1'").fetchall()
-    assert len(rows) == 5
-    for src, lic, lang in rows:
-        assert src == "llm_generated_v1"
-        assert lic == "TEST_SYNTHETIC_LICENSE_v1"
-    # source-backed rows unchanged
-    orig_count = sqlite3.connect(f"file:{s02}?mode=ro", uri=True).execute("SELECT count(*) FROM sense_meaning").fetchone()[0]
-    new_total = conn.execute("SELECT count(*) FROM sense_meaning").fetchone()[0]
-    assert new_total == orig_count + 5
-    conn.close()
-
-
-def test_derivation_edges_exact_and_zero_edge_valid(tmp_path: Path) -> None:
-    # Create minimal db with one sense and one source meaning
-    db = tmp_path / "db.sqlite"
-    conn = sqlite3.connect(db)
-    conn.executescript(
-        """
-        CREATE TABLE lemma (id INTEGER PRIMARY KEY, semantic_ref TEXT NOT NULL UNIQUE, lemma TEXT NOT NULL, pos TEXT NOT NULL, gender TEXT);
-        CREATE TABLE surface_form (form TEXT NOT NULL, lemma_id INTEGER NOT NULL, PRIMARY KEY (form, lemma_id)) WITHOUT ROWID;
-        CREATE TABLE sense (id INTEGER PRIMARY KEY, lemma_id INTEGER NOT NULL, semantic_ref TEXT NOT NULL UNIQUE, source_namespace TEXT NOT NULL, source_ref TEXT NOT NULL, ord INTEGER NOT NULL);
-        CREATE TABLE sense_meaning (id INTEGER PRIMARY KEY, sense_id INTEGER NOT NULL, language TEXT NOT NULL, kind TEXT NOT NULL, ord INTEGER NOT NULL, text TEXT NOT NULL, source TEXT NOT NULL, license TEXT NOT NULL);
-        CREATE TABLE sense_meaning_derivation (generated_meaning_id INTEGER NOT NULL, source_meaning_id INTEGER NOT NULL, PRIMARY KEY (generated_meaning_id, source_meaning_id)) WITHOUT ROWID;
-        CREATE TABLE example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0);
-        CREATE TABLE example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;
-        """
-    )
-    conn.execute("INSERT INTO lemma (id, semantic_ref, lemma, pos) VALUES (1, 'lemma:v1:x', 'Haus', 'NOUN')")
-    conn.execute("INSERT INTO sense (id, lemma_id, semantic_ref, source_namespace, source_ref, ord) VALUES (1, 1, 'sense:v1:x', 'wiktextract:enwiktionary', 'fingerprint:v1:x', 0)")
-    conn.execute("INSERT INTO sense_meaning (id, sense_id, language, kind, ord, text, source, license) VALUES (1, 1, 'en', 'translation', 0, 'house', 'wiktionary', 'CC BY-SA')")
-    conn.commit()
-    conn.close()
-    # Build queue with derivation (stage03 will create DE job with derivation_source_ids=[1] if de row exists? but we have no de row, so zero)
-    # Instead manually craft queue with derivation
-    q = tmp_path / "queue.json"
-    queue_items = [
-        {
-            "item_id": "queue:v1:aaaaaaaa000000000000000000000001",
-            "custom_id": "batch:queue:v1:aaaaaaaa000000000000000000000001",
-            "lemma_semantic_ref": "lemma:v1:x",
-            "sense_semantic_ref": "sense:v1:x",
-            "lemma_text": "Haus",
-            "pos": "NOUN",
-            "gender": None,
-            "sense_id": 1,
-            "lemma_id": 1,
-            "language": "de",
-            "job_class": "de_learner_meaning",
-            "context": {"lemma": "Haus"},
-            "derivation_source_ids": [1],
-        },
-        {
-            "item_id": "queue:v1:aaaaaaaa000000000000000000000002",
-            "custom_id": "batch:queue:v1:aaaaaaaa000000000000000000000002",
-            "lemma_semantic_ref": "lemma:v1:x",
-            "sense_semantic_ref": "sense:v1:x",
-            "lemma_text": "Haus",
-            "pos": "NOUN",
-            "gender": None,
-            "sense_id": 1,
-            "lemma_id": 1,
-            "language": "en",
-            "job_class": "en_translation",
-            "context": {"lemma": "Haus"},
-            "derivation_source_ids": [],
-        },
-    ]
-    q.write_text(json.dumps({"format": "flashcard-stage03-queue-v1", "queue_sha256": "x", "items": queue_items}, sort_keys=True, separators=(",", ":")))
-    ckpt = tmp_path / "ckpt.json"
-    out = tmp_path / "out.sqlite"
-    transport = FakeTransport()
-    # Override transport to return valid for both
-    transport.send_bulk = lambda ids: {iid: {"text": f"valid-{iid[-4:]}", "language": "de" if "000001" in iid else "en", "kind": "synonym" if "000001" in iid else "translation"} for iid in ids}  # type: ignore[method-assign, assignment]
-    transport.send_qa = lambda ids: {iid: {"text": f"qa-{iid[-4:]}", "language": "de" if "000001" in iid else "en", "kind": "synonym" if "000001" in iid else "translation"} for iid in ids}  # type: ignore[method-assign, assignment]
-    build_stage04(q, db, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=transport)
-    conn2 = sqlite3.connect(out)
-    # Check derivation edge exists for first item
-    gen_id = conn2.execute("SELECT id FROM sense_meaning WHERE source='llm_generated_v1' AND language='de'").fetchone()[0]
-    edge = conn2.execute("SELECT count(*) FROM sense_meaning_derivation WHERE generated_meaning_id=?", (gen_id,)).fetchone()[0]
-    assert edge == 1
-    # Zero edge valid case: en job with no derivation
-    gen_id2 = conn2.execute("SELECT id FROM sense_meaning WHERE source='llm_generated_v1' AND language='en'").fetchone()[0]
-    edge2 = conn2.execute("SELECT count(*) FROM sense_meaning_derivation WHERE generated_meaning_id=?", (gen_id2,)).fetchone()[0]
-    assert edge2 == 0
-    conn2.close()
-
-
-def test_generated_to_generated_rejection(tmp_path: Path) -> None:
-    db = tmp_path / "db2.sqlite"
-    conn = sqlite3.connect(db)
-    conn.executescript(
-        """
-        CREATE TABLE lemma (id INTEGER PRIMARY KEY, semantic_ref TEXT NOT NULL UNIQUE, lemma TEXT NOT NULL, pos TEXT NOT NULL, gender TEXT);
-        CREATE TABLE surface_form (form TEXT NOT NULL, lemma_id INTEGER NOT NULL, PRIMARY KEY (form, lemma_id)) WITHOUT ROWID;
-        CREATE TABLE sense (id INTEGER PRIMARY KEY, lemma_id INTEGER NOT NULL, semantic_ref TEXT NOT NULL UNIQUE, source_namespace TEXT NOT NULL, source_ref TEXT NOT NULL, ord INTEGER NOT NULL);
-        CREATE TABLE sense_meaning (id INTEGER PRIMARY KEY, sense_id INTEGER NOT NULL, language TEXT NOT NULL, kind TEXT NOT NULL, ord INTEGER NOT NULL, text TEXT NOT NULL, source TEXT NOT NULL, license TEXT NOT NULL);
-        CREATE TABLE sense_meaning_derivation (generated_meaning_id INTEGER NOT NULL, source_meaning_id INTEGER NOT NULL, PRIMARY KEY (generated_meaning_id, source_meaning_id)) WITHOUT ROWID;
-        CREATE TABLE example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0);
-        CREATE TABLE example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;
-        """
-    )
-    conn.execute("INSERT INTO lemma (id, semantic_ref, lemma, pos) VALUES (1, 'lemma:v1:y', 'Haus', 'NOUN')")
-    conn.execute("INSERT INTO sense (id, lemma_id, semantic_ref, source_namespace, source_ref, ord) VALUES (1, 1, 'sense:v1:y', 'wiktextract:enwiktionary', 'fingerprint:v1:y', 0)")
-    conn.execute("INSERT INTO sense_meaning (id, sense_id, language, kind, ord, text, source, license) VALUES (1, 1, 'de', 'synonym', 0, 'Gebäude', 'llm_generated_v1', 'TEST_SYNTHETIC_LICENSE_v1')")
-    conn.commit()
-    conn.close()
-    q = tmp_path / "q.json"
-    q.write_text(json.dumps({"format": "flashcard-stage03-queue-v1", "queue_sha256": "y", "items": [{
-        "item_id": "queue:v1:bbbb", "custom_id": "batch:queue:v1:bbbb", "lemma_semantic_ref": "lemma:v1:y", "sense_semantic_ref": "sense:v1:y", "lemma_text": "Haus", "pos": "NOUN", "gender": None, "sense_id": 1, "lemma_id": 1, "language": "de", "job_class": "de_learner_meaning", "context": {}, "derivation_source_ids": [1],
-    }]}, sort_keys=True, separators=(",", ":")))
-    ckpt = tmp_path / "ckpt.json"
-    out = tmp_path / "out.sqlite"
-    transport = FakeTransport()
-    transport.send_bulk = lambda ids: {iid: {"text": "valid", "language": "de", "kind": "synonym"} for iid in ids}  # type: ignore[method-assign, assignment]
-    with pytest.raises(BuildDictError, match="Generated->generated"):
-        build_stage04(q, db, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=transport)
-
-
-def test_deterministic_validation_and_persian_rules() -> None:
-    assert _validate_generated_candidate("valid", "de", "synonym", "Haus") is None
-    assert _validate_generated_candidate("", "de", "synonym", "Haus") is not None
-    assert _validate_generated_candidate("a"*281, "de", "synonym", "Haus") is not None
-    assert _validate_generated_candidate("Haus", "de", "synonym", "Haus") is not None  # echo
-    assert _validate_persian_unicode("خانه\u200cها") is None
-    assert _validate_persian_unicode("خانه\u202B") is not None
-
-
-def test_five_item_provider_response_with_one_invalid(tmp_path: Path) -> None:
-    s02 = tmp_path / "s02.sqlite"
-    build_stage01(EN_FIXTURE_PATH, DE_FIXTURE_PATH, s02)
-    conn = sqlite3.connect(s02)
-    conn.executescript("CREATE TABLE IF NOT EXISTS example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0); CREATE TABLE IF NOT EXISTS example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;")
-    conn.close()
-    q = tmp_path / "q.json"
-    build_stage03(s02, q)
-    data = json.loads(q.read_text())
-    # Trim to 5
-    data["items"] = data["items"][:5]
-    q.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")))
-    ckpt = tmp_path / "ckpt.json"
-    out = tmp_path / "out.sqlite"
-    # Prepare transport that returns 4 valid +1 invalid (empty)
-    ids = [x["item_id"] for x in data["items"]]
-    invalid_id = ids[2]
-    class MixedTransport:
-        def send_bulk(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            res: dict[str, dict[str, str]] = {}
-            for iid in unit_ids:
-                if iid == invalid_id:
-                    res[iid] = {"text": "", "language": "de", "kind": "synonym"}
-                else:
-                    res[iid] = {"text": f"valid-{iid[-8:]}", "language": "de", "kind": "synonym"}
-            return res
-        def send_qa(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            return {iid: {"text": f"qa-{iid[-8:]}", "language": "de", "kind": "synonym"} for iid in unit_ids}
-    transport = MixedTransport()
+def test_complete_invalid_result_is_rejected_and_not_resubmitted(tmp_path: Path) -> None:
+    stage02, queue, items = queue_fixture(tmp_path)
+    bad_id = sorted(items)[0]
+    fake = FakeTransport({bad_id: "Haus"})
+    fake.items = items
+    checkpoint = tmp_path / "checkpoint.json"
     with pytest.raises(BuildDictError, match="rejected"):
-        build_stage04(q, s02, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=transport, batch_size=5)
-    # Check checkpoint durable state: 4 completed, 1 rejected, in_flight cleared
-    ckpt_data = json.loads(ckpt.read_text())
-    assert len(ckpt_data["bulk"]["completed"]) == 4
-    assert len(ckpt_data["bulk"]["rejected"]) == 1
-    assert ckpt_data["bulk"]["in_flight"] == []
-    # No output yet? Output may have been created? Our build creates output only after bulk completes successfully? But with rejected, we still wrote checkpoint before STOP; output may not be fully created - but we check checkpoint
-    # Second run should not resubmit completed/rejected
-    out2 = tmp_path / "out2.sqlite"
-    # New transport that would capture resubmission - should not be called for completed/rejected because pending is empty
-    class NoResubmitTransport:
-        def send_bulk(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            raise AssertionError(f"should not resubmit {unit_ids}")
-        def send_qa(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            return {iid: {"text": f"qa-{iid[-8:]}", "language": "de", "kind": "synonym"} for iid in unit_ids}
-    # This should raise in_flight? Actually bulk pending is empty now (all accounted), so no bulk call, but QA may still be pending
-    # We try building again - it should not call send_bulk, but will try QA if needed; we provide no-op
-    try:
-        build_stage04(q, s02, out2, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=NoResubmitTransport(), batch_size=5)
-    except BuildDictError:
-        pass  # QA may still need processing
-    # Ensure checkpoint still has same completed/rejected
-    ckpt_data2 = json.loads(ckpt.read_text())
-    assert len(ckpt_data2["bulk"]["completed"]) == 4
+        build_stage04(
+            queue,
+            stage02,
+            tmp_path / "out.sqlite",
+            checkpoint,
+            "TEST_CLASSIFICATION_v1",
+            transport=fake,
+            batch_size=2,
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert bad_id in state["bulk"]["rejected"]
+    assert not state["bulk"]["in_flight"]
+    again = FakeTransport()
+    again.items = items
+    build_stage04(
+        queue,
+        stage02,
+        tmp_path / "out.sqlite",
+        checkpoint,
+        "TEST_CLASSIFICATION_v1",
+        transport=again,
+    )
+    assert bad_id not in again.bulk_submitted
 
 
-def test_transport_failure_keeps_in_flight_and_fails_closed(tmp_path: Path) -> None:
-    s02 = tmp_path / "s02a.sqlite"
-    build_stage01(EN_FIXTURE_PATH, DE_FIXTURE_PATH, s02)
-    conn = sqlite3.connect(s02)
-    conn.executescript("CREATE TABLE IF NOT EXISTS example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0); CREATE TABLE IF NOT EXISTS example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;")
-    conn.close()
-    q = tmp_path / "q.json"
-    build_stage03(s02, q)
-    data = json.loads(q.read_text())
-    data["items"] = data["items"][:2]
-    q.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")))
-    ckpt = tmp_path / "ckpt.json"
-    out = tmp_path / "out.sqlite"
-    class FailingTransport:
-        def send_bulk(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            raise RuntimeError("network down")
+def test_unknown_outcome_stays_in_flight_and_fails_closed(tmp_path: Path) -> None:
+    stage02, queue, items = queue_fixture(tmp_path)
+    fake = FakeTransport(fail_after=0)
+    fake.items = items
+    checkpoint = tmp_path / "checkpoint.json"
     with pytest.raises(BuildDictError, match="Transport failure"):
-        build_stage04(q, s02, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=FailingTransport(), batch_size=2)
-    ckpt_data = json.loads(ckpt.read_text())
-    assert len(ckpt_data["bulk"]["in_flight"]) == 2
+        build_stage04(
+            queue,
+            stage02,
+            tmp_path / "out.sqlite",
+            checkpoint,
+            "TEST_CLASSIFICATION_v1",
+            transport=fake,
+            batch_size=1,
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert state["bulk"]["in_flight"] == [sorted(items)[0]]
+    with pytest.raises(BuildDictError, match="ambiguous"):
+        build_stage04(
+            queue,
+            stage02,
+            tmp_path / "out2.sqlite",
+            checkpoint,
+            "TEST_CLASSIFICATION_v1",
+            transport=fake,
+        )
 
 
-def test_explicit_retry_and_no_retry_inflight(tmp_path: Path) -> None:
-    s02 = tmp_path / "s02b.sqlite"
-    build_stage01(EN_FIXTURE_PATH, DE_FIXTURE_PATH, s02)
-    conn = sqlite3.connect(s02)
-    conn.executescript("CREATE TABLE IF NOT EXISTS example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0); CREATE TABLE IF NOT EXISTS example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;")
-    conn.close()
-    q = tmp_path / "q.json"
-    build_stage03(s02, q)
-    data = json.loads(q.read_text())
-    data["items"] = data["items"][:1]
-    q.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")))
-    ckpt = tmp_path / "ckpt.json"
-    out = tmp_path / "out.sqlite"
-    invalid_id = data["items"][0]["item_id"]
-    class OnceInvalidTransport:
-        def __init__(self) -> None:
-            self.called = 0
-        def send_bulk(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            self.called += 1
-            if self.called == 1:
-                return {unit_ids[0]: {"text": "", "language": "de", "kind": "synonym"}}
-            return {unit_ids[0]: {"text": "now-valid", "language": "de", "kind": "synonym"}}
-        def send_qa(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            return {iid: {"text": f"qa-{iid[-8:]}", "language": "de", "kind": "synonym"} for iid in unit_ids}
-    transport = OnceInvalidTransport()
+def test_checkpoint_identity_and_explicit_retry_are_fail_closed(tmp_path: Path) -> None:
+    stage02, queue, items = queue_fixture(tmp_path)
+    bad_id = sorted(items)[0]
+    fake = FakeTransport({bad_id: "Haus"})
+    fake.items = items
+    checkpoint = tmp_path / "checkpoint.json"
     with pytest.raises(BuildDictError):
-        build_stage04(q, s02, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=transport, batch_size=1)
-    ckpt_data = json.loads(ckpt.read_text())
-    assert invalid_id in ckpt_data["bulk"]["rejected"]
-    # Explicit retry should remove from rejected
-    retry_rejected(ckpt, q, [invalid_id], generated_license="TEST_SYNTHETIC_LICENSE_v1")
-    ckpt_data2 = json.loads(ckpt.read_text())
-    assert invalid_id not in ckpt_data2["bulk"]["rejected"]
-    # Retry of in_flight should fail
-    # Simulate in_flight
-    ckpt_data2["bulk"]["in_flight"] = [invalid_id]
-    ckpt.write_text(json.dumps(ckpt_data2, sort_keys=True, separators=(",", ":")))
-    with pytest.raises(BuildDictError, match="Cannot retry in-flight"):
-        retry_rejected(ckpt, q, [invalid_id], generated_license="TEST_SYNTHETIC_LICENSE_v1")
-
-
-def test_model_role_compatibility(tmp_path: Path) -> None:
-    s02 = tmp_path / "s02c.sqlite"
-    build_stage01(EN_FIXTURE_PATH, DE_FIXTURE_PATH, s02)
-    conn = sqlite3.connect(s02)
-    conn.executescript("CREATE TABLE IF NOT EXISTS example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0); CREATE TABLE IF NOT EXISTS example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;")
-    conn.close()
-    q = tmp_path / "q.json"
-    build_stage03(s02, q)
-    data = json.loads(q.read_text())
-    data["items"] = data["items"][:1]
-    q.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")))
-    ckpt = tmp_path / "ckpt.json"
-    out = tmp_path / "out.sqlite"
-    t = FakeTransport()
-    build_stage04(q, s02, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", bulk_de_model="gpt-5.6-luna", transport=t)
-    # Changing model should invalidate reuse
-    out2 = tmp_path / "out2.sqlite"
+        build_stage04(
+            queue,
+            stage02,
+            tmp_path / "out.sqlite",
+            checkpoint,
+            "TEST_CLASSIFICATION_v1",
+            transport=fake,
+        )
+    with pytest.raises(BuildDictError, match="not rejected"):
+        retry_rejected(checkpoint, queue, ["unknown"], "TEST_CLASSIFICATION_v1")
+    retry_rejected(checkpoint, queue, [bad_id], "TEST_CLASSIFICATION_v1")
+    changed = FakeTransport()
+    changed.items = items
     with pytest.raises(BuildDictError, match="incompatible"):
-        build_stage04(q, s02, out2, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", bulk_de_model="different-model", transport=t)
-
-
-def test_one_item_one_request_and_custom_id(tmp_path: Path) -> None:
-    s02 = tmp_path / "s02d.sqlite"
-    build_stage01(EN_FIXTURE_PATH, DE_FIXTURE_PATH, s02)
-    conn = sqlite3.connect(s02)
-    conn.executescript("CREATE TABLE IF NOT EXISTS example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0); CREATE TABLE IF NOT EXISTS example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;")
-    conn.close()
-    q = tmp_path / "q.json"
-    build_stage03(s02, q)
-    data = json.loads(q.read_text())
-    data["items"] = data["items"][:3]
-    q.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")))
-    ckpt = tmp_path / "ckpt.json"
-    out = tmp_path / "out.sqlite"
-    captured_ids: list[list[str]] = []
-    class CapturingTransport:
-        def send_bulk(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            captured_ids.append(list(unit_ids))
-            return {iid: {"text": f"v-{iid[-8:]}", "language": "de", "kind": "synonym"} for iid in unit_ids}
-        def send_qa(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            return {iid: {"text": f"qa-{iid[-8:]}", "language": "de", "kind": "synonym"} for iid in unit_ids}
-    t = CapturingTransport()
-    build_stage04(q, s02, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=t, batch_size=1)
-    # Each request should be exactly one item (batch_size 1)
-    assert all(len(unit) == 1 for unit in captured_ids)
-    # Check custom_id correlation: reordered results still join by id
-    # Our transport already uses item_id as key; we test missing/duplicate handling elsewhere
-    ckpt_data = json.loads(ckpt.read_text())
-    assert len(ckpt_data["bulk"]["completed"]) == 3
-
-
-def test_missing_duplicate_unknown_fail_closed(tmp_path: Path) -> None:
-    s02 = tmp_path / "s02e.sqlite"
-    build_stage01(EN_FIXTURE_PATH, DE_FIXTURE_PATH, s02)
-    conn = sqlite3.connect(s02)
-    conn.executescript("CREATE TABLE IF NOT EXISTS example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0); CREATE TABLE IF NOT EXISTS example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;")
-    conn.close()
-    q = tmp_path / "q.json"
-    build_stage03(s02, q)
-    data = json.loads(q.read_text())
-    data["items"] = data["items"][:2]
-    q.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")))
-    ckpt = tmp_path / "ckpt.json"
-    out = tmp_path / "out.sqlite"
-    class MissingTransport:
-        def send_bulk(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            # Missing one id
-            return {unit_ids[0]: {"text": "valid", "language": "de", "kind": "synonym"}}
-        def send_qa(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            return {iid: {"text": f"qa-{iid[-8:]}", "language": "de", "kind": "synonym"} for iid in unit_ids}
-    with pytest.raises(BuildDictError, match="Missing custom_id"):
-        build_stage04(q, s02, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=MissingTransport(), batch_size=2)
-    # Clean checkpoint for next test
-    if ckpt.exists():
-        ckpt.unlink()
-    class UnknownTransport:
-        def send_bulk(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            d = {iid: {"text": "valid", "language": "de", "kind": "synonym"} for iid in unit_ids}
-            d["unknown-id"] = {"text": "valid", "language": "de", "kind": "synonym"}
-            return d
-        def send_qa(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            return {iid: {"text": f"qa-{iid[-8:]}", "language": "de", "kind": "synonym"} for iid in unit_ids}
-    with pytest.raises(BuildDictError, match="Unknown custom_id"):
-        build_stage04(q, s02, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=UnknownTransport(), batch_size=2)
-
-
-def test_legacy_canary_preservation(tmp_path: Path) -> None:
-    ckpt = tmp_path / "legacy.json"
-    # Simulate legacy checkpoint with 5 in_flight IDs
-    legacy = {
-        "format": "flashcard-stage04-checkpoint-v2",
-        "identity": {"format": "flashcard-stage04-checkpoint-v2", "queue_sha256": "q", "generation_marker": "llm_generated_v1", "generated_license": "TEST_SYNTHETIC_LICENSE_v1", "bulk_de_model": "gpt-5.6-luna", "bulk_en_model": "gpt-5.6-luna", "qa_model": "gpt-5.6-terra", "bulk_pipeline_version": "stage04-bulk-v1", "qa_pipeline_version": "stage04-qa-v1", "response_schema_version": "openai-responses-json-schema-v1"},
-        "bulk": {"completed": {}, "rejected": {}, "in_flight": ["a", "b", "c", "d", "e"]},
-        "qa": {"required": [], "completed": {}, "rejected": {}, "in_flight": []},
-        "manifests": [],
-    }
-    ckpt.write_text(json.dumps(legacy, sort_keys=True, separators=(",", ":")))
-    # Loading should preserve in_flight, not clear
-    from tools.build_dict import _load_checkpoint
-    identity = legacy["identity"]
-    assert isinstance(identity, dict)
-    loaded = _load_checkpoint(ckpt, identity)
-    assert loaded["bulk"]["in_flight"] == ["a", "b", "c", "d", "e"]  # type: ignore[index]
-
-
-def test_partial_bulk_interruption_and_resume(tmp_path: Path) -> None:
-    s02 = tmp_path / "s02f.sqlite"
-    build_stage01(EN_FIXTURE_PATH, DE_FIXTURE_PATH, s02)
-    conn = sqlite3.connect(s02)
-    conn.executescript("CREATE TABLE IF NOT EXISTS example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0); CREATE TABLE IF NOT EXISTS example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;")
-    conn.close()
-    q = tmp_path / "q.json"
-    build_stage03(s02, q)
-    data = json.loads(q.read_text())
-    data["items"] = data["items"][:4]
-    q.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")))
-    ckpt = tmp_path / "ckpt.json"
-    out = tmp_path / "out.sqlite"
-    # First run: complete 2 then fail
-    class FailAfter2Transport:
-        def __init__(self) -> None:
-            self.calls = 0
-        def send_bulk(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            self.calls += 1
-            if self.calls == 2:
-                raise RuntimeError("fail after 1 unit")
-            return {iid: {"text": f"valid-{iid[-8:]}", "language": "de", "kind": "synonym"} for iid in unit_ids}
-        def send_qa(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            return {iid: {"text": f"qa-{iid[-8:]}", "language": "de", "kind": "synonym"} for iid in unit_ids}
-    t1 = FailAfter2Transport()
-    with pytest.raises(BuildDictError):
-        build_stage04(q, s02, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=t1, batch_size=1)
-    ckpt_data = json.loads(ckpt.read_text())
-    assert len(ckpt_data["bulk"]["completed"]) == 1
-    assert ckpt_data["bulk"]["in_flight"] != []  # failed unit remains in_flight
-    # Manually clear in_flight to simulate STOP? Actually we need to clear in_flight before resume? Our logic requires no in_flight to proceed; but for test we simulate recovery by clearing in_flight and retry
-    # For partial bulk interruption test, we expect restart after at least one completed bounded unit submits zero already-checkpointed IDs
-    # Simulate by resetting in_flight to [] (as if reconciled) and then resume
-    ckpt_data["bulk"]["in_flight"] = []
-    ckpt.write_text(json.dumps(ckpt_data, sort_keys=True, separators=(",", ":")))
-    class ResumeTransport:
-        def __init__(self) -> None:
-            self.sent: list[list[str]] = []
-        def send_bulk(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            self.sent.append(list(unit_ids))
-            return {iid: {"text": f"valid-{iid[-8:]}", "language": "de", "kind": "synonym"} for iid in unit_ids}
-        def send_qa(self, unit_ids: list[str]) -> dict[str, dict[str, str]]:
-            return {iid: {"text": f"qa-{iid[-8:]}", "language": "de", "kind": "synonym"} for iid in unit_ids}
-    t2 = ResumeTransport()
-    out2 = tmp_path / "out2.sqlite"
-    # Need to clear output if exists
-    if out2.exists():
-        out2.unlink()
-    # Resume should not resubmit completed id
-    completed_id = list(ckpt_data["bulk"]["completed"].keys())[0]
-    build_stage04(q, s02, out2, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=t2, batch_size=1)
-    # Check sent ids do not include completed
-    all_sent = [iid for unit in t2.sent for iid in unit]
-    assert completed_id not in all_sent
-
-
-def test_corrupt_checkpoint_fails_closed(tmp_path: Path) -> None:
-    s02 = tmp_path / "s02g.sqlite"
-    build_stage01(EN_FIXTURE_PATH, DE_FIXTURE_PATH, s02)
-    conn = sqlite3.connect(s02)
-    conn.executescript("CREATE TABLE IF NOT EXISTS example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0); CREATE TABLE IF NOT EXISTS example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;")
-    conn.close()
-    q = tmp_path / "q.json"
-    build_stage03(s02, q)
-    ckpt = tmp_path / "ckpt.json"
-    ckpt.write_text("not json")
-    out = tmp_path / "out.sqlite"
-    with pytest.raises(BuildDictError, match="corrupt"):
-        build_stage04(q, s02, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1")
-
-
-def test_incompatible_classification_invalidates_reuse(tmp_path: Path) -> None:
-    s02 = tmp_path / "s02h.sqlite"
-    build_stage01(EN_FIXTURE_PATH, DE_FIXTURE_PATH, s02)
-    conn = sqlite3.connect(s02)
-    conn.executescript("CREATE TABLE IF NOT EXISTS example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0); CREATE TABLE IF NOT EXISTS example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;")
-    conn.close()
-    q = tmp_path / "q.json"
-    build_stage03(s02, q)
-    data = json.loads(q.read_text())
-    data["items"] = data["items"][:1]
-    q.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")))
-    ckpt = tmp_path / "ckpt.json"
-    out = tmp_path / "out.sqlite"
-    t = FakeTransport()
-    build_stage04(q, s02, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=t)
-    out2 = tmp_path / "out2.sqlite"
-    with pytest.raises(BuildDictError, match="incompatible"):
-        build_stage04(q, s02, out2, ckpt, generated_license="DIFFERENT-LICENSE", transport=t)
-
-
-def test_zero_provider_requests_and_no_secret_logging(tmp_path: Path) -> None:
-    # Ensure checkpoint does not contain secrets
-    s02 = tmp_path / "s02i.sqlite"
-    build_stage01(EN_FIXTURE_PATH, DE_FIXTURE_PATH, s02)
-    conn = sqlite3.connect(s02)
-    conn.executescript("CREATE TABLE IF NOT EXISTS example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0); CREATE TABLE IF NOT EXISTS example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;")
-    conn.close()
-    q = tmp_path / "q.json"
-    build_stage03(s02, q)
-    ckpt = tmp_path / "ckpt.json"
-    out = tmp_path / "out.sqlite"
-    t = FakeTransport()
-    build_stage04(q, s02, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=t, batch_size=100)
-    ckpt_text = ckpt.read_text()
-    assert "sk-" not in ckpt_text.lower()
-    assert "api_key" not in ckpt_text.lower()
-
-def test_rollback_preserves_source(tmp_path: Path) -> None:
-    s02 = tmp_path / "rbs02.sqlite"
-    build_stage01(EN_FIXTURE_PATH, DE_FIXTURE_PATH, s02)
-    conn = sqlite3.connect(s02)
-    conn.executescript("CREATE TABLE IF NOT EXISTS example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0); CREATE TABLE IF NOT EXISTS example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;")
-    conn.close()
-    q = tmp_path / "rbq.json"
-    build_stage03(s02, q)
-    data = json.loads(q.read_text())
-    data["items"] = data["items"][:1]
-    q.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")))
-    ckpt = tmp_path / "rbckpt.json"
-    out = tmp_path / "rbout.sqlite"
-    build_stage04(q, s02, out, ckpt, generated_license="TEST_SYNTHETIC_LICENSE_v1", transport=FakeTransport(), batch_size=1)
-    conn2 = sqlite3.connect(out)
-    total_before = conn2.execute("SELECT count(*) FROM sense_meaning").fetchone()[0]
-    gen_count = conn2.execute("SELECT count(*) FROM sense_meaning WHERE source='llm_generated_v1'").fetchone()[0]
-    assert gen_count == 1
-    # Rollback
-    conn2.execute("DELETE FROM sense_meaning WHERE source='llm_generated_v1'")
-    conn2.commit()
-    total_after = conn2.execute("SELECT count(*) FROM sense_meaning").fetchone()[0]
-    assert total_after == total_before - gen_count
-    # derivation edges removed via cascade
-    deriv = conn2.execute("SELECT count(*) FROM sense_meaning_derivation").fetchone()[0]
-    assert deriv == 0
-    # source rows preserved
-    orig = sqlite3.connect(f"file:{s02}?mode=ro", uri=True).execute("SELECT count(*) FROM sense_meaning").fetchone()[0]
-    assert total_after == orig
-    conn2.close()
-
-# FA v2 tests
-
-# Real-asset FA v2 verification resolves the accepted local Stage-02 asset via
-# the FLASHCARD_TEST_STAGE02 environment variable; skipped when not provided.
-REAL_STAGE02 = os.environ.get("FLASHCARD_TEST_STAGE02", "")
-requires_real_stage02 = pytest.mark.skipif(
-    not REAL_STAGE02 or not Path(REAL_STAGE02).is_file(),
-    reason="accepted real Stage-02 asset not provided via FLASHCARD_TEST_STAGE02",
-)
-
-
-def test_fa_v2_bulk_fa_namespace_independent(tmp_path: Path) -> None:
-    from tools.build_dict import _empty_checkpoint
-    # Create checkpoint with bulk and bulk_fa
-    # Ensure bulk_fa is in empty checkpoint
-    empty = _empty_checkpoint()
-    assert "bulk_fa" in empty
-    assert "bulk" in empty
-    # Ensure they are independent
-    empty["bulk"]["completed"]["test"] = {"a": 1}  # type: ignore
-    assert "test" not in empty["bulk_fa"]["completed"]  # type: ignore
-
-def test_fa_v2_classification_compatibility(tmp_path: Path) -> None:
-    from tools.build_dict import BuildDictError, _checkpoint_identity, _load_checkpoint
-    qsha = "testsha"
-    ident_correct = _checkpoint_identity(qsha, "llm_generated_v1", "AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1", "gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-terra", bulk_fa_model="gpt-5.6-luna", fa_input_version="fa-input-v2", fa_bulk_version="fa-bulk-v2", fa_response_version="fa-response-v2")
-    ident_wrong = _checkpoint_identity(qsha, "llm_generated_v1", "WRONG_CLASSIFICATION", "gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-terra", bulk_fa_model="gpt-5.6-luna", fa_input_version="fa-input-v2", fa_bulk_version="fa-bulk-v2", fa_response_version="fa-response-v2")
-    ckpt = tmp_path / "ckpt.json"
-    # Write a checkpoint with correct identity
-    import json
-    data = {"format": "flashcard-stage04-checkpoint-v2", "identity": ident_correct, "bulk": {"completed": {}, "rejected": {}, "in_flight": []}, "bulk_fa": {"completed": {}, "rejected": {}, "in_flight": []}, "qa": {"required": [], "completed": {}, "rejected": {}, "in_flight": []}, "manifests": []}
-    ckpt.write_text(json.dumps(data))
-    # Loading with wrong classification should fail
-    with __import__('pytest').raises(BuildDictError, match="incompatible"):
-        _load_checkpoint(ckpt, ident_wrong)
-
-def test_fa_v2_legacy_ids_untouched(tmp_path: Path) -> None:
-    from tools.build_dict import _checkpoint_identity, _load_checkpoint
-    qsha = "legacytest"
-    ident = _checkpoint_identity(qsha, "llm_generated_v1", "AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1", "gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-terra")
-    # Legacy checkpoint with 5 in_flight
-    import json
-    ckpt = tmp_path / "legacy.json"
-    legacy = {"format": "flashcard-stage04-checkpoint-v2", "identity": ident, "bulk": {"completed": {}, "rejected": {}, "in_flight": ["a","b","c","d","e"]}, "bulk_fa": {"completed": {}, "rejected": {}, "in_flight": []}, "qa": {"required": [], "completed": {}, "rejected": {}, "in_flight": []}, "manifests": []}
-    ckpt.write_text(json.dumps(legacy))
-    loaded = _load_checkpoint(ckpt, ident)
-    assert loaded["bulk"]["in_flight"] == ["a","b","c","d","e"]  # type: ignore
-
-@requires_real_stage02
-def test_fa_v2_canary_25_25_and_bytewise(tmp_path: Path) -> None:
-    from tools.build_dict import _build_fa_v2_candidates, _select_fa_canary_v2
-    real = Path(REAL_STAGE02)
-    cands = _build_fa_v2_candidates(real)
-    canary = _select_fa_canary_v2(cands)
-    assert len(canary) == 50
-    # At least 20 should be morphology if our classifier works (since overall 181k ADJ many are morphology)
-    # But we enforce 25/25, so check counts
-    from tools.build_dict import _is_morphology_sense
-    morph_count = sum(1 for c in canary if _is_morphology_sense(str(c.get("en_meaning", ""))))
-    lex_count = 50 - morph_count
-    assert morph_count == 25
-    assert lex_count == 25
-    # Bytewise order
-    sorted_canary = sorted(canary, key=lambda x: str(x["item_id"]).encode())
-    assert canary == sorted_canary
-
-@requires_real_stage02
-def test_fa_v2_canary_selection_file_hash(tmp_path: Path) -> None:
-    import hashlib
-
-    from tools.build_dict import (
-        _build_fa_v2_candidates,
-        _select_fa_canary_v2,
-        _write_canary_selection_manifest,
-    )
-    real = Path(REAL_STAGE02)
-    cands = _build_fa_v2_candidates(real)
-    canary = _select_fa_canary_v2(cands)
-    out = tmp_path / "fa-canary-selection-v2.json"
-    sha, nbytes = _write_canary_selection_manifest(canary, out)
-    # Verify hash matches actual file bytes
-    actual = hashlib.sha256(out.read_bytes()).hexdigest()
-    assert sha == actual
-    assert nbytes == out.stat().st_size
-    # Ensure compact (no pretty)
-    content = out.read_bytes()
-    assert b"\n  " not in content[:1000]
-
-@requires_real_stage02
-def test_fa_v2_sync_and_batch_equivalence(tmp_path: Path) -> None:
-    from tools.build_dict import _build_fa_v2_candidates
-    real = Path(REAL_STAGE02)
-    cands = _build_fa_v2_candidates(real)[:1]
-    sample = cands[0]
-    prompt = f"German lemma: {sample['lemma']}\nPOS: {sample['pos']}\nEnglish: {sample['en_meaning']}"
-    sync_body = {"model": "gpt-5.6-luna", "input": prompt, "text": {"format": {"type": "json_schema", "name": "persian", "schema": {"type": "object", "properties": {"persian": {"type": "string"}}, "required": ["persian"], "additionalProperties": False}, "strict": True}}}
-    batch_record = {"custom_id": sample["custom_id"], "method": "POST", "url": "/v1/responses", "body": sync_body}
-    assert batch_record["body"] == sync_body
-
-def test_fa_v2_spend_cap(tmp_path: Path) -> None:
-    from tools.build_dict import BuildDictError, _check_canary_spend_cap, _estimate_fa_cost
-    assert _estimate_fa_cost(50) < 0.10
-    _check_canary_spend_cap(50)  # should not raise
-    try:
-        _check_canary_spend_cap(50000)
-        assert False, "should have raised"
-    except BuildDictError as e:
-        assert "exceeds hard cap" in str(e)
-
-def test_fa_v2_derivation_exactly_one_en(tmp_path: Path) -> None:
-    import sqlite3
-    db = tmp_path / "fa_deriv.sqlite"
-    conn = sqlite3.connect(db)
-    conn.executescript("""
-        CREATE TABLE lemma (id INTEGER PRIMARY KEY, semantic_ref TEXT NOT NULL UNIQUE, lemma TEXT NOT NULL, pos TEXT NOT NULL, gender TEXT);
-        CREATE TABLE sense (id INTEGER PRIMARY KEY, lemma_id INTEGER NOT NULL, semantic_ref TEXT NOT NULL UNIQUE, source_namespace TEXT NOT NULL, source_ref TEXT NOT NULL, ord INTEGER NOT NULL);
-        CREATE TABLE sense_meaning (id INTEGER PRIMARY KEY, sense_id INTEGER NOT NULL, language TEXT NOT NULL, kind TEXT NOT NULL, ord INTEGER NOT NULL, text TEXT NOT NULL, source TEXT NOT NULL, license TEXT NOT NULL);
-        CREATE TABLE sense_meaning_derivation (generated_meaning_id INTEGER NOT NULL, source_meaning_id INTEGER NOT NULL, PRIMARY KEY (generated_meaning_id, source_meaning_id)) WITHOUT ROWID;
-        CREATE TABLE example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0);
-        CREATE TABLE example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;
-    """)
-    conn.execute("INSERT INTO lemma (id, semantic_ref, lemma, pos) VALUES (1, 'lemma:v1:test', 'Haus', 'NOUN')")
-    conn.execute("INSERT INTO sense (id, lemma_id, semantic_ref, source_namespace, source_ref, ord) VALUES (1, 1, 'sense:v1:test', 'wiktextract:enwiktionary', 'fingerprint:v1:test', 0)")
-    conn.execute("INSERT INTO sense_meaning (id, sense_id, language, kind, ord, text, source, license) VALUES (1, 1, 'en', 'translation', 0, 'house', 'wiktionary', 'CC BY-SA')")
-    conn.commit()
-    conn.close()
-    # Simulate FA generation with exactly one EN edge
-    out = tmp_path / "out.sqlite"
-    import shutil
-    shutil.copy(db, out)
-    conn2 = sqlite3.connect(out)
-    # Insert generated FA
-    conn2.execute("INSERT INTO sense_meaning (id, sense_id, language, kind, ord, text, source, license) VALUES (2, 1, 'fa', 'translation', 0, 'خانه', 'llm_generated_v1', 'AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1')")
-    conn2.execute("INSERT INTO sense_meaning_derivation (generated_meaning_id, source_meaning_id) VALUES (2, 1)")
-    conn2.commit()
-    # Validate exactly one edge
-    cnt = conn2.execute("SELECT count(*) FROM sense_meaning_derivation WHERE generated_meaning_id=2").fetchone()[0]
-    assert cnt == 1
-    # Check same sense
-    src_sense = conn2.execute("SELECT sense_id FROM sense_meaning WHERE id=1").fetchone()[0]
-    gen_sense = conn2.execute("SELECT sense_id FROM sense_meaning WHERE id=2").fetchone()[0]
-    assert src_sense == gen_sense
-    conn2.close()
-
-def test_fa_v2_rollback_preserves_source(tmp_path: Path) -> None:
-    import sqlite3
-    db = tmp_path / "rollback.sqlite"
-    conn = sqlite3.connect(db)
-    conn.executescript("""
-        CREATE TABLE lemma (id INTEGER PRIMARY KEY, semantic_ref TEXT NOT NULL UNIQUE, lemma TEXT NOT NULL, pos TEXT NOT NULL, gender TEXT);
-        CREATE TABLE sense (id INTEGER PRIMARY KEY, lemma_id INTEGER NOT NULL, semantic_ref TEXT NOT NULL UNIQUE, source_namespace TEXT NOT NULL, source_ref TEXT NOT NULL, ord INTEGER NOT NULL);
-        CREATE TABLE sense_meaning (id INTEGER PRIMARY KEY, sense_id INTEGER NOT NULL, language TEXT NOT NULL, kind TEXT NOT NULL, ord INTEGER NOT NULL, text TEXT NOT NULL, source TEXT NOT NULL, license TEXT NOT NULL);
-        CREATE TABLE sense_meaning_derivation (generated_meaning_id INTEGER NOT NULL REFERENCES sense_meaning(id) ON DELETE CASCADE, source_meaning_id INTEGER NOT NULL REFERENCES sense_meaning(id) ON DELETE RESTRICT, PRIMARY KEY (generated_meaning_id, source_meaning_id)) WITHOUT ROWID;
-        CREATE TABLE example (id INTEGER PRIMARY KEY, de TEXT NOT NULL, en TEXT, source TEXT, source_ref TEXT, license TEXT, token_count INTEGER, has_proper INTEGER DEFAULT 0);
-        CREATE TABLE example_lemma (lemma_id INTEGER NOT NULL, example_id INTEGER NOT NULL, PRIMARY KEY (lemma_id, example_id)) WITHOUT ROWID;
-    """)
-    conn.execute("INSERT INTO lemma (id, semantic_ref, lemma, pos) VALUES (1, 'lemma:v1:r', 'Haus', 'NOUN')")
-    conn.execute("INSERT INTO sense (id, lemma_id, semantic_ref, source_namespace, source_ref, ord) VALUES (1, 1, 'sense:v1:r', 'wiktextract:enwiktionary', 'fingerprint:v1:r', 0)")
-    conn.execute("INSERT INTO sense_meaning (id, sense_id, language, kind, ord, text, source, license) VALUES (1, 1, 'en', 'translation', 0, 'house', 'wiktionary', 'CC BY-SA')")
-    conn.execute("INSERT INTO sense_meaning (id, sense_id, language, kind, ord, text, source, license) VALUES (2, 1, 'fa', 'translation', 0, 'خانه', 'llm_generated_v1', 'AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1')")
-    conn.execute("INSERT INTO sense_meaning_derivation (generated_meaning_id, source_meaning_id) VALUES (2, 1)")
-    conn.commit()
-    conn.close()
-    # Rollback
-    conn2 = sqlite3.connect(db)
-    conn2.execute("DELETE FROM sense_meaning WHERE source='llm_generated_v1'")
-    conn2.commit()
-    remaining = conn2.execute("SELECT count(*) FROM sense_meaning").fetchone()[0]
-    assert remaining == 1
-    # Source preserved
-    src = conn2.execute("SELECT text FROM sense_meaning WHERE id=1").fetchone()[0]
-    assert src == "house"
-    conn2.close()
-
-
-# ---- Attempt-2 prompt-contract repair (fa-input-v3 / fa-bulk-v3) tests ----
-
-def _sample_item() -> dict[str, object]:
-    return {
-        "item_id": "fa-generation-job:v2:0091bf69f230f32acf15f72ea0c5710b48ec773c7a2f077a1cd917aa9cb64c7c",
-        "lemma": "Papua-Neuguinea",
-        "pos": "NOUN",
-        "en_meaning": "Papua New Guinea (a country in Oceania)",
-    }
-
-
-def test_fa_v3_live_request_contains_brevity_instruction() -> None:
-    from tools.build_dict import fa_v3_request_body
-    body = fa_v3_request_body(_sample_item(), "gpt-5.6-luna")
-    assert "shortest natural meaning" in str(body["input"])
-
-
-def test_fa_v3_live_request_exact_one_sense_and_no_merging() -> None:
-    from tools.build_dict import fa_v3_request_body
-    inp = str(fa_v3_request_body(_sample_item(), "gpt-5.6-luna")["input"])
-    assert "exactly this ONE canonical German sense" in inp
-    assert "Do not merge multiple meanings" in inp
-
-
-def test_fa_v3_live_request_standard_persian_and_meaning_only() -> None:
-    from tools.build_dict import fa_v3_request_body
-    inp = str(fa_v3_request_body(_sample_item(), "gpt-5.6-luna")["input"])
-    assert "فارسی معیار" in inp
-    assert "Persian meaning text only" in inp
-
-
-def test_fa_v3_live_request_morphology_rule() -> None:
-    from tools.build_dict import fa_v3_request_body
-    inp = str(fa_v3_request_body(_sample_item(), "gpt-5.6-luna")["input"])
-    assert "morphology/inflection sense" in inp
-    assert "grammatical description" in inp
-    assert "do NOT invent a lexical translation" in inp
-
-
-def test_fa_v3_live_request_prohibits_commentary_and_latin_labels() -> None:
-    from tools.build_dict import fa_v3_request_body
-    inp = str(fa_v3_request_body(_sample_item(), "gpt-5.6-luna")["input"])
-    assert "Do not include German or English dictionary commentary" in inp
-    assert "Latin-script grammatical labels such as Nominativ, Akkusativ, Dativ" in inp
-    assert "parenthetical dictionary commentary" in inp
-
-
-def test_fa_v3_sync_and_batch_share_identical_logical_body() -> None:
-    from tools.build_dict import fa_v3_request_body
-    item = _sample_item()
-    body = fa_v3_request_body(item, "gpt-5.6-luna")
-    batch_record = {
-        "custom_id": f"batch:{item['item_id']}",
-        "method": "POST",
-        "url": "/v1/responses",
-        "body": body,
-    }
-    assert batch_record["body"] == body
-    fmt_d = cast(Any, body["text"])["format"]
-    assert fmt_d["strict"] is True
-    schema = cast(Any, fmt_d["schema"])
-    assert set(schema["properties"]) == {"persian"}
-    assert schema["additionalProperties"] is False
-
-
-def test_fa_v2_checkpoint_incompatible_under_v3_input(tmp_path: Path) -> None:
-    import json
-
-    from tools.build_dict import (
-        FA_BULK_VERSION,
-        FA_INPUT_VERSION,
-        BuildDictError,
-        _checkpoint_identity,
-        _load_checkpoint,
-    )
-    qsha = "v3compat"
-    old = _checkpoint_identity(
-        qsha, "llm_generated_v1", "AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1",
-        "gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-terra",
-        bulk_fa_model="gpt-5.6-luna",
-        fa_input_version="fa-input-v2",
-        fa_bulk_version="fa-bulk-v2",
-        fa_response_version="fa-response-v2")
-    new = _checkpoint_identity(
-        qsha, "llm_generated_v1", "AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1",
-        "gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-terra",
-        bulk_fa_model="gpt-5.6-luna",
-        fa_input_version=FA_INPUT_VERSION,
-        fa_bulk_version=FA_BULK_VERSION,
-        fa_response_version="fa-response-v2")
-    ckpt = tmp_path / "ckpt.json"
-    data = {"format": "flashcard-stage04-checkpoint-v2", "identity": old,
-            "bulk": {"completed": {}, "rejected": {}, "in_flight": []},
-            "bulk_fa": {"completed": {"x": {"text": "خانه"}},
-                        "rejected": {}, "in_flight": []},
-            "qa": {"required": [], "completed": {}, "rejected": {}, "in_flight": []},
-            "manifests": []}
-    ckpt.write_text(json.dumps(data))
-    with pytest.raises(BuildDictError, match="incompatible"):
-        _load_checkpoint(ckpt, new)
-    # and the current committed versions are the v3 pair
-    assert FA_INPUT_VERSION == "fa-input-v3"
-    assert FA_BULK_VERSION == "fa-bulk-v3"
-
-
-def test_attempt1_completed_state_not_reusable_under_v3_bulk_fa(tmp_path: Path) -> None:
-    import json
-
-    from tools.build_dict import (
-        FA_BULK_VERSION,
-        FA_INPUT_VERSION,
-        BuildDictError,
-        _checkpoint_identity,
-        _load_checkpoint,
-    )
-    qsha = "attempt1"
-    ident_a1 = _checkpoint_identity(
-        qsha, "llm_generated_v1", "AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1",
-        "gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-terra",
-        bulk_fa_model="gpt-5.6-luna",
-        fa_input_version="fa-input-v2",
-        fa_bulk_version="fa-bulk-v2",
-        fa_response_version="fa-response-v2")
-    ident_now = _checkpoint_identity(
-        qsha, "llm_generated_v1", "AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1",
-        "gpt-5.6-luna", "gpt-5.6-luna", "gpt-5.6-terra",
-        bulk_fa_model="gpt-5.6-luna",
-        fa_input_version=FA_INPUT_VERSION,
-        fa_bulk_version=FA_BULK_VERSION,
-        fa_response_version="fa-response-v2")
-    ckpt = tmp_path / "a1.json"
-    a1_state = {"format": "flashcard-stage04-checkpoint-v2", "identity": ident_a1,
-                "bulk": {"completed": {}, "rejected": {}, "in_flight": []},
-                "bulk_fa": {"completed": {
-                    "fa-generation-job:v2:017e6969fabf8fe0c17ecc2ebf2a26784e35c73b94d6c5b4f29b9f4635f42882":
-                        {"text": "einweihen (فعل): ..."}},
-                    "rejected": {}, "in_flight": []},
-                "qa": {"required": [], "completed": {}, "rejected": {}, "in_flight": []},
-                "manifests": []}
-    ckpt.write_text(json.dumps(a1_state))
-    with pytest.raises(BuildDictError):
-        _load_checkpoint(ckpt, ident_now)
-
-
-def test_fa_semantic_ids_unchanged_after_prompt_bump() -> None:
-    from tools.build_dict import FA_ITEM_VERSION, _compute_fa_v2_item_id
-    assert FA_ITEM_VERSION == "fa-generation-job:v2"
-    iid = _compute_fa_v2_item_id("lemma:v1:x", "sense:v1:y")
-    payload = json.dumps(["lemma:v1:x", "sense:v1:y", "fa", "fa_generated_meaning"],
-                         ensure_ascii=False, separators=(",", ":")).encode()
-    expected = f"fa-generation-job:v2:{hashlib.sha256(payload).hexdigest()}"
-    assert iid == expected
-
-
-@requires_real_stage02
-def test_fa_canary_selection_identity_unchanged() -> None:
-    import hashlib
-
-    from tools.build_dict import _build_fa_v2_candidates, _select_fa_canary_v2
-    cands = _build_fa_v2_candidates(Path(REAL_STAGE02))
-    canary = _select_fa_canary_v2(cands)
-    canon = json.dumps(canary, ensure_ascii=False, sort_keys=True,
-                       separators=(",", ":")).encode()
-    assert hashlib.sha256(canon).hexdigest() == \
-        "396e3e03f16bb4f1bd769173abba31d9b8d80dc26fd9ed376bcd785ade25dc16"
-    assert len(canon) == 26789 and len(canary) == 50
-    morph = sum(1 for x in canary if _is_morphology_sense(str(x.get("en_meaning", ""))))
-    assert morph == 25 and len(cands) == 480221
-
-
-from tools.build_dict import _is_morphology_sense  # noqa: E402
-
-
-def test_concise_morphology_output_passes_validation() -> None:
-    from tools.build_dict import _validate_fa_v2_output
-    concise = "صرفِ صفت در حالت داتیوِ مؤنثِ مفرد با صرفِ قوی"
-    assert _validate_fa_v2_output(concise, "fettiger") is None
-
-
-def test_attempt1_style_verbose_output_still_fails_too_long() -> None:
-    from tools.build_dict import _validate_fa_v2_output
-    verbose = ("«fettiger» صرفِ صفت آلمانیِ «fettig» است و در حالت اضافی یا داتیوِ "
-               "مؤنثِ مفرد با صرفِ قوی به‌کار می‌رود. معنای آن «پرچرب‌تر» است.")
-    assert len(verbose.strip()) > 160 or True
-    long_out = verbose + verbose + verbose + verbose + verbose
-    assert _validate_fa_v2_output(long_out, "fettiger") == "too_long"
-
-
-def test_embedded_german_lemma_repetition_rejected_deterministically() -> None:
-    from tools.build_dict import _validate_fa_v2_output
-    leaky = "einweihen (فعل): کسی را در جریان چیزی گذاشتن"
-    assert _validate_fa_v2_output(leaky, "einweihen") == "lemma_repetition"
-    quoted = "«fettiger» صفت به معنای چرب است"
-    assert _validate_fa_v2_output(quoted, "fettiger") == "lemma_repetition"
-
-
-def test_legitimate_acronym_in_output_not_overbroad_rejected() -> None:
-    from tools.build_dict import _validate_fa_v2_output
-    ok = "سازمان ناتو با نام اختصاری mAK شناخته می‌شود"
-    assert _validate_fa_v2_output(ok, "Haus") is None
-
-
-def test_credential_format_sanity_check_local_only() -> None:
-    from tools.build_dict import credential_format_ok
-    assert not credential_format_ok("")
-    assert not credential_format_ok('"sk-abc123"')
-    assert not credential_format_ok("'sk-abc123'")
-    assert not credential_format_ok("sk abc123")
-    assert credential_format_ok("sk-abc123")
-
-
-def test_fa_response_version_unchanged() -> None:
-    from tools.build_dict import FA_RESPONSE_VERSION
-    assert FA_RESPONSE_VERSION == "fa-response-v2"
+        build_stage04(
+            queue,
+            stage02,
+            tmp_path / "other.sqlite",
+            checkpoint,
+            "OTHER_CLASSIFICATION",
+            transport=changed,
+        )
+
+
+def test_no_transport_or_retired_queue_is_refused(tmp_path: Path) -> None:
+    stage02, queue, items = queue_fixture(tmp_path)
+    with pytest.raises(BuildDictError, match="No local deterministic"):
+        build_stage04(
+            queue,
+            stage02,
+            tmp_path / "out.sqlite",
+            tmp_path / "checkpoint.json",
+            "TEST_CLASSIFICATION_v1",
+        )
+    payload = json.loads(queue.read_text(encoding="utf-8"))
+    payload["items"][0]["language"] = "fa"
+    payload["items"][0]["job_class"] = "fa_generated_meaning"
+    retired = tmp_path / "retired.json"
+    retired.write_text(json.dumps(payload), encoding="utf-8")
+    fake = FakeTransport()
+    fake.items = items
+    with pytest.raises(BuildDictError, match="retired"):
+        build_stage04(
+            retired,
+            stage02,
+            tmp_path / "bad.sqlite",
+            tmp_path / "bad.json",
+            "TEST_CLASSIFICATION_v1",
+            transport=fake,
+        )

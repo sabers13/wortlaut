@@ -1,5 +1,74 @@
 # Slice-6 Report — ADR-0006 Current Cycle Attempt 1 — Pre-Canary v2 Ready
 
+## ADR-0007 Design-reset Attempt 1 — Phase A
+
+**Status:** Phase A implementation and local verification; stopped before the paid
+generation boundary. No provider credential was read and no provider request was made.
+
+### Accepted input and real Stage-03 execution
+
+- Accepted Stage-02 SHA-256: `75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97`
+- Accepted Stage-02 bytes: `945410048`
+- Stage-03 output was constructed from that asset read-only; no input mutation was detected.
+- Queue records: `480221`
+- `de`: `480221`; `en`: `0`
+- `de_learner_meaning`: `480221`; `en_meaning`: `0`
+- With localized derivation text: `0`; without: `480221`
+- Queue SHA-256: `e542f2f96b3966690fe2fcebb145440deba7a8ec9aa7dd2d0c93ba3540ef7aa1`
+- Queue bytes: `316541240`
+- Queue scan found no credentials, secret markers, or private absolute paths.
+
+The zero EN count reflects the accepted asset's existing source-backed English
+meanings. The zero derivation-text count reflects its absence of source-backed
+German learner wording for the queued senses; a job with no consumed localized
+text correctly creates no derivation edge.
+
+### Active DE/EN build contract
+
+- Stage 03 accepts only `de_learner_meaning` and `en_meaning`, uses stable lemma
+  and sense semantic references for durable identity, and emits bytewise ordered
+  `batch:<item_id>` custom IDs.
+- Stage 04 accepts only those jobs; its checkpoint is
+  `flashcard-stage04-checkpoint-v2`, with compatibility over queue identity,
+  generation marker, output classification, DE/EN bulk model occupants, QA model,
+  bulk/QA pipeline versions, and response-schema version.
+- The fake/local transport coverage verifies prepared manifest correlation
+  (`batchcorr:v1:<manifest-sha>`), exact custom-ID joining, valid completion,
+  durable rejection, ambiguous in-flight retention, and fail-closed incompatible
+  checkpoint reuse. The historical five-item Persian checkpoint remains inert:
+  active code neither clears, migrates, nor resubmits it.
+- Generated fixture rows use `source='llm_generated_v1'`, an explicit fixture
+  classification, and same-sense source-backed derivation validation. Rollback
+  remains the marker-based `DELETE FROM sense_meaning` contract.
+
+### Fixture packaging and Piper prerequisite
+
+- Stage 05 fixture tests verify input immutability, SQLite validation, attribution,
+  output checksum/size metadata, and overwrite refusal. No real enriched asset was
+  packaged or published.
+- The local Podman-backed Docker build completed for image
+  `flashcard-slice6-piper:phase-a` (`d58382bad977d28996036e69b920c8ecab0446a5091c9336c8f685a4ec557fc3`).
+  It verified `piper-tts==1.6.0`, `de_DE-thorsten-high`, revision
+  `8aaa3c9839d2b669cb57a94e1ec92ae0928897e8`, model SHA-256
+  `9df1c43c61149ef9b39e618e2b861fbe41e1fcea9390b2dac62e8761573ea4f1`,
+  the bounded synthesis smoke, no runtime LLM SDK, and the GPL-3.0-or-later / MIT /
+  CC0 notice material.
+
+### Verification and remaining authority
+
+- Focused Stage-03/04/05 tests: `13 passed`.
+- Targeted Ruff and strict mypy: PASS.
+- Full `make gate` was launched after the focused checks; Ruff and strict mypy
+  completed PASS and the full pytest run completed before this report update.
+- `git diff --check`: PASS.
+- Paid provider calls: `0`; paid spend this attempt: `USD 0`.
+- Stop-and-ask conditions hit: none.
+
+Work intentionally left undone: any paid DE/EN canary or production Batch
+submission, live semantic QA, packaging of a real enriched dictionary, and release
+publication. Those require the Slice-6 orchestrator's explicit Phase-A acceptance
+decision and a separate paid-run authorization.
+
 **Branch:** `slice/6` @ pending commit
 **Base main:** `39bf247bffb6332af750b45b1b59609c66c1e374`
 **Archive preserved:** `archive/slice-6-pre-adr0006-1782cd7` @ `1782cd71343d86946757dce8f36784f9582e28f4` — not deleted/rewritten

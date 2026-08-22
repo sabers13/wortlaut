@@ -167,13 +167,16 @@ INCLUDED_SENSE_DISTINCTION_FIELDS: Final[tuple[str, ...]] = (
     "taxonomic",
 )
 
-GENERATED_SOURCE_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^llm_generated_v[1-9][0-9]*$"
-)
+GENERATED_SOURCE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^llm_generated_v[1-9][0-9]*$")
 
 
 class BuildDictError(Exception):
     """Base error for dictionary build failures."""
+
+
+def _canonical_json(value: object) -> str:
+    """Return the one stable JSON representation used by build artifacts."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def canonicalize_pos(raw_pos: str) -> str:
@@ -193,12 +196,14 @@ def compute_lemma_semantic_ref(word: str, pos: str, gender: str | None) -> str:
     return f"lemma:v1:{hashlib.sha256(payload).hexdigest()}"
 
 
-LINKAGE_FIELDS: Final[frozenset[str]] = frozenset({
-    "form_of",
-    "alt_of",
-    "compound_of",
-    "taxonomic",
-})
+LINKAGE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "form_of",
+        "alt_of",
+        "compound_of",
+        "taxonomic",
+    }
+)
 
 
 def canonicalize_string_projection(s: str) -> str | None:
@@ -222,9 +227,7 @@ def canonicalize_projection_value(val: object, is_linkage: bool = False) -> obje
         return None
     if isinstance(val, str):
         return (
-            canonicalize_string_linkage(val)
-            if is_linkage
-            else canonicalize_string_projection(val)
+            canonicalize_string_linkage(val) if is_linkage else canonicalize_string_projection(val)
         )
     if isinstance(val, (int, float, bool)):
         return val
@@ -239,9 +242,7 @@ def canonicalize_projection_value(val: object, is_linkage: bool = False) -> obje
         # Deduplicate and sort by canonical JSON encoding
         seen: dict[str, Any] = {}
         for item in canon_items:
-            encoded = json.dumps(
-                item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            )
+            encoded = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             if encoded not in seen:
                 seen[encoded] = item
         sorted_items = [seen[k] for k in sorted(seen.keys())]
@@ -336,9 +337,9 @@ def compute_senseid_candidate(raw_sense: dict[str, Any]) -> str | None:
         return f"senseid:{clean_senseids[0]}"
     if len(clean_senseids) > 1:
         sorted_senseids = sorted(clean_senseids)
-        payload = json.dumps(
-            sorted_senseids, ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8")
+        payload = json.dumps(sorted_senseids, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
         return f"senseids:v1:{hashlib.sha256(payload).hexdigest()}"
     return None
 
@@ -367,9 +368,7 @@ def compute_wikidata_candidate(raw_sense: dict[str, Any]) -> str | None:
         return f"wikidata:{clean_qids[0]}"
     if len(clean_qids) > 1:
         sorted_qids = sorted(clean_qids)
-        payload = json.dumps(
-            sorted_qids, ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8")
+        payload = json.dumps(sorted_qids, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         return f"wikidata-set:v1:{hashlib.sha256(payload).hexdigest()}"
     return None
 
@@ -404,9 +403,7 @@ def resolve_sense_source_refs(raw_senses: Sequence[dict[str, Any]]) -> list[str]
     senseid_candidates = [compute_senseid_candidate(s) for s in raw_senses]
     wikidata_candidates = [compute_wikidata_candidate(s) for s in raw_senses]
 
-    senseid_counts: Counter[str] = Counter(
-        c for c in senseid_candidates if c is not None
-    )
+    senseid_counts: Counter[str] = Counter(c for c in senseid_candidates if c is not None)
 
     resolved: list[str | None] = [None] * len(raw_senses)
 
@@ -478,9 +475,7 @@ def validate_sense_meaning_derivations(conn: sqlite3.Connection) -> None:
                 f"Derivation edge references nonexistent generated meaning {gen_mid}"
             )
         if sm_id is None:
-            raise BuildDictError(
-                f"Derivation edge references nonexistent source meaning {src_mid}"
-            )
+            raise BuildDictError(f"Derivation edge references nonexistent source meaning {src_mid}")
         if gm_id == sm_id:
             raise BuildDictError(f"Derivation self-edge forbidden on meaning {gm_id}")
 
@@ -792,29 +787,19 @@ def build_stage01(
                     min(acc.praesens_3sg_candidates) if acc.praesens_3sg_candidates else None
                 )
                 praeteritum_3sg = (
-                    min(acc.praeteritum_3sg_candidates)
-                    if acc.praeteritum_3sg_candidates
-                    else None
+                    min(acc.praeteritum_3sg_candidates) if acc.praeteritum_3sg_candidates else None
                 )
                 partizip_ii = (
-                    min(acc.partizip_ii_candidates)
-                    if acc.partizip_ii_candidates
-                    else None
+                    min(acc.partizip_ii_candidates) if acc.partizip_ii_candidates else None
                 )
                 comparative = (
-                    min(acc.comparative_candidates)
-                    if acc.comparative_candidates
-                    else None
+                    min(acc.comparative_candidates) if acc.comparative_candidates else None
                 )
                 superlative = (
-                    min(acc.superlative_candidates)
-                    if acc.superlative_candidates
-                    else None
+                    min(acc.superlative_candidates) if acc.superlative_candidates else None
                 )
 
-                lemma_semantic_ref = compute_lemma_semantic_ref(
-                    acc.word, acc.pos, acc.gender
-                )
+                lemma_semantic_ref = compute_lemma_semantic_ref(acc.word, acc.pos, acc.gender)
                 if lemma_semantic_ref in seen_lemma_semantic_refs:
                     raise BuildDictError(
                         f"Duplicate lemma semantic_ref '{lemma_semantic_ref}' for '{acc.word}'"
@@ -1023,9 +1008,7 @@ class Stage02LookupOracle(LookupProtocol):
 
     _CACHE_SIZE: Final[int] = 100_000
 
-    def __init__(
-        self, db_path: Path | str, accelerator_path: Path | str | None = None
-    ) -> None:
+    def __init__(self, db_path: Path | str, accelerator_path: Path | str | None = None) -> None:
         self._source_path = Path(db_path).resolve()
         self._owns_accelerator = accelerator_path is None
         if accelerator_path is None:
@@ -1120,8 +1103,12 @@ class Stage02LookupOracle(LookupProtocol):
     @staticmethod
     def _record(row: tuple[Any, ...]) -> LemmaRecord:
         return LemmaRecord(
-            id=row[0], lemma=row[1], pos=row[2], gender=row[3],
-            semantic_ref=row[4], freq_rank=row[5],
+            id=row[0],
+            lemma=row[1],
+            pos=row[2],
+            gender=row[3],
+            semantic_ref=row[4],
+            freq_rank=row[5],
         )
 
     @lru_cache(maxsize=_CACHE_SIZE)
@@ -1210,9 +1197,7 @@ def parse_sentence_tsv(tsv_path: Path, lang_name: str) -> dict[int, str]:
                     f"must be a positive integer"
                 )
             if not text.strip():
-                raise BuildDictError(
-                    f"Blank sentence text in {tsv_path}:{line_no}"
-                )
+                raise BuildDictError(f"Blank sentence text in {tsv_path}:{line_no}")
             sid = int(id_str)
             if sid in sentences:
                 raise BuildDictError(
@@ -1326,18 +1311,12 @@ class Stage02ProjectionStore:
                         raise BuildDictError(f"Blank sentence text in {path}:{line_no}")
                     batch.append((int(id_str), text))
                     if len(batch) == 10_000:
-                        conn.executemany(
-                            f"INSERT INTO {table} (id, text) VALUES (?, ?)", batch
-                        )
+                        conn.executemany(f"INSERT INTO {table} (id, text) VALUES (?, ?)", batch)
                         batch.clear()
                 if batch:
-                    conn.executemany(
-                        f"INSERT INTO {table} (id, text) VALUES (?, ?)", batch
-                    )
+                    conn.executemany(f"INSERT INTO {table} (id, text) VALUES (?, ?)", batch)
         except sqlite3.IntegrityError as exc:
-            raise BuildDictError(
-                f"Duplicate {language} sentence id in {path}"
-            ) from exc
+            raise BuildDictError(f"Duplicate {language} sentence id in {path}") from exc
 
     @staticmethod
     def _parse_links(path: Path, conn: sqlite3.Connection) -> None:
@@ -1369,9 +1348,7 @@ class Stage02ProjectionStore:
                         )
                         batch.clear()
                 if batch:
-                    conn.executemany(
-                        "INSERT INTO de_en_link (de_id, en_id) VALUES (?, ?)", batch
-                    )
+                    conn.executemany("INSERT INTO de_en_link (de_id, en_id) VALUES (?, ?)", batch)
         except sqlite3.IntegrityError as exc:
             raise BuildDictError(f"Duplicate link pair in {path}") from exc
 
@@ -1437,9 +1414,7 @@ def validate_stage01_database(stage01_path: Path) -> None:
             raise BuildDictError(f"Stage 01 database PRAGMA quick_check failed: {check}")
         tables = {
             r[0]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         required_tables = {
             "lemma",
@@ -1476,9 +1451,7 @@ def validate_stage02_database(stage02_path: Path) -> None:
             raise BuildDictError(f"Stage 02 database PRAGMA quick_check failed: {check}")
         tables = {
             r[0]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
         required_tables = {
             "lemma",
@@ -1622,9 +1595,7 @@ def build_stage02(
     try:
         # Validate inputs into a disk-backed store before opening the output.
         # This keeps the multi-million-row projections out of Python memory.
-        projection_store = Stage02ProjectionStore.create(
-            projection_path, de_tsv, en_tsv, links_tsv
-        )
+        projection_store = Stage02ProjectionStore.create(projection_path, de_tsv, en_tsv, links_tsv)
 
         # Copy Stage 01 to temp_out_path
         shutil.copyfile(stage01, temp_out_path)
@@ -1641,6 +1612,7 @@ def build_stage02(
         # Load spaCy
         try:
             import spacy
+
             nlp = spacy.load(spacy_model)
         except Exception as e:
             raise BuildDictError(f"Failed to load spaCy model '{spacy_model}': {e}") from e
@@ -1701,16 +1673,18 @@ def build_stage02(
             example_id = example_id_counter
             example_id_counter += 1
 
-            example_batch.append((
-                example_id,
-                de_text,
-                en_text,
-                "tatoeba",
-                str(de_id),
-                license_label,
-                token_count,
-                has_proper,
-            ))
+            example_batch.append(
+                (
+                    example_id,
+                    de_text,
+                    en_text,
+                    "tatoeba",
+                    str(de_id),
+                    license_label,
+                    token_count,
+                    has_proper,
+                )
+            )
 
             for lid in sorted(resolved_lemma_ids):
                 index_batch.append((lid, example_id))
@@ -1880,7 +1854,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     stage04_parser = subparsers.add_parser(
         "stage04",
-        help="Stage 04: Maintainer-only multilingual enrichment",
+        help="Stage 04: Maintainer-only DE/EN enrichment",
     )
     stage04_parser.add_argument(
         "--queue",
@@ -2065,10 +2039,22 @@ DE_FORBIDDEN_META_PATTERNS: Final[tuple[str, ...]] = (
     "etymologie",
 )
 
-FORBIDDEN_FA_CODEPOINTS: Final[frozenset[int]] = frozenset({
-    0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
-    0x2066, 0x2067, 0x2068, 0x2069,
-})
+FORBIDDEN_FA_CODEPOINTS: Final[frozenset[int]] = frozenset(
+    {
+        0x061C,
+        0x200E,
+        0x200F,
+        0x202A,
+        0x202B,
+        0x202C,
+        0x202D,
+        0x202E,
+        0x2066,
+        0x2067,
+        0x2068,
+        0x2069,
+    }
+)
 ALLOWED_FA_CF: Final[frozenset[int]] = frozenset({0x200C})
 
 GENERATED_MARKER: Final[str] = "llm_generated_v1"
@@ -2126,6 +2112,7 @@ def fa_v3_request_input(lemma: str, pos: str, en_meaning: str) -> str:
     This function is the single committed source of the live prompt semantics;
     synchronous and Batch logical request bodies must both serialize exactly this.
     """
+    raise BuildDictError("Retired Persian generation path is unavailable under ADR-0007")
     return (
         f"German lemma: {lemma}\nPOS: {pos}\nExact English sense: {en_meaning}\n\n"
         f"{FA_V3_INSTRUCTIONS}"
@@ -2139,11 +2126,10 @@ def fa_v3_request_body(item: dict[str, object], model: str) -> dict[str, object]
     and inside the Batch envelope ({custom_id, method, url, body}); only the
     transport envelope differs.
     """
+    raise BuildDictError("Retired Persian generation path is unavailable under ADR-0007")
     return {
         "model": model,
-        "input": fa_v3_request_input(
-            str(item["lemma"]), str(item["pos"]), str(item["en_meaning"])
-        ),
+        "input": fa_v3_request_input(str(item["lemma"]), str(item["pos"]), str(item["en_meaning"])),
         "text": {
             "format": {
                 "type": "json_schema",
@@ -2184,17 +2170,23 @@ def _estimate_fa_cost(
     bulk_output_price: float = 0.60,
 ) -> float:
     """Estimate FA Batch cost for num_items, fail closed if exceeds cap."""
+    raise BuildDictError("Retired Persian canary costing is unavailable under ADR-0007")
     total_input = num_items * mean_input_tokens
     total_output = num_items * mean_output_tokens
-    cost = (total_input / 1_000_000) * bulk_input_price + (total_output / 1_000_000) * bulk_output_price  # noqa: E501
+    cost = (total_input / 1_000_000) * bulk_input_price + (
+        total_output / 1_000_000
+    ) * bulk_output_price  # noqa: E501
     return cost
 
 
 def _check_canary_spend_cap(num_items: int = 50) -> None:
     """Fail closed if estimated canary cost exceeds hard cap."""
+    raise BuildDictError("Retired Persian canary path is unavailable under ADR-0007")
     est = _estimate_fa_cost(num_items)
     if est > CANARY_HARD_SPEND_CAP_USD:
-        raise BuildDictError(f"Canary estimated cost ${est:.4f} exceeds hard cap ${CANARY_HARD_SPEND_CAP_USD:.2f}")  # noqa: E501
+        raise BuildDictError(
+            f"Canary estimated cost ${est:.4f} exceeds hard cap ${CANARY_HARD_SPEND_CAP_USD:.2f}"
+        )  # noqa: E501
 
 
 def _write_canary_selection_manifest(
@@ -2377,7 +2369,7 @@ def _validate_fa_v2_output(text: str, lemma_text: str) -> str | None:
     if len(tokens) > MAX_FA_TOKENS:
         return "too_many_tokens"
     # Must contain at least one Arabic-script character
-    has_arabic = any("\u0600" <= ch <= "\u06FF" or "\u0750" <= ch <= "\u077F" for ch in stripped)
+    has_arabic = any("\u0600" <= ch <= "\u06ff" or "\u0750" <= ch <= "\u077f" for ch in stripped)
     if not has_arabic:
         return "non_persian"
     if stripped.lower() == lemma_text.strip().lower():
@@ -2399,6 +2391,7 @@ def _validate_fa_v2_output(text: str, lemma_text: str) -> str | None:
 
 def _build_fa_v2_candidates(stage02_path: Path) -> list[dict[str, object]]:
     """Build deterministic FA v2 candidate manifest (read-only, no numeric IDs)."""
+    raise BuildDictError("Retired Persian candidate construction is unavailable under ADR-0007")
     conn = sqlite3.connect(f"file:{stage02_path.resolve()}?mode=ro", uri=True)
     try:
         # Map sense_id to en text for filtering
@@ -2409,7 +2402,10 @@ def _build_fa_v2_candidates(stage02_path: Path) -> list[dict[str, object]]:
             "ORDER BY s.semantic_ref ASC, s.id ASC"
         ).fetchall()
         en_text_by_id: dict[int, str] = {}
-        for sid, txt in conn.execute("SELECT sense_id, text FROM sense_meaning WHERE language='en' ORDER BY sense_id, ord ASC"):  # noqa: E501
+        for sid, txt in conn.execute(
+            "SELECT sense_id, text FROM sense_meaning WHERE language='en' "
+            "ORDER BY sense_id, ord ASC"
+        ):  # noqa: E501
             if sid not in en_text_by_id:
                 en_text_by_id[sid] = txt
         candidates: list[dict[str, object]] = []
@@ -2463,6 +2459,7 @@ def _build_fa_v2_candidates(stage02_path: Path) -> list[dict[str, object]]:
 
 def _select_fa_canary_v2(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
     """Select 25 morphology + 25 lexical deterministically, then bytewise order."""
+    raise BuildDictError("Retired Persian canary selection is unavailable under ADR-0007")
     morph: list[dict[str, object]] = []
     lexical: list[dict[str, object]] = []
     for c in candidates:
@@ -2471,13 +2468,19 @@ def _select_fa_canary_v2(candidates: list[dict[str, object]]) -> list[dict[str, 
             morph.append(c)
         else:
             lexical.append(c)
-    morph_sorted = sorted(morph, key=lambda x: hashlib.sha256(str(x["item_id"]).encode()).hexdigest())  # noqa: E501
-    lexical_sorted = sorted(lexical, key=lambda x: hashlib.sha256(str(x["item_id"]).encode()).hexdigest())  # noqa: E501
+    morph_sorted = sorted(
+        morph, key=lambda x: hashlib.sha256(str(x["item_id"]).encode()).hexdigest()
+    )  # noqa: E501
+    lexical_sorted = sorted(
+        lexical, key=lambda x: hashlib.sha256(str(x["item_id"]).encode()).hexdigest()
+    )  # noqa: E501
     selected = morph_sorted[:25] + lexical_sorted[:25]
     # If not enough in one stratum, fill from other
     if len(selected) < 50:
         remaining = [c for c in candidates if c not in selected]
-        remaining_sorted = sorted(remaining, key=lambda x: hashlib.sha256(str(x["item_id"]).encode()).hexdigest())  # noqa: E501
+        remaining_sorted = sorted(
+            remaining, key=lambda x: hashlib.sha256(str(x["item_id"]).encode()).hexdigest()
+        )  # noqa: E501
         selected.extend(remaining_sorted[: 50 - len(selected)])
     selected.sort(key=lambda x: str(x["item_id"]).encode())
     return selected
@@ -2492,8 +2495,19 @@ def validate_stage02_for_stage03(stage02_path: Path) -> None:
         check = conn.execute("PRAGMA quick_check").fetchall()
         if check != [("ok",)]:
             raise BuildDictError(f"Stage 02 PRAGMA quick_check failed: {check}")
-        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}  # noqa: E501
-        required = {"lemma", "surface_form", "sense", "sense_meaning", "sense_meaning_derivation", "example", "example_lemma"}  # noqa: E501
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }  # noqa: E501
+        required = {
+            "lemma",
+            "surface_form",
+            "sense",
+            "sense_meaning",
+            "sense_meaning_derivation",
+            "example",
+            "example_lemma",
+        }  # noqa: E501
         missing = required - tables
         if missing:
             raise BuildDictError(f"Stage 02 missing required tables: {sorted(missing)}")
@@ -2528,6 +2542,158 @@ def build_stage03(
         ).fetchall()
         total_senses = len(senses)
 
+        # ADR-0007 reset: the active queue is strictly DE/EN source-first.
+        # The historical Persian code below is deliberately unreachable pending
+        # removal; it is retained only until the legacy checkpoint evidence is
+        # independently archived.  No FA row is read or interpreted here.
+        en_rows: dict[int, list[sqlite3.Row]] = {}
+        de_rows: dict[int, list[sqlite3.Row]] = {}
+        conn.row_factory = sqlite3.Row
+        for meaning in conn.execute(
+            "SELECT id, sense_id, language, kind, ord, text, source, license "
+            "FROM sense_meaning WHERE language IN ('de', 'en') "
+            "AND source NOT GLOB 'llm_generated_v[0-9]*' "
+            "ORDER BY sense_id, language, ord, id"
+        ):
+            target = de_rows if meaning["language"] == "de" else en_rows
+            target.setdefault(int(meaning["sense_id"]), []).append(meaning)
+
+        active_queue_items: list[dict[str, object]] = []
+        for row in senses:
+            (
+                sid,
+                lemma_id,
+                sense_ref,
+                _src_ns,
+                _src_ref,
+                _ord,
+                lemma_ref,
+                lemma_text,
+                pos,
+                gender,
+            ) = row
+            base_context = {
+                "lemma": lemma_text,
+                "pos": pos,
+                "gender": gender,
+                "sense_semantic_ref": sense_ref,
+            }
+            if not any(str(m["text"]).strip() for m in en_rows.get(int(sid), [])):
+                job_class = "en_meaning"
+                context_payload = _canonical_json({"context": base_context, "sources": []})
+                item_id = _compute_queue_item_id(
+                    lemma_ref, sense_ref, "en", job_class, context_payload
+                )
+                active_queue_items.append(
+                    {
+                        "item_id": item_id,
+                        "custom_id": f"batch:{item_id}",
+                        "lemma_semantic_ref": lemma_ref,
+                        "sense_semantic_ref": sense_ref,
+                        "lemma_text": lemma_text,
+                        "pos": pos,
+                        "gender": gender,
+                        "sense_id": sid,
+                        "lemma_id": lemma_id,
+                        "language": "en",
+                        "job_class": job_class,
+                        "context": base_context,
+                        "derivation_inputs": [],
+                        "derivation_source_ids": [],
+                    }
+                )
+            source_rows = de_rows.get(int(sid), [])
+            eligible = any(
+                _validate_de_source_eligibility(str(m["text"]), str(m["kind"])) is None
+                for m in source_rows
+            )
+            if not eligible:
+                inputs = [
+                    {
+                        "input_id": f"meaning:{int(m['id'])}",
+                        "meaning_id": int(m["id"]),
+                        "language": "de",
+                        "kind": str(m["kind"]),
+                        "text": str(m["text"]),
+                        "source": str(m["source"]),
+                        "license": str(m["license"]),
+                    }
+                    for m in source_rows
+                ]
+                job_class = "de_learner_meaning"
+                context_payload = _canonical_json({"context": base_context, "sources": inputs})
+                item_id = _compute_queue_item_id(
+                    lemma_ref, sense_ref, "de", job_class, context_payload
+                )
+                active_queue_items.append(
+                    {
+                        "item_id": item_id,
+                        "custom_id": f"batch:{item_id}",
+                        "lemma_semantic_ref": lemma_ref,
+                        "sense_semantic_ref": sense_ref,
+                        "lemma_text": lemma_text,
+                        "pos": pos,
+                        "gender": gender,
+                        "sense_id": sid,
+                        "lemma_id": lemma_id,
+                        "language": "de",
+                        "job_class": job_class,
+                        "context": base_context,
+                        "derivation_inputs": inputs,
+                        "derivation_source_ids": [int(m["id"]) for m in source_rows],
+                    }
+                )
+
+        active_queue_items.sort(key=lambda item: str(item["item_id"]).encode("utf-8"))
+        if len({str(item["item_id"]) for item in active_queue_items}) != len(active_queue_items):
+            raise BuildDictError("Duplicate Stage 03 queue item ID")
+        if any(item["language"] not in ("de", "en") for item in active_queue_items):
+            raise BuildDictError("Stage 03 produced a non-DE/EN queue item")
+        if any(
+            item["job_class"] not in ("de_learner_meaning", "en_meaning")
+            for item in active_queue_items
+        ):
+            raise BuildDictError("Stage 03 produced an unsupported queue job")
+        item_bytes = _canonical_json(active_queue_items).encode("utf-8")
+        item_sha = hashlib.sha256(item_bytes).hexdigest()
+        payload = {
+            "format": STAGE03_QUEUE_FORMAT,
+            "items_sha256": item_sha,
+            "items": active_queue_items,
+        }
+        output_bytes = (_canonical_json(payload) + "\n").encode("utf-8")
+        for forbidden in ("api_key", "authorization", "bearer", "password", "/home/"):
+            if forbidden in output_bytes.decode("utf-8").casefold():
+                raise BuildDictError("Stage 03 queue contains forbidden private material")
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        temporary = tempfile.NamedTemporaryFile(
+            dir=out_p.parent, prefix=f".{out_p.name}.", suffix=".tmp", delete=False
+        )
+        temp_path = Path(temporary.name)
+        temporary.close()
+        try:
+            temp_path.write_bytes(output_bytes)
+            if sha256_file(stage02_p) != sha_before:
+                raise BuildDictError("Stage 02 input was mutated during Stage 03")
+            if out_p.exists():
+                raise BuildDictError(f"Output path already exists: {out_p}")
+            temp_path.replace(out_p)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+        if packet_path is not None or report_path is not None:
+            raise BuildDictError(
+                "Persian-era Stage 03 packet/report outputs are retired by ADR-0007"
+            )
+        return {
+            "total_senses": total_senses,
+            "queue_items": len(active_queue_items),
+            "items_sha256": item_sha,
+            "queue_bytes": len(output_bytes),
+            "de": sum(item["language"] == "de" for item in active_queue_items),
+            "en": sum(item["language"] == "en" for item in active_queue_items),
+        }
+
         # Persian coverage: primary direct FA only (language='fa')
         # For each sense, collect FA rows (language='fa')
         fa_covered = 0
@@ -2540,17 +2706,26 @@ def build_stage03(
         # For deterministic ordering, we need to handle FA duplicate collapse if rows exist
         # Build maps for bulk queries to avoid per-sense queries (performance)
         fa_rows_by_sense: dict[int, list[tuple[int, str, str, str]]] = {}
-        for sid, text, source, license_val in conn.execute("SELECT sense_id, text, source, license FROM sense_meaning WHERE language='fa'"):  # noqa: E501
+        for sid, text, source, license_val in conn.execute(
+            "SELECT sense_id, text, source, license FROM sense_meaning WHERE language='fa'"
+        ):  # noqa: E501
             fa_rows_by_sense.setdefault(sid, []).append((sid, text, source, license_val))
         # Precompute EN counts and DE rows and EN texts for queue construction
         en_count_by_sense: dict[int, int] = {}
-        for sid, cnt in conn.execute("SELECT sense_id, count(*) FROM sense_meaning WHERE language='en' GROUP BY sense_id"):  # noqa: E501
+        for sid, cnt in conn.execute(
+            "SELECT sense_id, count(*) FROM sense_meaning WHERE language='en' GROUP BY sense_id"
+        ):  # noqa: E501
             en_count_by_sense[sid] = int(cnt)
         de_rows_by_sense: dict[int, list[tuple[int, str, str]]] = {}
-        for sid, mid, kind, text in conn.execute("SELECT sense_id, id, kind, text FROM sense_meaning WHERE language='de'"):  # noqa: E501
+        for sid, mid, kind, text in conn.execute(
+            "SELECT sense_id, id, kind, text FROM sense_meaning WHERE language='de'"
+        ):  # noqa: E501
             de_rows_by_sense.setdefault(sid, []).append((mid, kind, text))
         en_text_by_sense: dict[int, str] = {}
-        for sid, text in conn.execute("SELECT sense_id, text FROM sense_meaning WHERE language='en' ORDER BY sense_id, ord ASC"):  # noqa: E501
+        for sid, text in conn.execute(
+            "SELECT sense_id, text FROM sense_meaning WHERE language='en' "
+            "ORDER BY sense_id, ord ASC"
+        ):  # noqa: E501
             if sid not in en_text_by_sense:
                 en_text_by_sense[sid] = text
 
@@ -2586,7 +2761,9 @@ def build_stage03(
         missing_sense_ids: list[int] = []
         for row in senses:
             sid = row[0]
-            if sid not in fa_rows_by_sense or not any(_validate_persian_unicode(t) is None for _, t, _, _ in fa_rows_by_sense.get(sid, [])):  # noqa: E501
+            if sid not in fa_rows_by_sense or not any(
+                _validate_persian_unicode(t) is None for _, t, _, _ in fa_rows_by_sense.get(sid, [])
+            ):  # noqa: E501
                 # Check if after dedup there is coverage; simplified: if no valid fa row
                 has_valid = False
                 for _, text, _, _ in fa_rows_by_sense.get(sid, []):
@@ -2606,41 +2783,68 @@ def build_stage03(
                 pos = r[8]
                 sense_ref = r[2]
                 en_text = en_text_by_sense.get(sid)
-                fa_still_missing_samples.append({
-                    "lemma": lemma_text,
-                    "pos": pos,
-                    "sense_ref": sense_ref,
-                    "en_meaning": en_text,
-                    "reason": "no_valid_FA_after_primary",
-                })
+                fa_still_missing_samples.append(
+                    {
+                        "lemma": lemma_text,
+                        "pos": pos,
+                        "sense_ref": sense_ref,
+                        "en_meaning": en_text,
+                        "reason": "no_valid_FA_after_primary",
+                    }
+                )
 
         bridged_additional = 0  # secondary fallback not implemented, stays 0
 
         # Now build generated queue: only missing EN and DE learner meaning where predicate fails
         queue_items: list[dict[str, object]] = []
         for row in senses:
-            sid, lemma_id, sense_ref, src_ns, src_ref, ord_val, lemma_ref, lemma_text, pos, gender = row  # noqa: E501
+            (
+                sid,
+                lemma_id,
+                sense_ref,
+                src_ns,
+                src_ref,
+                ord_val,
+                lemma_ref,
+                lemma_text,
+                pos,
+                gender,
+            ) = row  # noqa: E501
             # Missing EN: if no en translation row
             en_count = en_count_by_sense.get(sid, 0)
             if en_count == 0:
-                context_payload = json.dumps({"lemma": lemma_text, "pos": pos, "sense_ref": sense_ref}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))  # noqa: E501
-                item_id = _compute_queue_item_id(lemma_ref, sense_ref, "en", "en_translation", context_payload)  # noqa: E501
+                context_payload = json.dumps(
+                    {"lemma": lemma_text, "pos": pos, "sense_ref": sense_ref},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )  # noqa: E501
+                item_id = _compute_queue_item_id(
+                    lemma_ref, sense_ref, "en", "en_translation", context_payload
+                )  # noqa: E501
                 custom_id = f"batch:{item_id}"
-                queue_items.append({
-                    "item_id": item_id,
-                    "custom_id": custom_id,
-                    "lemma_semantic_ref": lemma_ref,
-                    "sense_semantic_ref": sense_ref,
-                    "lemma_text": lemma_text,
-                    "pos": pos,
-                    "gender": gender,
-                    "sense_id": sid,
-                    "lemma_id": lemma_id,
-                    "language": "en",
-                    "job_class": "en_translation",
-                    "context": {"lemma": lemma_text, "pos": pos, "gender": gender, "sense_ref": sense_ref},  # noqa: E501
-                    "derivation_source_ids": [],
-                })
+                queue_items.append(
+                    {
+                        "item_id": item_id,
+                        "custom_id": custom_id,
+                        "lemma_semantic_ref": lemma_ref,
+                        "sense_semantic_ref": sense_ref,
+                        "lemma_text": lemma_text,
+                        "pos": pos,
+                        "gender": gender,
+                        "sense_id": sid,
+                        "lemma_id": lemma_id,
+                        "language": "en",
+                        "job_class": "en_translation",
+                        "context": {
+                            "lemma": lemma_text,
+                            "pos": pos,
+                            "gender": gender,
+                            "sense_ref": sense_ref,
+                        },  # noqa: E501
+                        "derivation_source_ids": [],
+                    }
+                )
             # DE learner meaning: check existing DE rows for eligibility
             de_rows = de_rows_by_sense.get(sid, [])
             eligible_found = False
@@ -2657,24 +2861,43 @@ def build_stage03(
                 # Simpler: if de_rows exist, offer their ids as derivation candidates (even if ineligible, they are source-backed localized meaning text consumed)  # noqa: E501
                 # For zero de rows, zero derivation ids
                 deriv_ids = [mid for mid, _, _ in de_rows]
-                context_payload = json.dumps({"lemma": lemma_text, "pos": pos, "sense_ref": sense_ref, "existing_de": len(de_rows)}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))  # noqa: E501
-                item_id = _compute_queue_item_id(lemma_ref, sense_ref, "de", "de_learner_meaning", context_payload)  # noqa: E501
+                context_payload = json.dumps(
+                    {
+                        "lemma": lemma_text,
+                        "pos": pos,
+                        "sense_ref": sense_ref,
+                        "existing_de": len(de_rows),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )  # noqa: E501
+                item_id = _compute_queue_item_id(
+                    lemma_ref, sense_ref, "de", "de_learner_meaning", context_payload
+                )  # noqa: E501
                 custom_id = f"batch:{item_id}"
-                queue_items.append({
-                    "item_id": item_id,
-                    "custom_id": custom_id,
-                    "lemma_semantic_ref": lemma_ref,
-                    "sense_semantic_ref": sense_ref,
-                    "lemma_text": lemma_text,
-                    "pos": pos,
-                    "gender": gender,
-                    "sense_id": sid,
-                    "lemma_id": lemma_id,
-                    "language": "de",
-                    "job_class": "de_learner_meaning",
-                    "context": {"lemma": lemma_text, "pos": pos, "gender": gender, "sense_ref": sense_ref},  # noqa: E501
-                    "derivation_source_ids": deriv_ids,
-                })
+                queue_items.append(
+                    {
+                        "item_id": item_id,
+                        "custom_id": custom_id,
+                        "lemma_semantic_ref": lemma_ref,
+                        "sense_semantic_ref": sense_ref,
+                        "lemma_text": lemma_text,
+                        "pos": pos,
+                        "gender": gender,
+                        "sense_id": sid,
+                        "lemma_id": lemma_id,
+                        "language": "de",
+                        "job_class": "de_learner_meaning",
+                        "context": {
+                            "lemma": lemma_text,
+                            "pos": pos,
+                            "gender": gender,
+                            "sense_ref": sense_ref,
+                        },  # noqa: E501
+                        "derivation_source_ids": deriv_ids,
+                    }
+                )
 
         # Deterministic ordering: bytewise sorted by item_id
         queue_items.sort(key=lambda x: str(x["item_id"]).encode("utf-8"))
@@ -2693,14 +2916,18 @@ def build_stage03(
                 raise BuildDictError("Historical fa_translation job class must not be reused")
 
         # Verify no secrets/private paths in queue
-        queue_json_str = json.dumps(queue_items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))  # noqa: E501
+        queue_json_str = json.dumps(
+            queue_items, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )  # noqa: E501
         lower_q = queue_json_str.lower()
         for secret_hint in ["api_key", "sk-", "bearer", "password"]:
             if secret_hint in lower_q:
                 raise BuildDictError(f"Queue output contains potential secret hint {secret_hint}")
 
         # Compute queue SHA
-        queue_bytes = json.dumps(queue_items, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")  # noqa: E501
+        queue_bytes = json.dumps(
+            queue_items, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")  # noqa: E501
         queue_sha = hashlib.sha256(queue_bytes).hexdigest()
         queue_byte_len = len(queue_bytes)
 
@@ -2741,19 +2968,37 @@ def build_stage03(
         # deterministic missing sample
         report_lines.append("MISSING_FA_SAMPLE:")
         for sample in fa_still_missing_samples:
-            report_lines.append(json.dumps(sample, ensure_ascii=False, sort_keys=True, separators=(",", ":")))  # noqa: E501
+            report_lines.append(
+                json.dumps(sample, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            )  # noqa: E501
 
         # Atomic write queue
         out_p.parent.mkdir(parents=True, exist_ok=True)
-        tmp_q = Path(tempfile.NamedTemporaryFile(dir=out_p.parent, prefix=f".{out_p.name}.", suffix=".tmp", delete=False).name)  # noqa: E501
+        tmp_q = Path(
+            tempfile.NamedTemporaryFile(
+                dir=out_p.parent, prefix=f".{out_p.name}.", suffix=".tmp", delete=False
+            ).name
+        )  # noqa: E501
         Path(tmp_q).unlink(missing_ok=True) if Path(tmp_q).exists() else None
         # Use tempfile approach
-        tf = tempfile.NamedTemporaryFile(dir=out_p.parent, prefix=f".{out_p.name}.", suffix=".tmp", delete=False)  # noqa: E501
+        tf = tempfile.NamedTemporaryFile(
+            dir=out_p.parent, prefix=f".{out_p.name}.", suffix=".tmp", delete=False
+        )  # noqa: E501
         tf_path = Path(tf.name)
         tf.close()
         try:
             with tf_path.open("w", encoding="utf-8") as f:
-                json.dump({"format": STAGE03_QUEUE_FORMAT, "queue_sha256": queue_sha, "items": queue_items}, f, ensure_ascii=False, sort_keys=True, separators=(",", ":"))  # noqa: E501
+                json.dump(
+                    {
+                        "format": STAGE03_QUEUE_FORMAT,
+                        "queue_sha256": queue_sha,
+                        "items": queue_items,
+                    },
+                    f,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )  # noqa: E501
                 f.write("\n")
             sha_after = sha256_file(stage02_p)
             if sha_before != sha_after:
@@ -2774,7 +3019,10 @@ def build_stage03(
             report_path = out_p.parent / (out_p.stem + ".coverage-report.txt")
         pkt_p = Path(packet_path)
         rep_p = Path(report_path)
-        for pth, content in [(pkt_p, json.dumps(packet, ensure_ascii=False, sort_keys=True, indent=2)), (rep_p, "\n".join(report_lines) + "\n")]:  # noqa: E501
+        for pth, content in [
+            (pkt_p, json.dumps(packet, ensure_ascii=False, sort_keys=True, indent=2)),
+            (rep_p, "\n".join(report_lines) + "\n"),
+        ]:  # noqa: E501
             if pth.exists():
                 raise BuildDictError(f"Packet/report path already exists: {pth}")
             pth.parent.mkdir(parents=True, exist_ok=True)
@@ -2798,7 +3046,9 @@ def build_stage03(
         if sha_before != sha_after_final:
             raise BuildDictError("Stage 02 input was mutated during Stage 03")
 
+
 # --- Stage04 helpers ---
+
 
 def _validate_generated_candidate(
     text: str,
@@ -2809,34 +3059,17 @@ def _validate_generated_candidate(
 ) -> str | None:
     if not text or not text.strip():
         return "empty"
-    if language not in ("de", "en", "fa"):
+    if language not in ("de", "en"):
         return "invalid_language"
     if kind not in ("definition", "synonym", "translation"):
         return "invalid_kind"
-    if language == "fa":
-        # v2 bounds: 1-160 scalars, 1-24 tokens
-        stripped = text.strip()
-        if len(stripped) > MAX_FA_SCALARS:
-            return "too_long"
-        if len(stripped.split()) > MAX_FA_TOKENS:
-            return "too_many_tokens"
-        # Use dedicated FA v2 validation for script etc.
-        err = _validate_fa_v2_output(text, lemma_text)
-        if err is not None:
-            return err
-        # Also check duplicate/echo already done below, but need to handle
-        if existing_texts is not None and stripped in existing_texts:
-            return "duplicate"
-        if stripped.lower() == lemma_text.strip().lower():
-            return "echo_lemma"
-        return None
     if len(text.strip()) > STAGE04_MAX_TEXT_LENGTH:
         return "too_long"
     if existing_texts is not None and text.strip() in existing_texts:
         return "duplicate"
     if text.strip().lower() == lemma_text.strip().lower():
         return "echo_lemma"
-    # Persian unicode already handled via _validate_persian_unicode for FA, but validate forbidden controls for DE/EN as well  # noqa: E501
+    # The same control policy applies to both active learner-meaning languages.
     for ch in text:
         cp = ord(ch)
         if cp in FORBIDDEN_FA_CODEPOINTS:
@@ -2846,12 +3079,10 @@ def _validate_generated_candidate(
             return f"forbidden_Cc_U+{cp:04X}"
         if cat == "Cf" and cp not in ALLOWED_FA_CF:
             return f"forbidden_Cf_U+{cp:04X}"
-    if language == "fa":
-        err = _validate_persian_unicode(text)
-        if err is not None:
-            return err
-    # German plausibility: simple check not english-only? We implement lenient
+    if language == "de" and not re.search(r"[A-Za-zÄÖÜäöüß]", text):
+        return "implausible_german"
     return None
+
 
 def _checkpoint_identity(
     queue_sha256: str,
@@ -2860,10 +3091,6 @@ def _checkpoint_identity(
     bulk_de_model: str,
     bulk_en_model: str,
     qa_model: str,
-    bulk_fa_model: str | None = None,
-    fa_input_version: str | None = None,
-    fa_bulk_version: str | None = None,
-    fa_response_version: str | None = None,
 ) -> dict[str, str]:
     base: dict[str, str] = {
         "format": STAGE04_CHECKPOINT_FORMAT,
@@ -2877,25 +3104,18 @@ def _checkpoint_identity(
         "qa_pipeline_version": STAGE04_QA_PIPELINE_VERSION,
         "response_schema_version": STAGE04_RESPONSE_SCHEMA_VERSION,
     }
-    if bulk_fa_model is not None:
-        base["bulk_fa_model"] = bulk_fa_model
-    if fa_input_version is not None:
-        base["fa_input_version"] = fa_input_version
-    if fa_bulk_version is not None:
-        base["fa_bulk_version"] = fa_bulk_version
-    if fa_response_version is not None:
-        base["fa_response_version"] = fa_response_version
     return base
+
 
 def _empty_checkpoint() -> dict[str, object]:
     return {
         "format": STAGE04_CHECKPOINT_FORMAT,
         "identity": {},
         "bulk": {"completed": {}, "rejected": {}, "in_flight": []},
-        "bulk_fa": {"completed": {}, "rejected": {}, "in_flight": []},
         "qa": {"required": [], "completed": {}, "rejected": {}, "in_flight": []},
         "manifests": [],
     }
+
 
 def _load_checkpoint(path: Path, expected_identity: dict[str, str]) -> dict[str, object]:
     if not path.exists():
@@ -2904,7 +3124,6 @@ def _load_checkpoint(path: Path, expected_identity: dict[str, str]) -> dict[str,
             "format": STAGE04_CHECKPOINT_FORMAT,
             "identity": dict(expected_identity),
             "bulk": {"completed": {}, "rejected": {}, "in_flight": []},
-            "bulk_fa": {"completed": {}, "rejected": {}, "in_flight": []},
             "qa": {"required": [], "completed": {}, "rejected": {}, "in_flight": []},
             "manifests": [],
         }
@@ -2926,21 +3145,21 @@ def _load_checkpoint(path: Path, expected_identity: dict[str, str]) -> dict[str,
             raise BuildDictError("Stage 04 checkpoint is incompatible with this run")
     # Validate phase schemas
     bulk = data.get("bulk")
-    bulk_fa = data.get("bulk_fa")
     qa = data.get("qa")
     if not isinstance(bulk, dict) or not isinstance(qa, dict):
         raise BuildDictError("Stage 04 checkpoint has invalid phase state")
-    # bulk_fa is optional for backward compat, but if present validate it
     phases: list[tuple[str, dict[str, object], set[str]]] = [
         ("bulk", bulk, {"completed", "rejected", "in_flight"}),
         ("qa", qa, {"required", "completed", "rejected", "in_flight"}),
     ]
-    if isinstance(bulk_fa, dict):
-        phases.append(("bulk_fa", bulk_fa, {"completed", "rejected", "in_flight"}))
     for phase_name, phase, required_keys in phases:
         if set(phase.keys()) != required_keys:
             raise BuildDictError("Stage 04 checkpoint has invalid phase schema")
-        if not isinstance(phase["completed"], dict) or not isinstance(phase["rejected"], dict) or not isinstance(phase["in_flight"], list):  # noqa: E501
+        if (
+            not isinstance(phase["completed"], dict)
+            or not isinstance(phase["rejected"], dict)
+            or not isinstance(phase["in_flight"], list)
+        ):  # noqa: E501
             raise BuildDictError("Stage 04 checkpoint has invalid completion state")
         if phase_name == "qa" and not isinstance(phase["required"], list):
             raise BuildDictError("Stage 04 checkpoint has invalid QA requirements")
@@ -2951,10 +3170,13 @@ def _load_checkpoint(path: Path, expected_identity: dict[str, str]) -> dict[str,
         raise BuildDictError("Stage 04 checkpoint has invalid manifests")
     return data
 
+
 def _write_checkpoint(path: Path, identity: dict[str, str], state: dict[str, object]) -> None:
     state["format"] = STAGE04_CHECKPOINT_FORMAT
     state["identity"] = dict(identity)
-    tmp = tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False)  # noqa: E501
+    tmp = tempfile.NamedTemporaryFile(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
+    )  # noqa: E501
     tmp_path = Path(tmp.name)
     tmp.close()
     try:
@@ -2966,7 +3188,10 @@ def _write_checkpoint(path: Path, identity: dict[str, str], state: dict[str, obj
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
 
-def _validate_checkpoint_candidates(phase: str, completed: dict[str, object], item_by_id: dict[str, dict[str, object]]) -> dict[str, object]:  # noqa: E501
+
+def _validate_checkpoint_candidates(
+    phase: str, completed: dict[str, object], item_by_id: dict[str, dict[str, object]]
+) -> dict[str, object]:  # noqa: E501
     for item_id in list(completed.keys()):
         if item_id not in item_by_id:
             raise BuildDictError(f"Stage 04 checkpoint has invalid {phase} completed IDs")
@@ -2974,6 +3199,7 @@ def _validate_checkpoint_candidates(phase: str, completed: dict[str, object], it
         if not isinstance(val, dict):
             raise BuildDictError(f"Stage 04 checkpoint has invalid {phase} completed results")
     return completed
+
 
 def _deterministic_audit_sample(item_ids: list[str], seed: str, sample_size: int = 2) -> list[str]:
     if not item_ids:
@@ -2986,6 +3212,7 @@ def _deterministic_audit_sample(item_ids: list[str], seed: str, sample_size: int
     scored.sort()
     n = min(sample_size, len(scored))
     return [iid for _, iid in scored[:n]]
+
 
 def _build_manifests(
     sorted_item_ids: list[str],
@@ -3002,18 +3229,24 @@ def _build_manifests(
         payload_len = len(payload) + 1  # include newline
         if payload_len > max_bytes:
             raise BuildDictError(f"Item {iid} exceeds provider max bytes")
-        if current_ids and (len(current_ids) + 1 > max_requests or current_bytes + payload_len > max_bytes):  # noqa: E501
+        if current_ids and (
+            len(current_ids) + 1 > max_requests or current_bytes + payload_len > max_bytes
+        ):  # noqa: E501
             # finalize current manifest
             manifest_content = b"\n".join(item_payloads[x] for x in current_ids) + b"\n"
             manifest_sha = hashlib.sha256(manifest_content).hexdigest()
-            manifests.append({
-                "manifest_sha256": manifest_sha,
-                "custom_ids": [f"batch:{x}" for x in current_ids],
-                "item_ids": list(current_ids),
-                "state": "PREPARED",
-                "byte_len": len(manifest_content),
-                "compatibility": dict(compatibility_identity),
-            })
+            manifests.append(
+                {
+                    "manifest_sha256": manifest_sha,
+                    "custom_ids": [f"batch:{x}" for x in current_ids],
+                    "item_ids": list(current_ids),
+                    "state": "PREPARED",
+                    "byte_len": len(manifest_content),
+                    "compatibility": dict(compatibility_identity),
+                    "correlation": f"batchcorr:v1:{manifest_sha}",
+                    "input_file_sha256": manifest_sha,
+                }
+            )
             current_ids = []
             current_bytes = 0
         current_ids.append(iid)
@@ -3021,15 +3254,20 @@ def _build_manifests(
     if current_ids:
         manifest_content = b"\n".join(item_payloads[x] for x in current_ids) + b"\n"
         manifest_sha = hashlib.sha256(manifest_content).hexdigest()
-        manifests.append({
-            "manifest_sha256": manifest_sha,
-            "custom_ids": [f"batch:{x}" for x in current_ids],
-            "item_ids": list(current_ids),
-            "state": "PREPARED",
-            "byte_len": len(manifest_content),
-            "compatibility": dict(compatibility_identity),
-        })
+        manifests.append(
+            {
+                "manifest_sha256": manifest_sha,
+                "custom_ids": [f"batch:{x}" for x in current_ids],
+                "item_ids": list(current_ids),
+                "state": "PREPARED",
+                "byte_len": len(manifest_content),
+                "compatibility": dict(compatibility_identity),
+                "correlation": f"batchcorr:v1:{manifest_sha}",
+                "input_file_sha256": manifest_sha,
+            }
+        )
     return manifests
+
 
 def build_stage04(
     queue_path: Path | str,
@@ -3090,8 +3328,11 @@ def build_stage04(
         if custom_id != f"batch:{iid}":
             # Allow any stable custom_id but must be deterministic; we enforce batch: prefix
             raise BuildDictError(f"Queue item {iid} custom_id mismatch")
-        if it.get("job_class") == "fa_translation":
-            raise BuildDictError("Historical fa_translation job class must not be reused")
+        if it.get("language") not in ("de", "en") or it.get("job_class") not in (
+            "de_learner_meaning",
+            "en_meaning",
+        ):
+            raise BuildDictError("Stage 04 queue contains a retired or unsupported job")
         item_by_id[iid] = it
 
     sorted_ids = sorted(item_by_id.keys())
@@ -3099,7 +3340,9 @@ def build_stage04(
     queue_bytes = queue_p.read_bytes()
     queue_sha = hashlib.sha256(queue_bytes).hexdigest()
 
-    identity = _checkpoint_identity(queue_sha, GENERATED_MARKER, generated_license, bulk_de_model, bulk_en_model, qa_model)  # noqa: E501
+    identity = _checkpoint_identity(
+        queue_sha, GENERATED_MARKER, generated_license, bulk_de_model, bulk_en_model, qa_model
+    )  # noqa: E501
     # Override pipeline versions if provided
     identity["bulk_pipeline_version"] = bulk_pipeline_version
     identity["qa_pipeline_version"] = qa_pipeline_version
@@ -3118,12 +3361,25 @@ def build_stage04(
                 "url": "/v1/responses",
                 "body": {
                     "model": bulk_de_model if it.get("language") == "de" else bulk_en_model,
-                    "input": json.dumps({"item_id": iid, "context": it.get("context")}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),  # noqa: E501
+                    "input": json.dumps(
+                        {"item_id": iid, "context": it.get("context")},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),  # noqa: E501
                 },
             }
-            payload_bytes = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")  # noqa: E501
+            payload_bytes = json.dumps(
+                record, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")  # noqa: E501
             item_payloads[iid] = payload_bytes
-        manifests = _build_manifests(sorted_ids, min(batch_size, provider_max_requests), provider_max_bytes, item_payloads, identity)  # noqa: E501
+        manifests = _build_manifests(
+            sorted_ids,
+            min(batch_size, provider_max_requests),
+            provider_max_bytes,
+            item_payloads,
+            identity,
+        )  # noqa: E501
         state["manifests"] = manifests
         _write_checkpoint(ckpt_p, identity, state)
 
@@ -3161,7 +3417,12 @@ def build_stage04(
 
     # Simulate bounded-unit execution
     # Determine pending bulk IDs: those not in completed nor rejected
-    pending_bulk_ids = [iid for iid in sorted_ids if iid not in bulk_completed and iid not in bulk_rejected]  # noqa: E501
+    pending_bulk_ids = [
+        iid for iid in sorted_ids if iid not in bulk_completed and iid not in bulk_rejected
+    ]  # noqa: E501
+
+    if pending_bulk_ids and transport is None:
+        raise BuildDictError("No local deterministic Stage 04 transport configured")
 
     # If transport provided, process each manifest's pending items in bounded units
     # For simplicity, process one manifest at a time, one bounded unit = one manifest or batch_size chunk  # noqa: E501
@@ -3181,7 +3442,7 @@ def build_stage04(
         # transport interface: transport.send_unit(unit_ids: list[str]) returns dict[item_id, candidate_text] or raises  # noqa: E501
         unit_size = batch_size
         for i in range(0, len(pending_bulk_ids), unit_size):
-            unit_ids = pending_bulk_ids[i:i+unit_size]
+            unit_ids = pending_bulk_ids[i : i + unit_size]
             # Mark in_flight before submission (persist)
             bulk_state["in_flight"] = list(unit_ids)
             _write_checkpoint(ckpt_p, identity, state)
@@ -3220,12 +3481,16 @@ def build_stage04(
                 language = str(cand.get("language", item_by_id[iid].get("language")))
                 kind = str(cand.get("kind", "definition" if language == "de" else "translation"))
                 lemma_text = str(item_by_id[iid].get("lemma_text", ""))
-                err = _validate_generated_candidate(text, language, kind, lemma_text, existing_texts if existing_texts else None)  # noqa: E501
+                err = _validate_generated_candidate(
+                    text, language, kind, lemma_text, existing_texts if existing_texts else None
+                )  # noqa: E501
                 if err is not None:
                     rejected_to_record[iid] = {
                         "phase": "bulk",
                         "error_code": err,
-                        "attempt_count": int(bulk_rejected.get(iid, {}).get("attempt_count", 0)) + 1 if isinstance(bulk_rejected.get(iid), dict) else 1,  # noqa: E501
+                        "attempt_count": int(bulk_rejected.get(iid, {}).get("attempt_count", 0)) + 1
+                        if isinstance(bulk_rejected.get(iid), dict)
+                        else 1,  # noqa: E501
                         "evidence": {"candidate": {"text": text[:50], "language": language}},
                     }
                 else:
@@ -3255,11 +3520,16 @@ def build_stage04(
             _write_checkpoint(ckpt_p, identity, state)
             # If any rejected, STOP before next paid unit
             if rejected_to_record:
-                raise BuildDictError(f"Bulk unit had {len(rejected_to_record)} rejected candidates; STOP before next unit")  # noqa: E501
+                raise BuildDictError(
+                    f"Bulk unit had {len(rejected_to_record)} rejected candidates; "
+                    "STOP before next unit"
+                )  # noqa: E501
             # else continue to next unit
 
         # Refresh pending after loop
-        pending_bulk_ids = [iid for iid in sorted_ids if iid not in bulk_completed and iid not in bulk_rejected]  # noqa: E501
+        pending_bulk_ids = [
+            iid for iid in sorted_ids if iid not in bulk_completed and iid not in bulk_rejected
+        ]  # noqa: E501
 
     # After bulk, check if all bulk done (no pending, no in_flight)
     # Then proceed to QA selection if needed
@@ -3278,7 +3548,9 @@ def build_stage04(
                 txt = str(val.get("text", ""))
                 if len(txt) > 50 or "flag" in txt.lower():
                     flagged_ids.append(iid)
-        audit_sample = _deterministic_audit_sample(sorted(bulk_completed.keys()), queue_sha, audit_sample_size)  # noqa: E501
+        audit_sample = _deterministic_audit_sample(
+            sorted(bulk_completed.keys()), queue_sha, audit_sample_size
+        )  # noqa: E501
         required_qa_ids = sorted(set(flagged_ids) | set(audit_sample))
         qa_state["required"] = required_qa_ids
         _write_checkpoint(ckpt_p, identity, state)
@@ -3292,12 +3564,17 @@ def build_stage04(
     if not isinstance(qa_completed, dict) or not isinstance(qa_rejected, dict):
         raise BuildDictError("Stage 04 checkpoint is corrupt")
 
-    pending_qa_ids = [iid for iid in required_qa_ids if iid not in qa_completed and iid not in qa_rejected]  # noqa: E501
+    pending_qa_ids = [
+        iid for iid in required_qa_ids if iid not in qa_completed and iid not in qa_rejected
+    ]  # noqa: E501
+
+    if pending_qa_ids and (transport is None or not hasattr(transport, "send_qa")):
+        raise BuildDictError("No local deterministic Stage 04 QA transport configured")
 
     if pending_qa_ids and transport is not None and hasattr(transport, "send_qa"):
         unit_size = batch_size
         for i in range(0, len(pending_qa_ids), unit_size):
-            unit_ids = pending_qa_ids[i:i+unit_size]
+            unit_ids = pending_qa_ids[i : i + unit_size]
             qa_state["in_flight"] = list(unit_ids)
             _write_checkpoint(ckpt_p, identity, state)
             try:
@@ -3334,7 +3611,13 @@ def build_stage04(
                         "evidence": {"candidate": {"text": text[:50]}},
                     }
                 else:
-                    valid_qa[iid] = {"text": text.strip(), "language": language, "kind": kind, "source": GENERATED_MARKER, "license": generated_license}  # noqa: E501
+                    valid_qa[iid] = {
+                        "text": text.strip(),
+                        "language": language,
+                        "kind": kind,
+                        "source": GENERATED_MARKER,
+                        "license": generated_license,
+                    }  # noqa: E501
             for iid, val in valid_qa.items():
                 qa_completed[iid] = val
             for iid, val in rejected_qa.items():
@@ -3350,11 +3633,14 @@ def build_stage04(
     if not out_p.exists():
         # Atomic copy
         out_p.parent.mkdir(parents=True, exist_ok=True)
-        tf = tempfile.NamedTemporaryFile(dir=out_p.parent, prefix=f".{out_p.name}.", suffix=".tmp", delete=False)  # noqa: E501
+        tf = tempfile.NamedTemporaryFile(
+            dir=out_p.parent, prefix=f".{out_p.name}.", suffix=".tmp", delete=False
+        )  # noqa: E501
         tf_path = Path(tf.name)
         tf.close()
         try:
             import shutil
+
             shutil.copyfile(stage02_p, tf_path)
             conn_out = sqlite3.connect(tf_path)
             try:
@@ -3367,7 +3653,9 @@ def build_stage04(
                     else:
                         final_texts[iid] = bulk_completed[iid]
                 # Need to assign new sense_meaning IDs
-                max_id = conn_out.execute("SELECT COALESCE(MAX(id), 0) FROM sense_meaning").fetchone()[0]  # noqa: E501
+                max_id = conn_out.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM sense_meaning"
+                ).fetchone()[0]  # noqa: E501
                 next_id = int(max_id) + 1
                 # For deterministic ord, we use 0 for now; but need to ensure unique per sense/language/kind  # noqa: E501
                 # We'll insert with ord=0 and if conflict, increment
@@ -3378,24 +3666,47 @@ def build_stage04(
                     kind = str((val if isinstance(val, dict) else {}).get("kind", ""))
                     text = str((val if isinstance(val, dict) else {}).get("text", ""))
                     # Determine ord: count existing rows for this sense/language/kind
-                    existing_ords = [r[0] for r in conn_out.execute("SELECT ord FROM sense_meaning WHERE sense_id=? AND language=? AND kind=?", (sense_id, language, kind)).fetchall()]  # noqa: E501
+                    existing_ords = [
+                        r[0]
+                        for r in conn_out.execute(
+                            "SELECT ord FROM sense_meaning WHERE sense_id=? "
+                            "AND language=? AND kind=?",
+                            (sense_id, language, kind),
+                        ).fetchall()
+                    ]  # noqa: E501
                     ord_val = 0
                     while ord_val in existing_ords:
                         ord_val += 1
                     conn_out.execute(
                         "INSERT INTO sense_meaning (id, sense_id, language, kind, ord, text, source, license) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",  # noqa: E501
-                        (next_id, sense_id, language, kind, ord_val, text, GENERATED_MARKER, generated_license),  # noqa: E501
+                        (
+                            next_id,
+                            sense_id,
+                            language,
+                            kind,
+                            ord_val,
+                            text,
+                            GENERATED_MARKER,
+                            generated_license,
+                        ),  # noqa: E501
                     )
                     # Derivation edge: for each derivation_source_ids
                     deriv_ids = it.get("derivation_source_ids", [])
                     if isinstance(deriv_ids, list):
                         for src_mid in deriv_ids:
                             # Validate derivation: source must be non-generated, same sense
-                            src_row = conn_out.execute("SELECT sense_id, source FROM sense_meaning WHERE id=?", (src_mid,)).fetchone()  # noqa: E501
+                            src_row = conn_out.execute(
+                                "SELECT sense_id, source FROM sense_meaning WHERE id=?", (src_mid,)
+                            ).fetchone()  # noqa: E501
                             if src_row is None:
-                                raise BuildDictError(f"Derivation source {src_mid} not found for {iid}")  # noqa: E501
+                                raise BuildDictError(
+                                    f"Derivation source {src_mid} not found for {iid}"
+                                )  # noqa: E501
                             if src_row[1] and GENERATED_MARKER_PATTERN.match(str(src_row[1])):
-                                raise BuildDictError(f"Generated->generated derivation forbidden for {iid} source {src_mid}")  # noqa: E501
+                                raise BuildDictError(
+                                    "Generated->generated derivation forbidden for "
+                                    f"{iid} source {src_mid}"
+                                )  # noqa: E501
                             if int(src_row[0]) != sense_id:
                                 raise BuildDictError(f"Cross-sense derivation forbidden for {iid}")
                             conn_out.execute(
@@ -3427,6 +3738,7 @@ def build_stage04(
         "manifests": len(manifests_list) if isinstance(manifests_list, list) else 0,
     }
 
+
 def retry_rejected(
     checkpoint_path: Path | str,
     queue_path: Path | str,
@@ -3445,7 +3757,9 @@ def retry_rejected(
     items = queue_data["items"]
     item_by_id = {str(it["item_id"]): it for it in items}
     queue_sha = hashlib.sha256(queue_p.read_bytes()).hexdigest()
-    identity = _checkpoint_identity(queue_sha, GENERATED_MARKER, generated_license, bulk_de_model, bulk_en_model, qa_model)  # noqa: E501
+    identity = _checkpoint_identity(
+        queue_sha, GENERATED_MARKER, generated_license, bulk_de_model, bulk_en_model, qa_model
+    )  # noqa: E501
     state = _load_checkpoint(ckpt_p, identity)
     bulk_state: Any = state["bulk"]
     qa_state: Any = state["qa"]
@@ -3467,7 +3781,9 @@ def retry_rejected(
             del qa_state["rejected"][rid]
     _write_checkpoint(ckpt_p, identity, state)
 
+
 # --- Stage05 ---
+
 
 def build_stage05(
     input_path: Path | str,
@@ -3489,8 +3805,19 @@ def build_stage05(
         ck = conn_in.execute("PRAGMA quick_check").fetchall()
         if ck != [("ok",)]:
             raise BuildDictError(f"Input PRAGMA quick_check failed: {ck}")
-        tables = {r[0] for r in conn_in.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}  # noqa: E501
-        required = {"lemma", "surface_form", "sense", "sense_meaning", "sense_meaning_derivation", "example", "example_lemma"}  # noqa: E501
+        tables = {
+            r[0]
+            for r in conn_in.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }  # noqa: E501
+        required = {
+            "lemma",
+            "surface_form",
+            "sense",
+            "sense_meaning",
+            "sense_meaning_derivation",
+            "example",
+            "example_lemma",
+        }  # noqa: E501
         missing = required - tables
         if missing:
             raise BuildDictError(f"Input missing required tables: {sorted(missing)}")
@@ -3505,7 +3832,10 @@ def build_stage05(
                     raise BuildDictError(f"Duplicate {table}.{col} {val}")
                 seen.add(val)
         # Validate attribution
-        bad = conn_in.execute("SELECT count(*) FROM sense_meaning WHERE source IS NULL OR trim(source)='' OR license IS NULL OR trim(license)=''").fetchone()[0]  # noqa: E501
+        bad = conn_in.execute(
+            "SELECT count(*) FROM sense_meaning WHERE source IS NULL OR trim(source)='' "
+            "OR license IS NULL OR trim(license)=''"
+        ).fetchone()[0]  # noqa: E501
         if bad:
             raise BuildDictError(f"Bad attribution rows: {bad}")
         # Validate derivation integrity
@@ -3530,11 +3860,14 @@ def build_stage05(
         conn_in.close()
     # Atomic copy to output
     out_p.parent.mkdir(parents=True, exist_ok=True)
-    tf = tempfile.NamedTemporaryFile(dir=out_p.parent, prefix=f".{out_p.name}.", suffix=".tmp", delete=False)  # noqa: E501
+    tf = tempfile.NamedTemporaryFile(
+        dir=out_p.parent, prefix=f".{out_p.name}.", suffix=".tmp", delete=False
+    )  # noqa: E501
     tf_path = Path(tf.name)
     tf.close()
     try:
         import shutil
+
         shutil.copyfile(in_p, tf_path)
         conn_out = sqlite3.connect(tf_path)
         try:
@@ -3569,15 +3902,18 @@ def build_stage05(
         if meta_p.exists():
             raise BuildDictError(f"Metadata path already exists: {meta_p}")
         meta_p.parent.mkdir(parents=True, exist_ok=True)
-        meta_p.write_text(json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")  # noqa: E501
+        meta_p.write_text(
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8"
+        )  # noqa: E501
     else:
         # Default alongside output
         default_meta = out_p.with_suffix(".json")
         if default_meta != out_p and not default_meta.exists():
-            default_meta.write_text(json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")  # noqa: E501
+            default_meta.write_text(
+                json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8"
+            )  # noqa: E501
 
     return metadata
-
 
 
 if __name__ == "__main__":
