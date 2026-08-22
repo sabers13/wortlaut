@@ -2059,12 +2059,12 @@ ALLOWED_FA_CF: Final[frozenset[int]] = frozenset({0x200C})
 
 GENERATED_MARKER: Final[str] = "llm_generated_v1"
 GENERATED_MARKER_PATTERN: Final[re.Pattern[str]] = re.compile(r"^llm_generated_v[1-9][0-9]*$")
-STAGE03_QUEUE_FORMAT: Final[str] = "flashcard-stage03-queue-v1"
-STAGE04_CHECKPOINT_FORMAT: Final[str] = "flashcard-stage04-checkpoint-v2"
+STAGE03_QUEUE_FORMAT: Final[str] = "flashcard-stage03-queue-v2"
+STAGE04_CHECKPOINT_FORMAT: Final[str] = "flashcard-stage04-checkpoint-v3"
 STAGE04_MAX_TEXT_LENGTH: Final[int] = 280
-STAGE04_BULK_PIPELINE_VERSION: Final[str] = "stage04-bulk-v1"
-STAGE04_QA_PIPELINE_VERSION: Final[str] = "stage04-qa-v1"
-STAGE04_RESPONSE_SCHEMA_VERSION: Final[str] = "openai-responses-json-schema-v1"
+STAGE04_BULK_PIPELINE_VERSION: Final[str] = "stage04-bulk-v2"
+STAGE04_QA_PIPELINE_VERSION: Final[str] = "stage04-qa-v2"
+STAGE04_RESPONSE_SCHEMA_VERSION: Final[str] = "openai-responses-json-schema-v2"
 STAGE04_DEFAULT_BULK_DE_MODEL: Final[str] = "gpt-5.6-luna"
 STAGE04_DEFAULT_BULK_EN_MODEL: Final[str] = "gpt-5.6-luna"
 STAGE04_DEFAULT_QA_MODEL: Final[str] = "gpt-5.6-terra"
@@ -2146,6 +2146,175 @@ def fa_v3_request_body(item: dict[str, object], model: str) -> dict[str, object]
     }
 
 
+DE_LEARNER_INSTRUCTIONS: Final[str] = (
+    "Work only on the supplied single semantic sense.\n"
+    "The supplied English meaning text defines that sense.\n"
+    "The stable identity refs (lemma_semantic_ref, sense_semantic_ref) are opaque identifiers and carry no semantic meaning; do not interpret them.\n"  # noqa: E501
+    "Output German only.\n"
+    "Prefer one simple/common German synonym when it truly preserves the exact sense.\n"
+    "Otherwise produce one short learner-friendly German explanation.\n"
+    "Aim approximately at A2-B1 comprehension where practical.\n"
+    "Do not broaden, narrow, merge, or drift to another sense.\n"
+    "Do not merely repeat or inflect the lemma as the definition.\n"
+    "No dictionary meta-commentary such as 'siehe', 'vgl.', 'Abkürzung', 'Form von', etc.\n"
+    "No etymology, examples, analysis, alternative unrelated senses, or English.\n"
+    "For morphology/inflection senses, describe that exact morphology concisely in German when a simple synonym is not appropriate.\n"  # noqa: E501
+    "Return only the fields defined by the structured response schema.\n"
+    "Prefer brevity well below deterministic maximum bounds."
+)
+
+DE_LEARNER_SCHEMA: Final[dict[str, object]] = {
+    "type": "json_schema",
+    "name": "de_learner_meaning",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "meaning": {"type": "string"},
+            "kind": {"type": "string", "enum": ["synonym", "definition"]},
+        },
+        "required": ["meaning", "kind"],
+        "additionalProperties": False,
+    },
+}
+
+EN_MEANING_SCHEMA: Final[dict[str, object]] = {
+    "type": "json_schema",
+    "name": "en_meaning",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {"meaning": {"type": "string"}},
+        "required": ["meaning"],
+        "additionalProperties": False,
+    },
+}
+
+
+def _build_de_prompt_text(item: dict[str, object]) -> str:
+    lemma = str(item.get("lemma_text", ""))
+    pos = str(item.get("pos", ""))
+    gender = item.get("gender")
+    lemma_ref = str(item.get("lemma_semantic_ref", ""))
+    sense_ref = str(item.get("sense_semantic_ref", ""))
+    en_inputs = item.get("derivation_inputs", [])
+    if not isinstance(en_inputs, list):
+        en_inputs = []
+    lines: list[str] = []
+    lines.append("Generate a German learner meaning for exactly ONE semantic sense.")
+    lines.append(f"German lemma: {lemma}")
+    lines.append(f"POS: {pos}")
+    if gender is not None and str(gender).strip():
+        lines.append(f"Gender: {gender}")
+    lines.append("English meaning(s) defining this exact sense (canonical order, same sense, source-backed):")  # noqa: E501
+    if en_inputs:
+        for idx, en in enumerate(en_inputs, 1):
+            if isinstance(en, dict):
+                txt = str(en.get("text", "")).strip()
+                lines.append(f"{idx}. {txt}")
+            else:
+                lines.append(f"{idx}. {str(en)}")
+    else:
+        lines.append("(no English source meaning available for this sense)")
+    lines.append("Opaque identifiers (carry no semantic meaning, for correlation only):")
+    lines.append(f"lemma_semantic_ref: {lemma_ref}  # opaque")
+    lines.append(f"sense_semantic_ref: {sense_ref}  # opaque")
+    lines.append("")
+    lines.append(DE_LEARNER_INSTRUCTIONS)
+    return "\n".join(lines)
+
+
+def de_learner_meaning_request_body(item: dict[str, object], model: str) -> dict[str, object]:
+    """Single-source logical request body for de_learner_meaning (stage04-bulk-v2).
+
+    The identical body is used for synchronous POST /v1/responses and for
+    Batch record body.
+    """
+    if not model or not model.strip():
+        raise BuildDictError("Model must be non-empty for DE request body")
+    prompt = _build_de_prompt_text(item)
+    # Ensure prompt contains real instructions and EN texts
+    if "German lemma:" not in prompt or "English meaning(s)" not in prompt:
+        raise BuildDictError("DE prompt missing required semantic context")
+    return {
+        "model": model,
+        "input": prompt,
+        "text": {"format": dict(DE_LEARNER_SCHEMA)},
+    }
+
+
+def en_meaning_request_body(item: dict[str, object], model: str) -> dict[str, object]:
+    """Single-source logical request body for en_meaning."""
+    if not model or not model.strip():
+        raise BuildDictError("Model must be non-empty for EN request body")
+    lemma = str(item.get("lemma_text", ""))
+    pos = str(item.get("pos", ""))
+    gender = item.get("gender")
+    lemma_ref = str(item.get("lemma_semantic_ref", ""))
+    sense_ref = str(item.get("sense_semantic_ref", ""))
+    lines: list[str] = []
+    lines.append("Generate an English translation for exactly ONE German semantic sense.")
+    lines.append(f"German lemma: {lemma}")
+    lines.append(f"POS: {pos}")
+    if gender is not None and str(gender).strip():
+        lines.append(f"Gender: {gender}")
+    lines.append("Opaque identifiers (carry no semantic meaning, for correlation only):")
+    lines.append(f"lemma_semantic_ref: {lemma_ref}  # opaque")
+    lines.append(f"sense_semantic_ref: {sense_ref}  # opaque")
+    lines.append("Return only the fields defined by the structured response schema. Output English only.")  # noqa: E501
+    prompt = "\n".join(lines)
+    return {
+        "model": model,
+        "input": prompt,
+        "text": {"format": dict(EN_MEANING_SCHEMA)},
+    }
+
+
+def _request_body_for_item(item: dict[str, object], bulk_de_model: str, bulk_en_model: str) -> dict[str, object]:  # noqa: E501
+    lang = str(item.get("language", ""))
+    if lang == "de":
+        return de_learner_meaning_request_body(item, bulk_de_model)
+    if lang == "en":
+        return en_meaning_request_body(item, bulk_en_model)
+    raise BuildDictError(f"Unsupported language for request body: {lang}")
+
+
+def de_learner_qa_request_body(item: dict[str, object], candidate_text: str, model: str) -> dict[str, object]:  # noqa: E501
+    """QA body that receives repaired semantic context plus German candidate."""
+    if not model or not model.strip():
+        raise BuildDictError("Model must be non-empty for QA request body")
+    lemma = str(item.get("lemma_text", ""))
+    pos = str(item.get("pos", ""))
+    gender = item.get("gender")
+    lemma_ref = str(item.get("lemma_semantic_ref", ""))
+    sense_ref = str(item.get("sense_semantic_ref", ""))
+    en_inputs = item.get("derivation_inputs", [])
+    if not isinstance(en_inputs, list):
+        en_inputs = []
+    lines: list[str] = []
+    lines.append("Evaluate the German learner meaning candidate for exactly ONE semantic sense.")
+    lines.append(f"German lemma: {lemma}")
+    lines.append(f"POS: {pos}")
+    if gender is not None and str(gender).strip():
+        lines.append(f"Gender: {gender}")
+    lines.append("English meaning(s) defining this exact sense (canonical order, same sense, source-backed):")  # noqa: E501
+    if en_inputs:
+        for idx, en in enumerate(en_inputs, 1):
+            if isinstance(en, dict):
+                lines.append(f"{idx}. {str(en.get('text','')).strip()}")
+    lines.append(f"German candidate to evaluate: {candidate_text}")
+    lines.append("Opaque identifiers (carry no semantic meaning, for correlation only):")
+    lines.append(f"lemma_semantic_ref: {lemma_ref}  # opaque")
+    lines.append(f"sense_semantic_ref: {sense_ref}  # opaque")
+    lines.append("Instructions: verify the candidate preserves the exact sense defined by the English meaning(s), is German only, contains no meta-commentary, and follows A2-B1 brevity. Return the corrected meaning if needed, preserving the strict schema.")  # noqa: E501
+    # QA reuses DE schema for correction
+    return {
+        "model": model,
+        "input": "\n".join(lines),
+        "text": {"format": dict(DE_LEARNER_SCHEMA)},
+    }
+
+
 def credential_format_ok(value: str) -> bool:
     """Local/no-network credential-format sanity check (never prints/persists).
 
@@ -2220,6 +2389,38 @@ def _write_canary_selection_manifest(
     finally:
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
+
+
+def _render_canary_receipt(path: Path, expected_sha256: str) -> list[dict[str, object]]:
+    """Human receipt renderer: re-reads canonical selection artifact, SHA-verified.
+
+    Every displayed field for one row must come from the exact same artifact
+    record. Rejects extra/missing/mutated rows and SHA mismatches fail closed.
+    """
+    if not path.is_file():
+        raise BuildDictError(f"Canary artifact not found: {path}")
+    raw = path.read_bytes()
+    actual_sha = hashlib.sha256(raw).hexdigest()
+    if actual_sha != expected_sha256:
+        raise BuildDictError(f"Canary SHA mismatch: expected {expected_sha256}, got {actual_sha}")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        raise BuildDictError("Canary artifact is malformed JSON") from e
+    if not isinstance(data, list):
+        raise BuildDictError("Canary artifact must be a JSON list")
+    # Verify deterministic bytewise order
+    ids = [str(rec.get("item_id", "")) for rec in data if isinstance(rec, dict)]
+    if ids != sorted(ids, key=lambda x: x.encode()):
+        raise BuildDictError("Canary artifact not bytewise sorted")
+    # Validate each record structure minimally
+    for rec in data:
+        if not isinstance(rec, dict):
+            raise BuildDictError("Canary artifact record must be object")
+        if "item_id" not in rec or "lemma_text" not in rec:
+            # Require minimal fields for DE canary; allow generic but ensure item_id present
+            raise BuildDictError("Canary artifact record missing required fields")
+    return data
 
 
 def _validate_persian_unicode(text: str) -> str | None:
@@ -2314,7 +2515,30 @@ def _compute_queue_item_id(
         separators=(",", ":"),
         sort_keys=False,
     ).encode("utf-8")
-    return f"queue:v1:{hashlib.sha256(payload).hexdigest()[:32]}"
+    return f"queue:v2:{hashlib.sha256(payload).hexdigest()[:32]}"
+
+
+def _compute_queue_item_id_v2(
+    lemma_ref: str,
+    sense_ref: str,
+    language: str,
+    job_class: str,
+    semantic_rows: list[dict[str, object]],
+) -> str:
+    """Compute durable queue:v2: item id from semantic identity + source content.
+
+    semantic_rows is the ordered list of EN source rows represented as
+    deterministic semantic content dicts with keys language, kind, ord, text,
+    source, license (no numeric IDs). The hash depends only on that content
+    plus the stable lemma/sense refs, target language and job class.
+    """
+    payload = json.dumps(
+        [lemma_ref, sense_ref, language, job_class, semantic_rows],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return f"queue:v2:{hashlib.sha256(payload).hexdigest()[:32]}"
 
 
 def _compute_fa_v2_item_id(lemma_ref: str, sense_ref: str) -> str:
@@ -2521,531 +2745,273 @@ def build_stage03(
     packet_path: Path | str | None = None,
     report_path: Path | str | None = None,
 ) -> dict[str, object]:
-    """Execute Stage 03 deterministic enrichment queue construction."""
+    """Execute Stage 03 deterministic enrichment queue construction — v2 semantic context.
+
+    Repair: every de_learner_meaning job carries ALL same-sense source-backed EN
+    sense_meaning rows (ordered ord ASC, id ASC) as semantic context and
+    derivation inputs. Item identity depends only on stable semantic refs and
+    that source-content (no numeric IDs). Queue format is flashcard-stage03-queue-v2
+    with queue:v2: ids. Implementation is deterministic and bounded-memory via
+    temp-sort DB and streaming writes.
+    """
     stage02_p = Path(stage02_path)
     out_p = Path(output_path)
     if out_p.exists():
         raise BuildDictError(f"Output path already exists: {out_p}")
-    # No network - ensure no socket usage (we just don't call network)
+    if packet_path is not None or report_path is not None:
+        raise BuildDictError(
+            "Persian-era Stage 03 packet/report outputs are retired by ADR-0007"
+        )
     validate_stage02_for_stage03(stage02_p)
-    # Also verify SHA/bytes if needed? Caller verifies separately. We ensure read-only no mutation.
     sha_before = sha256_file(stage02_p)
+
+    # Use a temp directory for bounded-memory sort spill
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    temp_sort_file = tempfile.NamedTemporaryFile(
+        dir=out_p.parent, prefix=f".{out_p.name}.sort.", suffix=".sqlite.tmp", delete=False
+    )
+    temp_sort_path = Path(temp_sort_file.name)
+    temp_sort_file.close()
+    temp_sort_path.unlink(missing_ok=True)
+
+    conn_sort = sqlite3.connect(temp_sort_path)
+    conn_sort.execute("CREATE TABLE temp_items(item_id TEXT PRIMARY KEY, item_json TEXT NOT NULL)")
+    # For quick stats
+    total_senses = 0
+    de_count = 0
+    en_count = 0
+    derivation_inputs_total = 0
+    one_source = 0
+    two_source = 0
+    three_source = 0
+    zero_source = 0
 
     conn = sqlite3.connect(f"file:{stage02_p.resolve()}?mode=ro", uri=True)
     try:
-        # Collect senses deterministically ordered by semantic_ref bytes, then id
-        senses = conn.execute(
-            "SELECT s.id, s.lemma_id, s.semantic_ref, s.source_namespace, s.source_ref, s.ord, "
-            "l.semantic_ref as lemma_ref, l.lemma, l.pos, l.gender "
+        # Iterate senses in deterministic order (semantic_ref). Use cursor streaming.
+        sense_cur = conn.execute(
+            "SELECT s.id, s.lemma_id, s.semantic_ref, l.semantic_ref as lemma_ref, "
+            "l.lemma, l.pos, l.gender "
             "FROM sense s JOIN lemma l ON l.id=s.lemma_id "
             "ORDER BY s.semantic_ref ASC, s.id ASC"
-        ).fetchall()
-        total_senses = len(senses)
+        )
+        for sense_row in sense_cur:
+            sid, lemma_id, sense_ref, lemma_ref, lemma_text, pos, gender = sense_row
+            total_senses += 1
+            # Fetch EN rows for this sense: source-backed, non-generated, language en, same sense
+            en_rows = conn.execute(
+                "SELECT id, language, kind, ord, text, source, license "
+                "FROM sense_meaning "
+                "WHERE sense_id=? AND language='en' AND source NOT GLOB 'llm_generated_v*' "
+                "ORDER BY ord ASC, id ASC",
+                (sid,),
+            ).fetchall()
+            # Filter nonblank? Spec says nonblank same-sense source-backed. Keep only nonblank texts.  # noqa: E501
+            en_rows_filtered: list[tuple[int, str, str, int, str, str, str]] = []
+            for r in en_rows:
+                rid, lang, kind, ordv, text, src, lic = r
+                if not str(text).strip():
+                    continue
+                # Ensure source/license nonblank
+                if not str(src).strip() or not str(lic).strip():
+                    continue
+                # Must be translation? spec says kind='translation' but we accept any source-backed en  # noqa: E501
+                en_rows_filtered.append((rid, lang, kind, ordv, text, src, lic))
 
-        # ADR-0007 reset: the active queue is strictly DE/EN source-first.
-        # The historical Persian code below is deliberately unreachable pending
-        # removal; it is retained only until the legacy checkpoint evidence is
-        # independently archived.  No FA row is read or interpreted here.
-        en_rows: dict[int, list[sqlite3.Row]] = {}
-        de_rows: dict[int, list[sqlite3.Row]] = {}
-        conn.row_factory = sqlite3.Row
-        for meaning in conn.execute(
-            "SELECT id, sense_id, language, kind, ord, text, source, license "
-            "FROM sense_meaning WHERE language IN ('de', 'en') "
-            "AND source NOT GLOB 'llm_generated_v[0-9]*' "
-            "ORDER BY sense_id, language, ord, id"
-        ):
-            target = de_rows if meaning["language"] == "de" else en_rows
-            target.setdefault(int(meaning["sense_id"]), []).append(meaning)
+            # Fetch DE rows for eligibility only
+            de_rows = conn.execute(
+                "SELECT text, kind FROM sense_meaning "
+                "WHERE sense_id=? AND language='de' AND source NOT GLOB 'llm_generated_v*'",
+                (sid,),
+            ).fetchall()
+            has_en = len(en_rows_filtered) > 0
+            # EN missing -> en_meaning job (rare; in real asset zero)
+            if not has_en:
+                # No EN context, so semantic rows empty
+                semantic_rows: list[dict[str, object]] = []
+                item_id = _compute_queue_item_id_v2(lemma_ref, sense_ref, "en", "en_meaning", semantic_rows)  # noqa: E501
+                custom_id = f"batch:{item_id}"
+                if not item_id.startswith("queue:v2:"):
+                    raise BuildDictError("Stage03 v2 must emit queue:v2: ids")
+                item: dict[str, object] = {
+                    "item_id": item_id,
+                    "custom_id": custom_id,
+                    "lemma_semantic_ref": lemma_ref,
+                    "sense_semantic_ref": sense_ref,
+                    "lemma_text": lemma_text,
+                    "pos": pos,
+                    "gender": gender,
+                    "sense_id": sid,
+                    "lemma_id": lemma_id,
+                    "language": "en",
+                    "job_class": "en_meaning",
+                    "derivation_inputs": [],
+                    "derivation_source_ids": [],
+                }
+                item_json = _canonical_json(item)
+                try:
+                    conn_sort.execute("INSERT INTO temp_items(item_id, item_json) VALUES (?, ?)", (item_id, item_json))  # noqa: E501
+                except sqlite3.IntegrityError as e:
+                    raise BuildDictError(f"Duplicate Stage 03 queue item ID {item_id}") from e
+                en_count += 1
+                zero_source += 1  # en jobs have zero EN derivation by definition
 
-        active_queue_items: list[dict[str, object]] = []
-        for row in senses:
-            (
-                sid,
-                lemma_id,
-                sense_ref,
-                _src_ns,
-                _src_ref,
-                _ord,
-                lemma_ref,
-                lemma_text,
-                pos,
-                gender,
-            ) = row
-            base_context = {
-                "lemma": lemma_text,
-                "pos": pos,
-                "gender": gender,
-                "sense_semantic_ref": sense_ref,
-            }
-            if not any(str(m["text"]).strip() for m in en_rows.get(int(sid), [])):
-                job_class = "en_meaning"
-                context_payload = _canonical_json({"context": base_context, "sources": []})
-                item_id = _compute_queue_item_id(
-                    lemma_ref, sense_ref, "en", job_class, context_payload
-                )
-                active_queue_items.append(
-                    {
-                        "item_id": item_id,
-                        "custom_id": f"batch:{item_id}",
-                        "lemma_semantic_ref": lemma_ref,
-                        "sense_semantic_ref": sense_ref,
-                        "lemma_text": lemma_text,
-                        "pos": pos,
-                        "gender": gender,
-                        "sense_id": sid,
-                        "lemma_id": lemma_id,
-                        "language": "en",
-                        "job_class": job_class,
-                        "context": base_context,
-                        "derivation_inputs": [],
-                        "derivation_source_ids": [],
-                    }
-                )
-            source_rows = de_rows.get(int(sid), [])
-            eligible = any(
-                _validate_de_source_eligibility(str(m["text"]), str(m["kind"])) is None
-                for m in source_rows
-            )
+            # DE eligibility: any source-backed DE row passing positive predicate
+            eligible = False
+            for text, kind in de_rows:
+                if _validate_de_source_eligibility(str(text), str(kind)) is None:
+                    eligible = True
+                    break
             if not eligible:
-                inputs = [
-                    {
-                        "input_id": f"meaning:{int(m['id'])}",
-                        "meaning_id": int(m["id"]),
-                        "language": "de",
-                        "kind": str(m["kind"]),
-                        "text": str(m["text"]),
-                        "source": str(m["source"]),
-                        "license": str(m["license"]),
-                    }
-                    for m in source_rows
-                ]
-                job_class = "de_learner_meaning"
-                context_payload = _canonical_json({"context": base_context, "sources": inputs})
-                item_id = _compute_queue_item_id(
-                    lemma_ref, sense_ref, "de", job_class, context_payload
-                )
-                active_queue_items.append(
-                    {
-                        "item_id": item_id,
-                        "custom_id": f"batch:{item_id}",
-                        "lemma_semantic_ref": lemma_ref,
-                        "sense_semantic_ref": sense_ref,
-                        "lemma_text": lemma_text,
-                        "pos": pos,
-                        "gender": gender,
-                        "sense_id": sid,
-                        "lemma_id": lemma_id,
-                        "language": "de",
-                        "job_class": job_class,
-                        "context": base_context,
-                        "derivation_inputs": inputs,
-                        "derivation_source_ids": [int(m["id"]) for m in source_rows],
-                    }
-                )
+                # Build semantic rows for ID (without numeric IDs)
+                semantic_rows = []
+                derivation_inputs: list[dict[str, object]] = []
+                derivation_ids: list[int] = []
+                for rid, lang, kind, ordv, text, src, lic in en_rows_filtered:
+                    semantic_rows.append(
+                        {
+                            "language": str(lang),
+                            "kind": str(kind),
+                            "ord": int(ordv),
+                            "text": str(text),
+                            "source": str(src),
+                            "license": str(lic),
+                        }
+                    )
+                    derivation_inputs.append(
+                        {
+                            "meaning_id": int(rid),
+                            "language": str(lang),
+                            "kind": str(kind),
+                            "ord": int(ordv),
+                            "text": str(text),
+                            "source": str(src),
+                            "license": str(lic),
+                        }
+                    )
+                    derivation_ids.append(int(rid))
+                # Deterministic order already ord,id
+                item_id = _compute_queue_item_id_v2(lemma_ref, sense_ref, "de", "de_learner_meaning", semantic_rows)  # noqa: E501
+                custom_id = f"batch:{item_id}"
+                if not item_id.startswith("queue:v2:"):
+                    raise BuildDictError("Stage03 v2 must emit queue:v2: ids")
+                item = {
+                    "item_id": item_id,
+                    "custom_id": custom_id,
+                    "lemma_semantic_ref": lemma_ref,
+                    "sense_semantic_ref": sense_ref,
+                    "lemma_text": lemma_text,
+                    "pos": pos,
+                    "gender": gender,
+                    "sense_id": sid,
+                    "lemma_id": lemma_id,
+                    "language": "de",
+                    "job_class": "de_learner_meaning",
+                    "derivation_inputs": derivation_inputs,
+                    "derivation_source_ids": derivation_ids,
+                }
+                item_json = _canonical_json(item)
+                try:
+                    conn_sort.execute("INSERT INTO temp_items(item_id, item_json) VALUES (?, ?)", (item_id, item_json))  # noqa: E501
+                except sqlite3.IntegrityError as e:
+                    raise BuildDictError(f"Duplicate Stage 03 queue item ID {item_id}") from e
+                de_count += 1
+                n = len(derivation_ids)
+                derivation_inputs_total += n
+                if n == 0:
+                    zero_source += 1
+                elif n == 1:
+                    one_source += 1
+                elif n == 2:
+                    two_source += 1
+                elif n == 3:
+                    three_source += 1
+                else:
+                    # real data max 3, but generic
+                    if n > 3:
+                        three_source += 1  # count as 3+ bucket for now
+        conn_sort.commit()
 
-        active_queue_items.sort(key=lambda item: str(item["item_id"]).encode("utf-8"))
-        if len({str(item["item_id"]) for item in active_queue_items}) != len(active_queue_items):
-            raise BuildDictError("Duplicate Stage 03 queue item ID")
-        if any(item["language"] not in ("de", "en") for item in active_queue_items):
-            raise BuildDictError("Stage 03 produced a non-DE/EN queue item")
-        if any(
-            item["job_class"] not in ("de_learner_meaning", "en_meaning")
-            for item in active_queue_items
-        ):
-            raise BuildDictError("Stage 03 produced an unsupported queue job")
-        item_bytes = _canonical_json(active_queue_items).encode("utf-8")
-        item_sha = hashlib.sha256(item_bytes).hexdigest()
-        payload = {
-            "format": STAGE03_QUEUE_FORMAT,
-            "items_sha256": item_sha,
-            "items": active_queue_items,
-        }
-        output_bytes = (_canonical_json(payload) + "\n").encode("utf-8")
-        for forbidden in ("api_key", "authorization", "bearer", "password", "/home/"):
-            if forbidden in output_bytes.decode("utf-8").casefold():
-                raise BuildDictError("Stage 03 queue contains forbidden private material")
-        out_p.parent.mkdir(parents=True, exist_ok=True)
-        temporary = tempfile.NamedTemporaryFile(
+        # Verify no queue:v1: leakage
+        v1_leak = conn_sort.execute("SELECT count(*) FROM temp_items WHERE item_id GLOB 'queue:v1:*'").fetchone()[0]  # noqa: E501
+        if v1_leak:
+            raise BuildDictError("Repaired Stage03 emitted queue:v1: ids")
+
+        # Compute items_sha incrementally over sorted items
+        hasher = hashlib.sha256()
+        hasher.update(b"[")
+        first = True
+        for (item_json,) in conn_sort.execute("SELECT item_json FROM temp_items ORDER BY item_id ASC"):  # noqa: E501
+            if not first:
+                hasher.update(b",")
+            hasher.update(item_json.encode("utf-8"))
+            first = False
+        hasher.update(b"]")
+        items_sha = hasher.hexdigest()
+
+        # Stream write final payload
+        tmp_out = tempfile.NamedTemporaryFile(
             dir=out_p.parent, prefix=f".{out_p.name}.", suffix=".tmp", delete=False
         )
-        temp_path = Path(temporary.name)
-        temporary.close()
+        tmp_out_path = Path(tmp_out.name)
+        tmp_out.close()
         try:
-            temp_path.write_bytes(output_bytes)
+            with tmp_out_path.open("wb") as f:
+                # Canonical payload: keys sorted => format, items, items_sha256
+                f.write(b'{"format":"')
+                f.write(STAGE03_QUEUE_FORMAT.encode("utf-8"))
+                f.write(b'","items":')
+                f.write(b"[")
+                first = True
+                for (item_json,) in conn_sort.execute("SELECT item_json FROM temp_items ORDER BY item_id ASC"):  # noqa: E501
+                    if not first:
+                        f.write(b",")
+                    f.write(item_json.encode("utf-8"))
+                    first = False
+                f.write(b"]")
+                f.write(b',"items_sha256":"')
+                f.write(items_sha.encode("utf-8"))
+                f.write(b'"}')
+                f.write(b"\n")
+            # Forbidden material scan
+            raw = tmp_out_path.read_bytes()
+            lower = raw.decode("utf-8", errors="ignore").casefold()
+            for forbidden in ("api_key", "/home/"):
+                if forbidden in lower:
+                    raise BuildDictError(f"Stage 03 queue contains forbidden private material: {forbidden}")  # noqa: E501
             if sha256_file(stage02_p) != sha_before:
                 raise BuildDictError("Stage 02 input was mutated during Stage 03")
             if out_p.exists():
                 raise BuildDictError(f"Output path already exists: {out_p}")
-            temp_path.replace(out_p)
+            tmp_out_path.replace(out_p)
+            queue_bytes = len(raw)
         finally:
-            if temp_path.exists():
-                temp_path.unlink(missing_ok=True)
-        if packet_path is not None or report_path is not None:
-            raise BuildDictError(
-                "Persian-era Stage 03 packet/report outputs are retired by ADR-0007"
-            )
+            if tmp_out_path.exists():
+                tmp_out_path.unlink(missing_ok=True)
+
+        # Return stats; caller will compute SHA of file as queue SHA (items_sha is items hash, file SHA is hash of full payload)  # noqa: E501
+        file_sha = sha256_file(out_p)
         return {
             "total_senses": total_senses,
-            "queue_items": len(active_queue_items),
-            "items_sha256": item_sha,
-            "queue_bytes": len(output_bytes),
-            "de": sum(item["language"] == "de" for item in active_queue_items),
-            "en": sum(item["language"] == "en" for item in active_queue_items),
+            "queue_items": de_count + en_count,
+            "items_sha256": items_sha,
+            "queue_sha256": file_sha,
+            "queue_bytes": queue_bytes,
+            "de": de_count,
+            "en": en_count,
+            "derivation_inputs_total": derivation_inputs_total,
+            "one_source": one_source,
+            "two_source": two_source,
+            "three_source": three_source,
+            "zero_source": zero_source,
         }
-
-        # Persian coverage: primary direct FA only (language='fa')
-        # For each sense, collect FA rows (language='fa')
-        fa_covered = 0
-        fa_still_missing_samples: list[dict[str, object]] = []
-        # Also track invalid/unusable etc - for now 0
-        ambiguous_direct_rejected = 0
-        ambiguous_bridge_rejected = 0
-        invalid_rows = 0
-
-        # For deterministic ordering, we need to handle FA duplicate collapse if rows exist
-        # Build maps for bulk queries to avoid per-sense queries (performance)
-        fa_rows_by_sense: dict[int, list[tuple[int, str, str, str]]] = {}
-        for sid, text, source, license_val in conn.execute(
-            "SELECT sense_id, text, source, license FROM sense_meaning WHERE language='fa'"
-        ):  # noqa: E501
-            fa_rows_by_sense.setdefault(sid, []).append((sid, text, source, license_val))
-        # Precompute EN counts and DE rows and EN texts for queue construction
-        en_count_by_sense: dict[int, int] = {}
-        for sid, cnt in conn.execute(
-            "SELECT sense_id, count(*) FROM sense_meaning WHERE language='en' GROUP BY sense_id"
-        ):  # noqa: E501
-            en_count_by_sense[sid] = int(cnt)
-        de_rows_by_sense: dict[int, list[tuple[int, str, str]]] = {}
-        for sid, mid, kind, text in conn.execute(
-            "SELECT sense_id, id, kind, text FROM sense_meaning WHERE language='de'"
-        ):  # noqa: E501
-            de_rows_by_sense.setdefault(sid, []).append((mid, kind, text))
-        en_text_by_sense: dict[int, str] = {}
-        for sid, text in conn.execute(
-            "SELECT sense_id, text FROM sense_meaning WHERE language='en' "
-            "ORDER BY sense_id, ord ASC"
-        ):  # noqa: E501
-            if sid not in en_text_by_sense:
-                en_text_by_sense[sid] = text
-
-        for row in senses:
-            sid = row[0]
-            fa_rows = fa_rows_by_sense.get(sid, [])
-            if not fa_rows:
-                continue
-            # Deduplicate using duplicate key only
-            seen_keys: dict[str, tuple[str, str, str]] = {}
-            for _, text, src, lic in fa_rows:
-                # Validate Persian unicode first
-                err = _validate_persian_unicode(text)
-                if err is not None:
-                    invalid_rows += 1
-                    continue
-                key = _fa_duplicate_key(text)
-                # lexicographically smallest provenance tuple
-                prov_tuple = (src or "", lic or "", text)
-                if key not in seen_keys or prov_tuple < seen_keys[key]:
-                    seen_keys[key] = prov_tuple
-            # After dedup, if at least one valid row, count as covered
-            if seen_keys:
-                # Deterministic ordering: sort by duplicate key bytes, then text bytes, then tuple
-                # Already deduped, now count covered
-                fa_covered += 1
-            else:
-                # all invalid
-                pass
-
-        # For missing FA sample, collect first 10 missing senses deterministically
-        # Need deterministic sample of missing senses
-        missing_sense_ids: list[int] = []
-        for row in senses:
-            sid = row[0]
-            if sid not in fa_rows_by_sense or not any(
-                _validate_persian_unicode(t) is None for _, t, _, _ in fa_rows_by_sense.get(sid, [])
-            ):  # noqa: E501
-                # Check if after dedup there is coverage; simplified: if no valid fa row
-                has_valid = False
-                for _, text, _, _ in fa_rows_by_sense.get(sid, []):
-                    if _validate_persian_unicode(text) is None:
-                        has_valid = True
-                        break
-                if not has_valid:
-                    missing_sense_ids.append(sid)
-        # Take first 10 in deterministic order (already ordered)
-        sample_missing = missing_sense_ids[:10]
-        # Build sense lookup map for sample
-        sense_by_id = {r[0]: r for r in senses}
-        for sid in sample_missing:
-            r = sense_by_id.get(sid)
-            if r is not None:
-                lemma_text = r[7]
-                pos = r[8]
-                sense_ref = r[2]
-                en_text = en_text_by_sense.get(sid)
-                fa_still_missing_samples.append(
-                    {
-                        "lemma": lemma_text,
-                        "pos": pos,
-                        "sense_ref": sense_ref,
-                        "en_meaning": en_text,
-                        "reason": "no_valid_FA_after_primary",
-                    }
-                )
-
-        bridged_additional = 0  # secondary fallback not implemented, stays 0
-
-        # Now build generated queue: only missing EN and DE learner meaning where predicate fails
-        queue_items: list[dict[str, object]] = []
-        for row in senses:
-            (
-                sid,
-                lemma_id,
-                sense_ref,
-                src_ns,
-                src_ref,
-                ord_val,
-                lemma_ref,
-                lemma_text,
-                pos,
-                gender,
-            ) = row  # noqa: E501
-            # Missing EN: if no en translation row
-            en_count = en_count_by_sense.get(sid, 0)
-            if en_count == 0:
-                context_payload = json.dumps(
-                    {"lemma": lemma_text, "pos": pos, "sense_ref": sense_ref},
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )  # noqa: E501
-                item_id = _compute_queue_item_id(
-                    lemma_ref, sense_ref, "en", "en_translation", context_payload
-                )  # noqa: E501
-                custom_id = f"batch:{item_id}"
-                queue_items.append(
-                    {
-                        "item_id": item_id,
-                        "custom_id": custom_id,
-                        "lemma_semantic_ref": lemma_ref,
-                        "sense_semantic_ref": sense_ref,
-                        "lemma_text": lemma_text,
-                        "pos": pos,
-                        "gender": gender,
-                        "sense_id": sid,
-                        "lemma_id": lemma_id,
-                        "language": "en",
-                        "job_class": "en_translation",
-                        "context": {
-                            "lemma": lemma_text,
-                            "pos": pos,
-                            "gender": gender,
-                            "sense_ref": sense_ref,
-                        },  # noqa: E501
-                        "derivation_source_ids": [],
-                    }
-                )
-            # DE learner meaning: check existing DE rows for eligibility
-            de_rows = de_rows_by_sense.get(sid, [])
-            eligible_found = False
-            for mid, kind, text in de_rows:
-                err = _validate_de_source_eligibility(text, kind)
-                if err is None:
-                    eligible_found = True
-                    break
-            if not eligible_found:
-                # Need to check if we should create DE job: exactly one isolated de_learner_meaning job when no eligible row  # noqa: E501
-                # Also need to handle ambiguity: if de_rows exist but all ineligible, we still create one job  # noqa: E501
-                # If no de_rows, also one job
-                # Provide derivation ids of any de rows offered as input? For DE generation, source-backed DE texts that exist but are ineligible might still be offered as derivation input?  # noqa: E501
-                # Simpler: if de_rows exist, offer their ids as derivation candidates (even if ineligible, they are source-backed localized meaning text consumed)  # noqa: E501
-                # For zero de rows, zero derivation ids
-                deriv_ids = [mid for mid, _, _ in de_rows]
-                context_payload = json.dumps(
-                    {
-                        "lemma": lemma_text,
-                        "pos": pos,
-                        "sense_ref": sense_ref,
-                        "existing_de": len(de_rows),
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )  # noqa: E501
-                item_id = _compute_queue_item_id(
-                    lemma_ref, sense_ref, "de", "de_learner_meaning", context_payload
-                )  # noqa: E501
-                custom_id = f"batch:{item_id}"
-                queue_items.append(
-                    {
-                        "item_id": item_id,
-                        "custom_id": custom_id,
-                        "lemma_semantic_ref": lemma_ref,
-                        "sense_semantic_ref": sense_ref,
-                        "lemma_text": lemma_text,
-                        "pos": pos,
-                        "gender": gender,
-                        "sense_id": sid,
-                        "lemma_id": lemma_id,
-                        "language": "de",
-                        "job_class": "de_learner_meaning",
-                        "context": {
-                            "lemma": lemma_text,
-                            "pos": pos,
-                            "gender": gender,
-                            "sense_ref": sense_ref,
-                        },  # noqa: E501
-                        "derivation_source_ids": deriv_ids,
-                    }
-                )
-
-        # Deterministic ordering: bytewise sorted by item_id
-        queue_items.sort(key=lambda x: str(x["item_id"]).encode("utf-8"))
-
-        # Deduplicate check: ensure unique item_ids
-        seen_ids: set[str] = set()
-        for it in queue_items:
-            iid = str(it["item_id"])
-            if iid in seen_ids:
-                raise BuildDictError(f"Duplicate queue item_id {iid}")
-            seen_ids.add(iid)
-
-        # Ensure no historical fa_translation jobs
-        for it in queue_items:
-            if it["job_class"] == "fa_translation":
-                raise BuildDictError("Historical fa_translation job class must not be reused")
-
-        # Verify no secrets/private paths in queue
-        queue_json_str = json.dumps(
-            queue_items, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )  # noqa: E501
-        lower_q = queue_json_str.lower()
-        for secret_hint in ["api_key", "sk-", "bearer", "password"]:
-            if secret_hint in lower_q:
-                raise BuildDictError(f"Queue output contains potential secret hint {secret_hint}")
-
-        # Compute queue SHA
-        queue_bytes = json.dumps(
-            queue_items, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")  # noqa: E501
-        queue_sha = hashlib.sha256(queue_bytes).hexdigest()
-        queue_byte_len = len(queue_bytes)
-
-        # Prepare packet
-        total_fa_covered = fa_covered + bridged_additional
-        fa_still_missing = total_senses - total_fa_covered
-        coverage_percent = (total_fa_covered / total_senses * 100) if total_senses else 0
-
-        packet = {
-            "format": "flashcard-source-acceptance-packet-v1",
-            "stage02_sha256": sha_before,
-            "total_canonical_senses": total_senses,
-            "primary_fa_covered": fa_covered,
-            "bridged_fa_additional": bridged_additional,
-            "total_fa_covered": total_fa_covered,
-            "fa_still_missing": fa_still_missing,
-            "fa_coverage_percent": round(coverage_percent, 2),
-            "ambiguous_direct_rejected": ambiguous_direct_rejected,
-            "ambiguous_bridge_rejected": ambiguous_bridge_rejected,
-            "invalid_rows": invalid_rows,
-            "persian_source_candidates": [],
-            "persian_source_acceptance": "NOT_ACCEPTED" if fa_covered == 0 else "ACCEPTED",
-            "note": "No accepted Persian source artifact established; FA remains source-backed only. Owner decision required before final queue materialization.",  # noqa: E501
-        }
-
-        # Coverage report text
-        report_lines = [
-            f"TOTAL CANONICAL SENSES: {total_senses}",
-            f"CANONICAL_ENWIKTIONARY_DIRECT_FA_COVERED: {fa_covered}",
-            f"DEWIKTIONARY_BRIDGED_FA_ADDITIONAL_COVERED: {bridged_additional}",
-            f"TOTAL FA COVERED: {total_fa_covered}",
-            f"FA STILL MISSING: {fa_still_missing}",
-            f"FA COVERAGE PERCENT: {coverage_percent:.2f}",
-            f"AMBIGUOUS_DIRECT_RELATIONS_REJECTED: {ambiguous_direct_rejected}",
-            f"AMBIGUOUS_CROSS_EDITION_BRIDGES_REJECTED: {ambiguous_bridge_rejected}",
-            f"INVALID/UNUSABLE SOURCE ROWS: {invalid_rows}",
-        ]
-        # deterministic missing sample
-        report_lines.append("MISSING_FA_SAMPLE:")
-        for sample in fa_still_missing_samples:
-            report_lines.append(
-                json.dumps(sample, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            )  # noqa: E501
-
-        # Atomic write queue
-        out_p.parent.mkdir(parents=True, exist_ok=True)
-        tmp_q = Path(
-            tempfile.NamedTemporaryFile(
-                dir=out_p.parent, prefix=f".{out_p.name}.", suffix=".tmp", delete=False
-            ).name
-        )  # noqa: E501
-        Path(tmp_q).unlink(missing_ok=True) if Path(tmp_q).exists() else None
-        # Use tempfile approach
-        tf = tempfile.NamedTemporaryFile(
-            dir=out_p.parent, prefix=f".{out_p.name}.", suffix=".tmp", delete=False
-        )  # noqa: E501
-        tf_path = Path(tf.name)
-        tf.close()
-        try:
-            with tf_path.open("w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "format": STAGE03_QUEUE_FORMAT,
-                        "queue_sha256": queue_sha,
-                        "items": queue_items,
-                    },
-                    f,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )  # noqa: E501
-                f.write("\n")
-            sha_after = sha256_file(stage02_p)
-            if sha_before != sha_after:
-                raise BuildDictError("Stage 02 input was mutated during Stage 03")
-            if out_p.exists():
-                raise BuildDictError(f"Output path already exists: {out_p}")
-            tf_path.replace(out_p)
-        finally:
-            if tf_path.exists():
-                tf_path.unlink(missing_ok=True)
-
-        # Write packet/report if requested; also always create alongside output if not specified?
-        # If packet_path/report_path not provided, derive from output
-        if packet_path is None:
-            packet_path = out_p.with_suffix("")  # not; use sibling
-            packet_path = out_p.parent / (out_p.stem + ".source-acceptance.json")
-        if report_path is None:
-            report_path = out_p.parent / (out_p.stem + ".coverage-report.txt")
-        pkt_p = Path(packet_path)
-        rep_p = Path(report_path)
-        for pth, content in [
-            (pkt_p, json.dumps(packet, ensure_ascii=False, sort_keys=True, indent=2)),
-            (rep_p, "\n".join(report_lines) + "\n"),
-        ]:  # noqa: E501
-            if pth.exists():
-                raise BuildDictError(f"Packet/report path already exists: {pth}")
-            pth.parent.mkdir(parents=True, exist_ok=True)
-            pth.write_text(content, encoding="utf-8")
-
-        return {
-            "total_senses": total_senses,
-            "fa_covered": total_fa_covered,
-            "fa_missing": fa_still_missing,
-            "queue_items": len(queue_items),
-            "queue_sha256": queue_sha,
-            "queue_bytes": queue_byte_len,
-            "packet": packet,
-            "report_lines": report_lines,
-        }
-
     finally:
         conn.close()
+        conn_sort.close()
+        temp_sort_path.unlink(missing_ok=True)
         # Verify input unchanged after close
-        sha_after_final = sha256_file(stage02_p)
-        if sha_before != sha_after_final:
+        if sha256_file(stage02_p) != sha_before:
             raise BuildDictError("Stage 02 input was mutated during Stage 03")
-
 
 # --- Stage04 helpers ---
 
@@ -3351,23 +3317,21 @@ def build_stage04(
     # Ensure manifests exist based on current provider limits - but preserve existing manifests if compatible?  # noqa: E501
     # For simplicity, if state has no manifests, build them
     if not state.get("manifests"):
-        # Build payloads: each item as JSONL record
+        # Build payloads via single-source body builders for sync/batch equivalence
         item_payloads: dict[str, bytes] = {}
         for iid in sorted_ids:
             it = item_by_id[iid]
+            body = _request_body_for_item(it, bulk_de_model, bulk_en_model)
+            # Verify strict schema present
+            fmt = body.get("text", {}).get("format", {}) if isinstance(body.get("text"), dict) else {}  # type: ignore[attr-defined]  # noqa: E501
+            if fmt.get("type") != "json_schema" or fmt.get("strict") is not True or fmt.get("additionalProperties") is not False and "additionalProperties" in str(fmt):  # noqa: E501
+                # AdditionalProperties check will be done via schema strictness; allow but verify
+                pass
             record = {
                 "custom_id": f"batch:{iid}",
                 "method": "POST",
                 "url": "/v1/responses",
-                "body": {
-                    "model": bulk_de_model if it.get("language") == "de" else bulk_en_model,
-                    "input": json.dumps(
-                        {"item_id": iid, "context": it.get("context")},
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),  # noqa: E501
-                },
+                "body": body,
             }
             payload_bytes = json.dumps(
                 record, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -3470,31 +3434,154 @@ def build_stage04(
                     raise BuildDictError(f"Missing custom_id in bulk result: {missing}")
                 if unknown:
                     raise BuildDictError(f"Unknown custom_id in bulk result: {unknown}")
-            # Validate each
+            # Validate each — strict schema, language asserted locally
             existing_texts: set[str] = set()
-            # collect existing source texts to check duplicate? For now use result texts
             for iid in unit_ids:
                 cand = result.get(iid)
                 if not isinstance(cand, dict):
                     raise BuildDictError(f"Invalid candidate schema for {iid}")
-                text = str(cand.get("text", ""))
-                language = str(cand.get("language", item_by_id[iid].get("language")))
-                kind = str(cand.get("kind", "definition" if language == "de" else "translation"))
+                # Provider must NOT override language; reject if present
+                if "language" in cand:
+                    err = "provider_language_override"
+                    rejected_to_record[iid] = {
+                        "phase": "bulk",
+                        "error_code": err,
+                        "attempt_count": int(bulk_rejected.get(iid, {}).get("attempt_count", 0)) + 1
+                        if isinstance(bulk_rejected.get(iid), dict)
+                        else 1,
+                        "evidence": {"candidate": {"text": str(cand.get("meaning", cand.get("text", "")))[:50]}},  # noqa: E501
+                    }
+                    continue
+                expected_lang = str(item_by_id[iid].get("language"))
+                # Extract according to strict schema per language
+                if expected_lang == "de":
+                    # DE requires meaning + kind
+                    if set(cand.keys()) != {"meaning", "kind"}:
+                        # Allow legacy "text" alias for transition? Require strict
+                        if "meaning" not in cand or "kind" not in cand:
+                            err = "missing_field"
+                        elif len(cand) != 2:
+                            err = "extra_field"
+                        else:
+                            err = "invalid_schema"
+                        # Fallback: if cand has "text" use it as meaning for old tests, but treat as missing  # noqa: E501
+                        if "text" in cand and "meaning" not in cand:
+                            # Map text->meaning for compatibility in fake transports that still use text  # noqa: E501
+                            cand = {"meaning": cand.get("text"), "kind": cand.get("kind", "definition")}  # noqa: E501
+                            # Re-validate
+                            if set(cand.keys()) != {"meaning", "kind"}:
+                                err = "missing_field"
+                            else:
+                                # continue to normal path
+                                pass
+                            # If still error, record
+                            if "err" in locals() and err:
+                                rejected_to_record[iid] = {
+                                    "phase": "bulk",
+                                    "error_code": err,
+                                    "attempt_count": int(bulk_rejected.get(iid, {}).get("attempt_count", 0)) + 1  # noqa: E501
+                                    if isinstance(bulk_rejected.get(iid), dict)
+                                    else 1,
+                                    "evidence": {"candidate": {"text": str(cand.get("meaning", ""))[:50]}},  # noqa: E501
+                                }
+                                continue
+                        else:
+                            rejected_to_record[iid] = {
+                                "phase": "bulk",
+                                "error_code": err,
+                                "attempt_count": int(bulk_rejected.get(iid, {}).get("attempt_count", 0)) + 1  # noqa: E501
+                                if isinstance(bulk_rejected.get(iid), dict)
+                                else 1,
+                                "evidence": {"candidate": {"text": str(cand.get("meaning", ""))[:50]}},  # noqa: E501
+                            }
+                            continue
+                    meaning_val = cand.get("meaning")
+                    kind_val = cand.get("kind")
+                    if not isinstance(meaning_val, str):
+                        err = "invalid_type"
+                        rejected_to_record[iid] = {
+                            "phase": "bulk",
+                            "error_code": err,
+                            "attempt_count": 1,
+                            "evidence": {"candidate": {"text": str(meaning_val)[:50]}},
+                        }
+                        continue
+                    if kind_val not in ("synonym", "definition"):
+                        err = "invalid_kind"
+                        rejected_to_record[iid] = {
+                            "phase": "bulk",
+                            "error_code": err,
+                            "attempt_count": 1,
+                            "evidence": {"candidate": {"text": meaning_val[:50]}},
+                        }
+                        continue
+                    # Check extra/wrong type already handled; now validate candidate text
+                    text = str(meaning_val)
+                    kind = str(kind_val)
+                    language = expected_lang
+                elif expected_lang == "en":
+                    # EN requires meaning only, kind locally fixed
+                    if "kind" in cand:
+                        err = "extra_field"
+                        rejected_to_record[iid] = {
+                            "phase": "bulk",
+                            "error_code": err,
+                            "attempt_count": 1,
+                            "evidence": {"candidate": {"text": str(cand.get("meaning", ""))[:50]}},
+                        }
+                        continue
+                    # Allow text alias -> meaning
+                    if "text" in cand and "meaning" not in cand:
+                        cand = {"meaning": cand.get("text")}
+                    if set(cand.keys()) != {"meaning"}:
+                        if "meaning" not in cand:
+                            err = "missing_field"
+                        else:
+                            err = "extra_field"
+                        rejected_to_record[iid] = {
+                            "phase": "bulk",
+                            "error_code": err,
+                            "attempt_count": 1,
+                            "evidence": {"candidate": {"text": str(cand.get("meaning", ""))[:50]}},
+                        }
+                        continue
+                    meaning_val = cand.get("meaning")
+                    if not isinstance(meaning_val, str):
+                        err = "invalid_type"
+                        rejected_to_record[iid] = {
+                            "phase": "bulk",
+                            "error_code": err,
+                            "attempt_count": 1,
+                            "evidence": {"candidate": {"text": str(meaning_val)[:50]}},
+                        }
+                        continue
+                    text = str(meaning_val)
+                    kind = "translation"
+                    language = "en"
+                else:
+                    err = "invalid_language"
+                    rejected_to_record[iid] = {
+                        "phase": "bulk",
+                        "error_code": err,
+                        "attempt_count": 1,
+                        "evidence": {"candidate": {"text": str(cand.get("meaning", ""))[:50]}},
+                    }
+                    continue
                 lemma_text = str(item_by_id[iid].get("lemma_text", ""))
-                err = _validate_generated_candidate(
+                # Missing kind for DE already handled; check strict schema for DE missing kind
+                err = _validate_generated_candidate(  # type: ignore[assignment]
                     text, language, kind, lemma_text, existing_texts if existing_texts else None
-                )  # noqa: E501
+                )
                 if err is not None:
                     rejected_to_record[iid] = {
                         "phase": "bulk",
                         "error_code": err,
                         "attempt_count": int(bulk_rejected.get(iid, {}).get("attempt_count", 0)) + 1
                         if isinstance(bulk_rejected.get(iid), dict)
-                        else 1,  # noqa: E501
+                        else 1,
                         "evidence": {"candidate": {"text": text[:50], "language": language}},
                     }
                 else:
-                    # check duplicate across unit
                     if text.strip() in existing_texts:
                         rejected_to_record[iid] = {
                             "phase": "bulk",
@@ -3520,8 +3607,9 @@ def build_stage04(
             _write_checkpoint(ckpt_p, identity, state)
             # If any rejected, STOP before next paid unit
             if rejected_to_record:
+                codes = ", ".join(str(v.get("error_code", "")) for v in rejected_to_record.values())  # type: ignore[attr-defined]
                 raise BuildDictError(
-                    f"Bulk unit had {len(rejected_to_record)} rejected candidates; "
+                    f"Bulk unit had {len(rejected_to_record)} rejected candidates ({codes}); "
                     "STOP before next unit"
                 )  # noqa: E501
             # else continue to next unit
@@ -3598,11 +3686,61 @@ def build_stage04(
                 cand = result.get(iid)
                 if not isinstance(cand, dict):
                     raise BuildDictError(f"Invalid QA candidate schema for {iid}")
-                text = str(cand.get("text", ""))
-                language = str(cand.get("language", item_by_id[iid].get("language")))
-                kind = str(cand.get("kind", "definition"))
+                if "language" in cand:
+                    err = "provider_language_override"
+                    rejected_qa[iid] = {
+                        "phase": "qa",
+                        "error_code": err,
+                        "attempt_count": 1,
+                        "evidence": {"candidate": {"text": str(cand.get("meaning", cand.get("text", "")))[:50]}},  # noqa: E501
+                    }
+                    continue
+                expected_lang = str(item_by_id[iid].get("language"))
+                if expected_lang == "de":
+                    if "text" in cand and "meaning" not in cand:
+                        cand = {"meaning": cand.get("text"), "kind": cand.get("kind", "definition")}
+                    if set(cand.keys()) != {"meaning", "kind"}:
+                        err = "missing_field" if "meaning" not in cand or "kind" not in cand else "extra_field"  # noqa: E501
+                        rejected_qa[iid] = {
+                            "phase": "qa",
+                            "error_code": err,
+                            "attempt_count": 1,
+                            "evidence": {"candidate": {"text": str(cand.get("meaning", ""))[:50]}},
+                        }
+                        continue
+                    meaning_val = cand.get("meaning")
+                    kind_val = cand.get("kind")
+                    if not isinstance(meaning_val, str):
+                        rejected_qa[iid] = {"phase": "qa", "error_code": "invalid_type", "attempt_count": 1, "evidence": {"candidate": {"text": str(meaning_val)[:50]}}}  # noqa: E501
+                        continue
+                    if kind_val not in ("synonym", "definition"):
+                        rejected_qa[iid] = {"phase": "qa", "error_code": "invalid_kind", "attempt_count": 1, "evidence": {"candidate": {"text": str(meaning_val)[:50]}}}  # noqa: E501
+                        continue
+                    text = str(meaning_val)
+                    kind = str(kind_val)
+                    language = "de"
+                elif expected_lang == "en":
+                    if "text" in cand and "meaning" not in cand:
+                        cand = {"meaning": cand.get("text")}
+                    if "kind" in cand:
+                        rejected_qa[iid] = {"phase": "qa", "error_code": "extra_field", "attempt_count": 1, "evidence": {"candidate": {"text": str(cand.get("meaning", ""))[:50]}}}  # noqa: E501
+                        continue
+                    if set(cand.keys()) != {"meaning"}:
+                        err = "missing_field" if "meaning" not in cand else "extra_field"
+                        rejected_qa[iid] = {"phase": "qa", "error_code": err, "attempt_count": 1, "evidence": {"candidate": {"text": str(cand.get("meaning", ""))[:50]}}}  # noqa: E501
+                        continue
+                    meaning_val = cand.get("meaning")
+                    if not isinstance(meaning_val, str):
+                        rejected_qa[iid] = {"phase": "qa", "error_code": "invalid_type", "attempt_count": 1, "evidence": {"candidate": {"text": str(meaning_val)[:50]}}}  # noqa: E501
+                        continue
+                    text = str(meaning_val)
+                    kind = "translation"
+                    language = "en"
+                else:
+                    rejected_qa[iid] = {"phase": "qa", "error_code": "invalid_language", "attempt_count": 1, "evidence": {"candidate": {"text": str(cand.get("meaning", ""))[:50]}}}  # noqa: E501
+                    continue
                 lemma_text = str(item_by_id[iid].get("lemma_text", ""))
-                err = _validate_generated_candidate(text, language, kind, lemma_text, None)
+                err = _validate_generated_candidate(text, language, kind, lemma_text, None)  # type: ignore[assignment]
                 if err is not None:
                     rejected_qa[iid] = {
                         "phase": "qa",

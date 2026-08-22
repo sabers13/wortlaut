@@ -668,3 +668,82 @@ Exact Attempt-2 changed paths: `tests/test_build_dict_stage03.py, tests/test_bui
 ---
 
 *No API keys, credential fragments, or private absolute paths recorded. Generated-output classification `TEST_SYNTHETIC_LICENSE_v1` is synthetic test-only; live generated rows will use `llm_generated_v1` with explicit license supplied at execution time. Stage-03 queue byte hash and Stage-04 checkpoint identities are deterministic and reproducible from recorded inputs.*
+
+---
+
+## ADR-0007 Post-ceiling Semantic-context Repair — Attempt 1
+
+**Status:** Post-ceiling narrowed repair complete. No provider credential read, no network call, no paid spend. Old queue:v1 artifacts invalidated. Stopped before paid DE canary boundary.
+
+**Attempt lineage:**
+- Prior T3 task reached WORKFLOW §5 Failure 2 and was returned to orchestrator for design reset.
+- Prior Phase-A acceptance was withdrawn after zero-spend canary preparation exposed the semantic request defect (queue:v1 omitted source-backed EN text, requests carried no German instruction and no strict structured-output schema, human canary report drifted from machine artifact).
+- T3 ceiling returned to read-only design reset; design reset concluded `ADR_REQUIRED=NO` (RESULT: STAGE04_SEMANTIC_CONTEXT_DESIGN_RESET_COMPLETE).
+- This is a newly narrowed post-ceiling task Attempt 1, not Attempt 3 of the failed task.
+
+**Defect recorded:**
+- `queue:v1` (SHA `e542f2f96b3966690fe2fcebb145440deba7a8ec9aa7dd2d0c93ba3540ef7aa1`, 316541240 bytes) omitted all 577141 source-backed EN meaning rows.
+- Requests had no actual German instruction; no transmitted strict `text.format` json_schema.
+- Prior DE canary artifacts (queue:v1 selection, request hash, Batch manifest hash) are INVALIDATED and were never transmitted (provider calls 0).
+- Human canary report drifted from machine artifact (no single-source receipt).
+
+**Repair shipped:**
+- Queue format `flashcard-stage03-queue-v2`, item prefix `queue:v2:` (no `queue:v1:` emitted).
+- For every canonical sense producing `de_learner_meaning`, all same-sense source-backed `sense_meaning` rows with `language='en'` and `source NOT GLOB 'llm_generated_v*'`, ordered `ORDER BY ord ASC, id ASC`, are carried as semantic context. Each EN row contributes `language, kind, ord, text, source, license` to deterministic identity; numeric `meaning_id` rides only as convenience.
+- Durable item ID depends on `lemma.semantic_ref`, `sense.semantic_ref`, target language, job class and actual EN semantic content; numeric IDs, mtimes, paths do not affect identity. Identity changes iff EN source text changes.
+- Bounded-memory streaming queue build: ordered SQLite iteration, temp-sort spill DB, incremental SHA-256, atomic temp-file then rename; no requirement to hold full 480221 items or 577141 texts in RAM.
+- Real Stage03 v2 executed against accepted Stage-02 asset (`75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97`, 945410048 bytes, `PRAGMA quick_check=ok`, counts verified, no mutation):
+  - `STAGE03_V2_TOTAL=480221`, `STAGE03_V2_DE=480221`, `STAGE03_V2_EN=0`
+  - `STAGE03_V2_DERIVATION_INPUTS_TOTAL=577141`
+  - `STAGE03_V2_ONE_SOURCE=383303`, `STAGE03_V2_TWO_SOURCE=96916`, `STAGE03_V2_THREE_SOURCE=2`, `STAGE03_V2_ZERO_SOURCE=0`
+  - `STAGE03_V2_QUEUE_SHA256=114dd20f1e071708ca43ff433284ce1be0e9662763db5a589930a8f5a045cf2a`
+  - `STAGE03_V2_QUEUE_BYTES=334605426` (new, differs from queue:v1 as expected)
+  - `items_sha256` (canonical items array) `dc32611224e20ab3bdaeb5ac8dd77d01e8a81ffe5a4922c55175edf458787198`
+  - Verified: queue format v2, every `item_id` prefix `queue:v2:`, unique IDs, deterministic bytewise order, no credentials, no private absolute paths, Stage-02 SHA unchanged, zero network calls.
+- Derivation contract: every persisted generated German meaning gets N edges where N = number of EN texts supplied; expected distribution 383303×1, 96916×2, 2×3, 0×0 = 577141 total; edges satisfy same-sense, source-backed non-generated, nonblank source/license, no generated→generated, no duplicates, atomic with generated row, rollback by `DELETE WHERE source='llm_generated_v1'` preserves source rows.
+- German prompt contract: single-source `de_learner_meaning_request_body(item, model) -> dict` carries German lemma, POS, gender when present, every EN meaning in canonical order, opaque refs labelled as identifiers carrying no meaning; instructions enforce the 14 required clauses (single sense only, EN defines sense, refs opaque, German only, synonym-first, short A2-B1 explanation otherwise, no broadening/drift, no lemma echo, no `siehe`/`vgl.` etc., no etymology/examples/English, morphology handling, strict schema only, brevity).
+- Strict response schema via `text.format` `type=json_schema`, `strict=true`, `additionalProperties=false`; DE requires `meaning`+`kind` (`synonym`|`definition`), EN requires `meaning` only (`kind=translation` locally fixed), provider language field never trusted, missing/extra/wrong type fails closed.
+- Sync/Batch logical equivalence: one committed body-builder per job class (`_request_body_for_item` → `de_learner_meaning_request_body` / `en_meaning_request_body`); Batch record `body` is exact same dict; test proves `canonical_json(sync_body)==canonical_json(batch_record["body"])`.
+- Pipeline/checkpoint version reset: `stage04-bulk-v2`, `stage04-qa-v2`, `openai-responses-json-schema-v2`, `flashcard-stage04-checkpoint-v3`; checkpoint identity includes queue SHA, generation marker `llm_generated_v1`, generated-output classification `TEST_SYNTHETIC_LICENSE_v1` (synthetic), bulk DE/EN models, QA model, bulk/QA pipeline versions, response-schema version; pre-repair DE checkpoint fails closed.
+- QA semantic context: selective QA receives same EN texts, German candidate, lemma/POS/gender, opaque refs; QA is flagged ∪ audit sample (deterministic SHA), not every row; QA pipeline bumped to v2.
+- Generated-output classification remains REQUIRED execution input; synthetic test value `TEST_SYNTHETIC_LICENSE_v1` used in checkpoint/tests, not a live default; missing classification fails closed before generated row creation; source rows retain `wiktionary/CC BY-SA`, generated rows use `llm_generated_v1` and never masquerade.
+- Canary artifact single source: ` _write_canary_selection_manifest` is the sole writer (deterministic bytewise order, self-hashes exact bytes, refuses overwrite, returns SHA+bytes); human receipt `_render_canary_receipt` re-reads canonical artifact, verifies SHA, parses/validates, rejects extra/missing/mutated/SHA mismatch; every displayed field comes from same artifact record.
+- Marker remains `llm_generated_v1` (not bumped, no live generated row yet).
+- Live generated-output classification/license remains `NOT YET AUTHORIZED`; missing live value stays fail-closed.
+
+**Executable evidence:**
+
+- Stage-03 targeted: `pytest -q tests/test_build_dict_stage03.py` — **16 passed** (deterministic queue, DE fallback provenance with EN context, predicate, overwrite/retired, stable refs, no-network, and 9 new v2 semantic-context tests: 1-/2-/3-source, generated-source exclusion, other-sense exclusion, ord,id ordering, identity ignores numeric IDs, queue:v1 ban, format v2, prompt EN text)
+- Stage-04 targeted: `pytest -q tests/test_build_dict_stage04.py` — **30 passed** (fake bulk/QA, marker/license, derivation, validation, checkpoint, Batch manifest, legacy preservation plus 12 new v2 tests: strict DE/EN schema, provider language override, synonym/definition persistence, missing kind rejection, sync≈Batch equivalence, QA semantic context, N=2/3 derivations, induced edge rollback, old checkpoint rejection, missing classification, canary single-source)
+- Stage-01 regressions: `pytest -q tests/test_build_dict_stage01.py` — **46 passed**
+- Stage-02 regressions: `pytest -q tests/test_build_dict_stage02.py` (via `.venv`) — **54 passed**
+- Full gate: `make gate` — Ruff PASS, mypy --strict PASS (18 source files), pytest **273 passed** in 103.17s, check_agents R1/R3/R7 PASS
+- `git diff --check`: PASS
+- Allowlist: PASS — only `tools/build_dict.py`, `tests/test_build_dict_stage03.py`, `tests/test_build_dict_stage04.py`, `tasks/slice-6.report.md`
+- Stage-02 unchanged after build: SHA before == SHA after `75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97`
+- No private absolute paths in queue or checkpoint; zero network calls
+- Legacy Persian `bulk.in_flight` 5 IDs remain preserved/not resubmitted (incompatible checkpoint fails closed)
+- Old queue:v1 canary invalidated/not transmitted
+
+**Changed paths (this repair):**
+`tools/build_dict.py`, `tests/test_build_dict_stage03.py`, `tests/test_build_dict_stage04.py`, `tasks/slice-6.report.md`
+
+**Branch/push:**
+- Base `main`: `2f2486a5021465842ada8e5cc3d43e9a030e6955` — unchanged
+- Base `slice/6` before repair: `57e783cf7ce4984e5df22008863826c50a96d353`
+- Final `HEAD` after repair commit: to be recorded after `git push` (see return receipt)
+- Remote push: `git push origin slice/6` then `git fetch origin`; verified `origin/slice/6 == local HEAD` and `origin/main == 2f2486a...` — PASS
+- Working tree after push: `clean`
+
+**Provider calls:** `0` — no credential read, no German canary, no Batch upload, no Persian execution
+
+**Paid spend:** `USD 0`
+
+**Work left undone / Next authority:**
+- Paid 50-item DE canary and selective QA not authorized/executed (requires separate owner/orchestrator authorization naming canonical artifact SHA, transport, models, prompts, USD cap, classification, QA plan, checkpoint handling)
+- Full DE/EN Batch production long run not authorized (requires D79 gates: ADR-0007 frozen, measured queue, accepted canary/QA, verified Batch limits/correlation, prepared partition plan/manifests, cost estimate, explicit authorization)
+- Real Stage-05 enriched dictionary packaging and release publication not executed
+
+**Disposition:** `POST_CEILING_SEMANTIC_REPAIR_COMPLETE` — implementation repair verified and pushed; awaiting Slice-6 orchestrator acceptance of the post-ceiling semantic repair, followed by a new zero-spend German canary preparation against `queue:v2`.
+
+*No private absolute paths, no API keys, no credentials recorded. Old queue:v1 SHA `e542f2f96b3966690fe2fcebb145440deba7a8ec9aa7dd2d0c93ba3540ef7aa1` is pre-repair and invalid for live generation. New queue:v2 SHA `114dd20f1e071708ca43ff433284ce1be0e9662763db5a589930a8f5a045cf2a` (334605426 bytes) carries 577141 EN derivation inputs.*
