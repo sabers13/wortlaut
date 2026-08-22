@@ -55,6 +55,16 @@ memory of a conversation.
   DE eligibility is conservative, Batch manifests are bounded/correlated, and
   owner source acceptance remains a hard gate. ADR acceptance itself authorizes
   no paid production work.
+* **ADR-0007 is ACCEPTED / FROZEN.** Cold Review #2 — FOCUSED REMEDY
+  VERIFICATION — verified the O1–O3 remedies and found no qualifying direct
+  knock-on blocker. Its §11 supersession record is active. Active v1
+  learner-meaning languages are strictly `{de, en}` at build/API boundaries
+  while physical SQLite language columns remain open `TEXT`; unsupported `fa`
+  is HTTP 422 with zero writes. Historical Persian investigation/canary evidence
+  remains preserved, including known cumulative paid spend USD 0.0008764 across
+  four returned generation results before STOP. No further Persian provider
+  spending is authorized. ADR acceptance itself authorizes no paid DE/EN
+  production run.
 * **Two-authority workflow remains binding.** Local Git/terminal is authoritative
   for working-tree/runtime/gate/local-asset facts; private `origin` is the
   persistent authoritative mirror for committed and pushed state.
@@ -82,6 +92,10 @@ memory of a conversation.
   pre-mutation, pre-commit and post-commit `make gate` PASS evidence plus
   clean-tree/push equality returned in the review receipt; the GitHub mirror is
   not substituted for local execution evidence.
+* **ADR-0007 Cold Review #2 approval persistence:** a fresh local `make gate`
+  PASS is mandatory before the approval/activation commit; the approval is valid
+  only with clean-tree, push-equality, and unchanged `origin/slice/6` evidence in
+  the final persistence receipt.
 
 ## Escalation status
 
@@ -102,36 +116,35 @@ memory of a conversation.
 
 ## Blocked
 
-* **Slice-6 paid production remains blocked by ADR-0006 D71 owner gates,
-  not by ADR governance.** Architecture-changing Slice-6 implementation may begin
-  only after formal startup/local verification on accepted main. No paid
-  production submission is authorized until the source-acceptance, coverage/gap,
-  DE queue/canary/QA, current Batch capability/limit, manifest/cost, and explicit
-  orchestrator-authorization gates are satisfied.
 * **ADR-0004 PART-B/runtime schema remains intentionally deferred to slice-7.**
-  Remaining work includes note-local multilingual meaning state, durable
-  dictionary bindings, active dictionary version+SHA state and D47 runtime
-  activation/relink semantics.
+  Remaining work includes note-local multilingual meaning state (for DE/EN),
+  durable dictionary bindings, active dictionary version+SHA state and D47
+  runtime activation/relink semantics.
 * **ADR-0002 D27 / ADR-0003 D27 share one identifier.** Both accepted decisions
   remain valid; repair remains parked naming debt.
 * **`reference/smoke_test.py` remains path-broken/excluded.** slice-8 owns its
   repair plus D47 replacement/stale-picker smoke verification.
 * **Compose integration remains independently blocked** by the lecture app's
   Phase-4 decomposition and required donor evidence; slice-9 owns that boundary.
-* **Build Stage 04 remains time-bound to mid-September 2026.** ADR-0006
-  governance is closed, but paid canary/production work remains subject to its
-  explicit owner gates; acceptance itself authorizes no paid run.
+* **Build Stage 04 remains time-bound to mid-September 2026.** API credit
+  expires mid-September 2026; paid canary and production work for DE/EN proceeds
+  only under explicit owner gates.
 * **Non-blocking slice-3 review debt remains in `docs/backlog.md`.** T3 N1 is the
   synthetic fixture `genitive_sg` bind defect; T3 N2 is future fallback
   fingerprint hardening for potentially volatile upstream numeric bookkeeping.
 
 ## Next three actions
 
-1. Open the formal Slice-6 orchestrator/startup session against the accepted
-   ADR-0006 governance commit on `main`.
-2. Verify the authoritative local checkout, origin synchronization, accepted
-   Stage-02 asset SHA/bytes/integrity/counts, dependencies, and a fresh
-   `make gate` before any Slice-6 dispatch.
-3. Only if startup passes, dispatch Slice-6 Attempt 1 under `tasks/slice-6.md`.
-   ADR acceptance authorizes no paid canary or production run; those remain
-   behind the explicit Slice-6 / ADR-0006 gates.
+1. Open the separate Slice-6 implementation/design-reset orchestration against
+   accepted/frozen ADR-0007 and the preserved `slice/6` historical branch; remove
+   the retired Persian implementation path and realign Slice-6 to the active
+   DE/EN-only contract. Governance approval itself performs no implementation
+   and authorizes no provider calls.
+2. Execute Slice-6 Phase A under the accepted brief: deterministic local Stage-03
+   DE/EN queue measurement, fake-transport Stage-04 verification, fixture
+   Stage-05 packaging, Docker/Piper prerequisite verification, and fresh gate
+   evidence.
+3. Any paid DE/EN canary or production execution remains a later explicit
+   owner/orchestrator decision under ADR-0007 D79 after its measured queue,
+   canary/QA, Batch capability, manifest and current-cost prerequisites are
+   satisfied.

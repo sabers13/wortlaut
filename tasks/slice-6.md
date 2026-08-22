@@ -1,14 +1,21 @@
 # Slice 6 — build stages 03–05: multilingual offline enrichment and packaging
 
+> [!NOTE]
+> **GOVERNANCE CLEARED:** ADR-0007 is `ACCEPTED / FROZEN` after Cold Review #2 —
+> FOCUSED REMEDY VERIFICATION. Persian remains deferred from active v1 scope.
+> Slice-6 implementation/design-reset may resume under this DE/EN-only brief.
+> ADR acceptance itself authorizes no paid provider execution; every paid DE/EN
+> canary or production boundary remains subject to the explicit owner/orchestrator
+> gates in the accepted architecture.
+
 Task:        Implement the maintainer-operated offline dictionary stages 03–05
              required by ADR-0001 §12, ADR-0002 §6 order 7, ADR-0004
-             D33–D38/D45, accepted ADR-0006 D57–D71, and ADR-0005 D56:
-             deterministic source-first Persian ingestion plus generated
-             DE/EN enrichment queue construction, validation/QA, final
-             versioned dictionary packaging,
-             and the first standalone Dockerfile with the build-time Piper
-             engine+voice prerequisite. Phase A ends before any paid full
-             Stage-04 generation run.
+             D33–D34/D36–D38/D45, ADR-0006 D65–D69, accepted ADR-0007 D72–D81,
+             and ADR-0005 D56: deterministic DE/EN enrichment queue construction,
+             validation/QA, final versioned dictionary packaging, and the first
+             standalone Dockerfile with the build-time Piper engine+voice
+             prerequisite. Phase A ends before any paid full Stage-04 generation
+             run.
 
 Depends:     slice-5
 
@@ -69,22 +76,18 @@ The binding architecture is:
 
 - ADR-0001 §12, except where superseded;
 - ADR-0002 §6 order 7;
-- ADR-0004 D33–D38, D45 and §§3–8 except where accepted ADR-0006 §10
-  explicitly supersedes them;
-- ADR-0006 D57–D71 is `ACCEPTED / FROZEN`; its §10 supersession record is active
-  and is the Slice-6 architecture for the listed conflicts with ADR-0004.
-  ADR-0004 remains binding everywhere else;
+- ADR-0004 D33–D34, D36–D38, D45 and §§3–8 except where superseded by ADR-0006
+  and accepted/frozen ADR-0007;
 - ADR-0005 D56 (Piper build/runtime prerequisite);
+- ADR-0006 D65–D69 (German positive source eligibility and Batch architecture);
+- ADR-0007 D72–D81 (accepted/frozen: defines DE/EN-only meaning scope, defers
+  Persian from v1, and updates build/runtime contracts);
 - AGENTS R1 and R11;
 - docs/plan.md slice-6 row;
 - docs/backlog.md Stage-04 credit deadline.
 
-ADR-0004 is ACCEPTED / FROZEN.
-
-No ADR is reopened by this slice.
-
-The target vocabulary language remains German. DE, EN and FA are learner-meaning
-languages only.
+The target vocabulary language remains German. Active learner-meaning languages
+in v1 are German (`de`) and English (`en`) only.
 
 Runtime LLM usage remains absolutely forbidden.
 
@@ -133,6 +136,7 @@ Keep these prohibitions:
 - no human-audio discovery
 - no pronunciation UI/browser behavior
 - no Stage-04 pronunciation work
+- no Persian provider/API calls or Persian pipeline code
 
 No bulk pronunciation/audio database or LLM pronunciation pipeline belongs in
 this slice.
@@ -143,8 +147,8 @@ this slice.
 
 Extend the existing maintainer build CLI with separate commands for:
 
-- Stage 03 — deterministic enrichment queue construction;
-- Stage 04 — maintainer-only multilingual enrichment;
+- Stage 03 — deterministic DE/EN enrichment queue construction;
+- Stage 04 — maintainer-only DE/EN enrichment generation;
 - Stage 05 — final dictionary packaging.
 
 The exact argument naming is implementation-owned, but the commands must have
@@ -158,44 +162,36 @@ No automatic source-data download is introduced.
 ### A2 — Stage 03 is deterministic and network-free
 
 Stage 03 reads the accepted Stage-02 dictionary asset read-only and produces a
-deterministic local enrichment queue.
+deterministic local enrichment queue for German and English:
 
-The queue is the bridge from source-backed dictionary state to ADR-0004 Stage 04.
+1. Evaluates existing source-backed `sense_meaning` rows for `de` and `en`;
+2. Retains existing source-backed German learner meanings that satisfy the
+   conservative positive eligibility predicate (ADR-0006 D65 / ADR-0007 D75);
+3. Identifies canonical senses lacking suitable German learner meanings or missing
+   canonical English meanings;
+4. Materializes a deterministic queue containing only:
+   - A. `en_meaning`: missing English translation/gloss;
+   - B. `de_learner_meaning`: German learner meaning creation/simplification
+     where positive source eligibility found no suitable source row.
 
-Under accepted ADR-0006, stage 03 must first use the direct exact FA relation on
-the persisted English-edition canonical source sense, then optional
-German-Wiktionary fallback only through the exact cross-edition bridge and only
-when the primary accepted set is empty. Exact mapping is fail-closed; one exact
-source sense may yield zero/one/many independently validated FA rows. It must
-deduplicate/order/provenance those rows deterministically, issue the
-source-acceptance packet and coverage report, and STOP for owner acceptance. It
-never creates an automatic Persian LLM job.
-
-After that boundary, the final generated queue represents only:
-
-A. missing English meaning;
-B. German learner meaning creation/simplification only where a conservative
-   source-first eligibility predicate finds no suitable source-backed German row.
-
-That predicate is a positive mechanical filter, not a semantic/CEFR judgment:
+The D65 predicate is a positive mechanical filter, not a semantic/CEFR judgment:
 exact source attachment and explicit synonym or definition/gloss relation are
-required; the ADR-0006 token/scalar/punctuation bounds and versioned forbidden
-meta-pattern table must pass; any uncertainty, markup/control, or unresolved
-mapping makes exactly one isolated `de_learner_meaning` request.
+required; token, scalar, and punctuation bounds must pass; and versioned
+forbidden meta-patterns (`siehe`, `vgl.`, `abkürzung`, etc.) must be absent.
+Any uncertainty, markup/control, or unprovable property creates one isolated
+`de_learner_meaning` request.
 
-The historical `fa_translation` queue class and its identities are retired
-evidence and must not be reused.
+All Persian source-cascade extraction, cross-edition bridging, source-acceptance
+packets, and missing-Persian owner STOP gates are removed from the active pipeline
+under ADR-0007.
 
-The queue is sense-aware.
-
-Every queue record must carry enough stable semantic identity to survive local
-numeric-ID renumbering:
+The queue is sense-aware. Every queue record carries stable semantic identity:
 
 - `lemma.semantic_ref`;
 - `sense.semantic_ref`;
-- target language;
+- target language (`de` or `en`);
 - generation job class;
-- source-backed semantic/context fields needed by ADR-0004;
+- source-backed semantic/context fields needed for prompt construction;
 - identities/provenance of any localized source rows offered as derivation input.
 
 Numeric lemma/sense/meaning IDs may appear only as convenience references to the
@@ -204,14 +200,10 @@ specific input asset.
 A deterministic queue/item ID must depend on semantic identity and the actual
 source/context content relevant to that job, not on mtimes or absolute paths.
 
-Queue ordering is deterministic.
-
-Identical logical input produces logically identical queue output.
+Queue ordering is deterministic. Identical logical input produces logically
+identical queue output.
 
 Stage 03 performs zero network calls and creates no generated meaning rows.
-
-The deferred Tatoeba `FREQ` feature remains deferred. Do not resurrect it as a
-hidden prerequisite.
 
 ### A3 — Source-first enrichment
 
@@ -228,70 +220,27 @@ it.
 When simplifying source-backed German wording, persist a separate generated row
 and preserve the original source row.
 
-### A4 — Source-first Persian and generated DE/EN jobs
+### A4 — Generated DE/EN jobs
 
-Stage 04 supports the remaining generated work:
+Stage 04 supports offline generated work bounded strictly to German and English:
 
-A. fill missing English meanings;
-B. create/simplify German learner meanings;
+A. fill missing English meanings (`en_meaning`);
+B. create/simplify German learner meanings (`de_learner_meaning`);
 C. deterministic validation of generated localized meanings;
 D. selective stronger-model semantic QA/correction.
 
-German learner meanings follow ADR-0004 D33:
+German learner meanings follow ADR-0004 D33 / ADR-0007 D75:
 
 1. prefer one simple/common German synonym when sense-preserving;
 2. otherwise one short learner-friendly German explanation;
 3. aim roughly at A2–B1 comprehension where practical;
 4. never simplify into a semantically different sense.
 
-English remains source-first. Persian is source-backed: the direct exact relation
-on the persisted English-edition canonical source sense is primary; optional
-German-Wiktionary is fallback-only through an exact cross-edition bridge and is
-consulted only when primary accepted count is zero. Exact mapping may retain
-zero/one/many FA rows; dedupe is duplicate-only and ordering/provenance are
-deterministic. A source-acceptance packet requires owner/orchestrator acceptance
-before coverage acceptance. Source-backed FA rows retain actual source/license
-and are never labeled `llm_generated_vN`.
+English remains source-first. Missing English meanings are filled to ensure
+comprehensive learner coverage.
 
-Persian is stored as plain Unicode. Its source-ingestion validation checks
-provenance, artifact digest, exact mapping evidence, license, script, Unicode,
-and ordering; it uses a bounded human-review sample, not LLM semantic QA.
-
-#### Persian Unicode Policy
-
-Source-backed Persian text must follow standard Persian orthography and must
-never contain bidi direction-manipulation controls.
-
-Ordinary Persian orthography MUST NOT be rejected merely because it contains
-`U+200C` ZERO WIDTH NON-JOINER (ZWNJ).
-
-ALLOWED for FA text:
-
-- `U+200C` ZERO WIDTH NON-JOINER (ZWNJ) when used inside otherwise valid Persian
-  text.
-
-FORBIDDEN:
-
-- `U+061C` ARABIC LETTER MARK
-- `U+200E` LEFT-TO-RIGHT MARK
-- `U+200F` RIGHT-TO-LEFT MARK
-- `U+202A` LEFT-TO-RIGHT EMBEDDING
-- `U+202B` RIGHT-TO-LEFT EMBEDDING
-- `U+202C` POP DIRECTIONAL FORMATTING
-- `U+202D` LEFT-TO-RIGHT OVERRIDE
-- `U+202E` RIGHT-TO-LEFT OVERRIDE
-- `U+2066` LEFT-TO-RIGHT ISOLATE
-- `U+2067` RIGHT-TO-LEFT ISOLATE
-- `U+2068` FIRST STRONG ISOLATE
-- `U+2069` POP DIRECTIONAL ISOLATE
-
-Other Unicode control (`Cc`) and format (`Cf`) characters remain forbidden unless
-the brief explicitly lists an allowed exception. The validator must not be relaxed
-into accepting arbitrary `Cf` characters.
-
-Persian source rows are never sent to LLM QA. A later owner-authorized Persian
-LLM policy, if any, needs a separate bounded contract before generated Persian
-or Persian QA can enter this slice.
+Persian is deferred under ADR-0007; no Persian job classes or generation paths
+exist in the active pipeline.
 
 ### A5 — Offline-only LLM boundary and per-language model roles
 
@@ -324,7 +273,7 @@ Tests use a fake/mock transport and require no credential/network.
 
 #### Generated-work model roles
 
-Stage 04 must allow configuring model occupants separately for at least:
+Stage 04 must allow configuring model occupants separately for:
 
 - `bulk DE` (German learner meaning bulk model);
 - `bulk EN` (English translation bulk model);
@@ -339,10 +288,6 @@ architecture. The non-normative initial baseline defaults are:
 
 Checkpoint compatibility must include every configured model role that can
 materially affect its corresponding generated output.
-
-Do not hard-code a permanent provider/model into the architecture. A future
-owner-authorized Persian fallback would define its own role and compatibility
-identity rather than inheriting a dormant FA default.
 
 ### A6 — Structured generation, checkpoint/resume, and paid-response state machine
 
@@ -510,9 +455,7 @@ The implementation MUST NOT automatically reinterpret, clear, migrate, or
 resubmit those five IDs.
 
 The first canary is retired as failure evidence. Preserve its checkpoint and
-artifacts locally. After repaired implementation acceptance, the orchestrator
-will authorize a fresh deterministic canary-v2 rather than rewriting old paid
-state.
+artifacts locally.
 
 ### A7 — Generated-row provenance and derivation
 
@@ -520,7 +463,7 @@ Every persisted generated `sense_meaning` row has:
 
 - non-empty `source`;
 - non-empty `license`;
-- correct target language;
+- correct target language (`de` or `en`);
 - valid kind;
 - deterministic ordering metadata.
 
@@ -570,17 +513,11 @@ QA selection.
 Validation covers at minimum:
 
 - structured response/schema conformance;
-- allowed language/kind;
+- allowed language (`de` or `en`) and kind;
 - nonblank text;
 - length bounds;
 - duplicate detection;
 - obvious echo-the-lemma failures;
-- source-backed FA script/Unicode validation:
-  - ALLOWED: `U+200C` ZERO WIDTH NON-JOINER (ZWNJ) in valid Persian text;
-  - FORBIDDEN: bidi controls `U+061C`, `U+200E`, `U+200F`, `U+202A`–`U+202E`,
-    `U+2066`–`U+2069`;
-  - FORBIDDEN: general control characters (`Cc`) and unallowed format characters
-    (`Cf`);
 - German-language plausibility checks for DE;
 - forbidden/control-content checks;
 - derivation/provenance consistency.
@@ -597,9 +534,7 @@ Semantic QA receives:
 The random audit selection must be reproducible from recorded deterministic
 seed/input identity.
 
-QA is selective, never every generated DE/EN row by default. Source-backed FA
-is excluded from LLM QA and instead has deterministic source checks plus a
-bounded human-review sample.
+QA is selective, never every generated DE/EN row by default.
 
 Record actual queue size, validation flags, QA sample size, correction counts,
 and rejected item counts in the report. ADR-0004 deliberately defines no fixed
@@ -705,17 +640,12 @@ Tests cover at minimum:
 Stage 03:
 - deterministic queue IDs/order;
 - input-order independence where relevant;
-- deterministic missing-FA coverage report/sample and owner STOP;
 - missing-EN classification;
 - source-first German retention and DE learner-meaning fallback classification;
-- direct canonical-source FA mapping, optional bridge acceptance/rejection,
-  multi-translation retention, duplicate collapse/deterministic `ord`, and
-  secondary fallback-only precedence;
 - positive DE source predicate and uncertainty-to-generation fallback;
-- source-acceptance packet STOP behavior;
 - deterministic manifest boundaries, restart preserving completed manifests, and
   exactly-one ambiguous Batch recovery with zero/multiple fail-closed;
-- zero automatic FA job classification and old FA queue/checkpoint identity rejection;
+- rejection of obsolete queue/checkpoint identities;
 - stable refs rather than numeric IDs as durable queue identity;
 - no network;
 - no input SQLite mutation;
@@ -728,13 +658,11 @@ Stage 04:
 - generated source marker;
 - explicit generated license;
 - source-backed rows unchanged;
-- generated DE/EN row persistence plus source-backed FA row preservation;
+- generated DE/EN row persistence;
 - derivation edges exact;
 - zero-edge valid case;
 - generated→generated rejection;
 - deterministic validation;
-- source-backed Persian with legitimate `U+200C` ZWNJ passes validation;
-- source-backed Persian with prohibited bidi controls (`U+061C`, `U+200E`, `U+200F`, `U+202A`–`U+202E`, `U+2066`–`U+2069`) fails validation;
 - ordinary control characters/newlines where forbidden fail validation;
 - complete five-item provider response with four valid + one invalid:
   - four valid candidates become completed;
@@ -750,7 +678,6 @@ Stage 04:
 - one semantic item maps to one logical request and Batch record with stable `custom_id`;
 - Batch output reorders safely by custom ID; missing/duplicate/unknown IDs fail closed;
 - prepared/submitted/ambiguous/terminal Batch manifest state and partial result durability;
-- no LLM QA is constructed for source-backed Persian;
 - legacy first-canary in-flight checkpoint is not silently cleared or migrated;
 - suspicious-row routing;
 - deterministic audit sample;
@@ -815,21 +742,19 @@ Against the accepted real Stage-02 asset:
 
 1. verify input SHA/bytes/counts/quick_check;
 2. execute real Stage 03;
-3. ingest/validate the accepted Persian source artifacts and emit the missing-FA
-   coverage report; STOP for the owner before final generated queue materialization;
-4. record total deterministic generated DE/EN queue size;
-5. record counts by:
-   - target language;
+3. record total deterministic generated DE/EN queue size;
+4. record counts by:
+   - target language (`de`, `en`);
    - job class;
    - availability of source-backed localized derivation text;
-6. record the queue SHA-256 and bytes;
-7. validate that queue output contains no secrets/private paths;
-8. exercise Stage-04 end-to-end only with fake/local deterministic transport,
+5. record the queue SHA-256 and bytes;
+6. validate that queue output contains no secrets/private paths;
+7. exercise Stage-04 end-to-end only with fake/local deterministic transport,
    including one-item Batch-record semantics and manifest recovery;
-9. exercise Stage 05 on a synthetic or fake-enriched fixture, not by pretending
+8. exercise Stage 05 on a synthetic or fake-enriched fixture, not by pretending
    the real dictionary has already completed Stage 04;
-10. build/inspect the Dockerfile when local container tooling is available;
-11. run all targeted tests and full `make gate`.
+9. build/inspect the Dockerfile when local container tooling is available;
+10. run all targeted tests and full `make gate`.
 
 If real Stage-03 queue construction shows a contract ambiguity requiring an ADR
 decision, STOP and return to the orchestrator.
@@ -855,34 +780,25 @@ authorizes any paid canary/full run explicitly.
 That continuation remains within the same WORKFLOW attempt when no code/design
 change is required.
 
-#### Source coverage and German canary gate
+#### German canary and production gate
 
-Before any paid production run, the rebuilt deterministic Persian source coverage
-report and every used source-acceptance packet must be owner/orchestrator
-accepted, the owner must have seen the missing-FA count and made any required gap
-decision, and the source-first German queue size must be measured. A small German
-canary and selective QA path must be accepted. The configured production
+Before any paid production run, the source-first German queue size must be measured.
+A small German canary and selective QA path must be accepted. The configured production
 model/endpoint/correlation/limit facilities must be verified, the deterministic
 partition plan/manifests prepared, and a current cost estimate reported.
-
-The historic Persian model-comparison canary is no longer a prerequisite. It
-remains preserved/retired evidence. Persian generation stays zero unless a later
-owner decision separately authorizes it.
 
 #### Full-run blockers
 
 The production run remains strictly prohibited until ALL of the following are true:
 
-1. ADR-0006 is accepted/frozen and repaired implementation/A13 evidence is accepted;
-2. all used source-acceptance packets and deterministic Persian coverage/gap
-   report are accepted, with any required gap decision recorded;
-3. German source-first queue is measured, bounded canary accepted, and selective
+1. ADR-0007 is accepted and frozen;
+2. German source-first queue is measured, bounded canary accepted, and selective
    QA path accepted;
-4. current production model/endpoint Batch correlation and limit facilities are
+3. Current production model/endpoint Batch correlation and limit facilities are
    verified, with partition plan/manifests prepared;
-5. generated-output classification, credential handling, and current cost estimate
+4. Generated-output classification, credential handling, and current cost estimate
    are accepted; and
-6. explicit orchestrator authorization for the full Batch run is issued.
+5. Explicit orchestrator authorization for the full Batch run is issued.
 
 No worker may infer full-run authorization merely because a canary passes.
 
@@ -895,9 +811,6 @@ Record only executable evidence.
 Phase-A report includes:
 
 - accepted Stage-02 input SHA/bytes/counts;
-- Persian source candidate/acceptance metadata, source digests/licenses, and
-  exact-mapping evidence;
-- missing-FA coverage report counts and deterministic sample;
 - Stage-03 queue SHA/bytes;
 - total queue records;
 - queue counts by language/job class;
@@ -935,7 +848,6 @@ Phase-A report includes:
 - durable rejected state counts, validation error breakdown, and explicit retry manifest verification;
 - generated DE/EN model occupants recorded;
 - Batch manifest/checkpoint state and `custom_id` join evidence;
-- source-backed Persian ZWNJ/bidi, provenance, license, and human-sample evidence;
 - verification of legacy first-canary preservation.
 
 Do not record:
@@ -954,15 +866,9 @@ STOP and return to the slice-6 orchestrator if:
 - satisfying the task requires modifying `app/`, runtime/user schema, ADRs,
   `reference/schema.sql`, AGENTS, WORKFLOW, STATE, or another path outside the
   allowlist;
-- Stage-03 queue semantics cannot be reconciled with accepted ADR-0006 and
-  the unsuperseded portions of accepted ADR-0004 without a new architecture
-  decision;
-- a proposed DE→FA/EN→FA source lacks explicit license, reproducible identity,
-  deterministic extraction, or exact-sense mapping proof;
-- any Persian mapping is ambiguous, except that the candidate is rejected and
-  reported as a gap without producing an FA row;
-- the missing-FA report is ready but an owner Persian-gap decision required for
-  subsequent work is absent;
+- Stage-03 queue semantics cannot be reconciled with accepted ADR-0006,
+  accepted/frozen ADR-0007, and unsuperseded portions of accepted ADR-0004
+  without a new architecture decision;
 - Stage-04 would require runtime LLM/API dependency;
 - a provider secret would need to be committed, printed or written to an image;
 - provenance cannot satisfy D45/R11;
@@ -985,11 +891,8 @@ STOP if:
 - any candidate in a returned unit is rejected before submitting another paid bounded unit;
 - restart would automatically resubmit rejected IDs without explicit authorization;
 - legacy first-canary `bulk.in_flight` state would be cleared, migrated, or resubmitted;
-- any automatic Persian LLM fallback or reuse of historical Persian queue/checkpoint
-  identity is attempted;
 - configured production model/endpoint does not support the required Batch
   contract, or a production Batch submission lacks explicit authorization;
-- arbitrary `Cf` format characters are accepted or forbidden bidi controls are not rejected;
 - successfully billed bulk work can complete without becoming durably
   checkpointed before later paid work;
 - successfully billed selective-QA work can complete without becoming durably

@@ -53,3 +53,6 @@ downloads/
 # OS artifacts
 .DS_Store
 Thumbs.db
+
+# Temporary scratch and evidence
+tmp/
