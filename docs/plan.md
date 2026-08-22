@@ -18,7 +18,7 @@ and `tasks/<NEXT>.md` naming key on the slice ID, never the order number.
 | slice-3 | 4 | — | Stage 01 output carries the schema/attribution contract Gate 2 consumes, including the accepted ADR-0004 PART-A alignment. Order 4 closes normally after its required migration-risk full-diff review passes, then Gate 2 may begin. |
 | slice-4 | 5 | — | §6 order 5's thresholds govern verbatim. A design gate, not a §5 retry ladder: `<85%` returns to governance. |
 | slice-5 | 6 | — | Stage 02 imports `app/resolve.py`; cache keys include its SHA-256 (AGENTS R2/R3). |
-| slice-6 | 7 | — | **ADR-0007 is `NEEDS COLD REVIEW` (owner decision removes Persian from v1 scope).** Stages 03–05 perform deterministic DE/EN offline enrichment (missing English meanings, source-first German learner meanings with D65 positive eligibility, validation, selective QA, and bounded correlated Batch manifests) and final packaging, plus the Piper image-build prerequisite. Persian source cascade, bridging, and canary gates are removed from forward scope. No paid production run proceeds until all ADR gates are met. |
+| slice-6 | 7 | — | **ADR-0007 is `ACCEPTED / FROZEN` after Cold Review #2 — FOCUSED REMEDY VERIFICATION.** Stages 03–05 perform deterministic DE/EN offline enrichment (missing English meanings, source-first German learner meanings with D65 positive eligibility, validation, selective QA, and bounded correlated Batch manifests) and final packaging, plus the Piper image-build prerequisite. Persian source cascade, bridging, and canary gates are removed from forward scope. No paid production run proceeds until all ADR gates are met. |
 | slice-7 | 8 | — | ADR-0003 review/mastery semantics and AGENTS R12/R13 land before browser integration; render/API supports note's selected DE/EN meaning set, tri-state noun plural on back (ADR-0004 §10), PART-B durable bindings, D47 atomic dictionary activation/relink, and stale-picker HTTP 409 before UI/browser completion (Persian RTL removed by ADR-0007); owns runtime pronunciation feature (note-local custom record/upload persistence, stable pronunciation identity, human-media policy and exact-id discovery, precedence, human/Piper cache, crash-safe replacement and API/render integration). |
 | slice-8 | 9 | — | `reference/smoke_test.py` path defect repaired; assertions match ADR-0002 §4/§5, ADR-0003 §5, and ADR-0004 D47 replacement/stale-picker scenarios; owns end-to-end pronunciation smoke (override/revert, browser-local unsaved preview, unsafe media, identity/replacement cases, human-cache integrity corruption, offline/remote failure and Piper fallback). |
 | slice-9 | 10 | Lecture app Phase 4 decomposition complete | Read-only, out-of-ladder donor inspection (WORKFLOW §12 / AGENTS G6) writes `tasks/adr-0002-donor-notes.md` first; any contradiction returns to governance. Compose work starts only if donor evidence agrees and the host blocker is gone. |
@@ -77,7 +77,7 @@ one blocking condition and three scope notes; the sequence is unchanged.
 - **slice-5 is unchanged**: build stage 02 / Tatoeba index, importing
   `app/resolve.py` and keying its cache on the resolver SHA-256 (AGENTS R2/R3).
 - **slice-6 / order 7:** This ADR-0004 amendment originally left Stages 03–05
-  multilingual enrichment unchanged. Accepted ADR-0006 and pending ADR-0007 supersede
+  multilingual enrichment unchanged. Accepted ADR-0006 and accepted/frozen ADR-0007 supersede
   ADR-0004 as listed in their supersession records. Stages 03–05 perform maintainer-operated
   offline enrichment for German and English only (DE learner meanings and missing EN meanings),
   validation, selective QA, Batch packaging, and the Piper image-build prerequisite.
@@ -128,7 +128,7 @@ VERIFICATION. It does not reopen ADR-0004. Its §10 supersession record is activ
 ADR-0004 remains binding everywhere not explicitly superseded there.
 
 - Persian source cascade and Batch specifications are established. (Note:
-  Persian is subsequently deferred from active v1 scope under pending ADR-0007).
+  Persian is subsequently deferred from active v1 scope under accepted/frozen ADR-0007).
 - Existing suitable source-backed German learner meanings are preserved; only
   unsuitable/missing learner wording produces one isolated German request.
 - Every generated item stays one model request. Production Batch
@@ -138,10 +138,12 @@ ADR-0004 remains binding everywhere not explicitly superseded there.
   immediately before paid use, not frozen architecture.
 - The historical Persian canary remains preserved and retired evidence.
 
-## Governance drafting — ADR-0007 (2026-08-22)
+## Governance activation — ADR-0007 (2026-08-22)
 
-`docs/adr/0007-defer-persian-learner-meanings.md` was drafted with initial status
-`NEEDS COLD REVIEW`.
+`docs/adr/0007-defer-persian-learner-meanings.md` is `ACCEPTED / FROZEN`
+after Cold Review #2 — FOCUSED REMEDY VERIFICATION. O1–O3 and their applied
+resolution records remain preserved. ADR-0007's §11 supersession record is now
+active; no Cold Review #3 is required merely for ceremony.
 
 By deliberate owner decision, Persian (`fa`) is removed from the active v1 flashcard
 product scope and deferred to a future major release:

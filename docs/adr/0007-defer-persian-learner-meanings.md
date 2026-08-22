@@ -1,6 +1,6 @@
 # ADR-0007 — Defer Persian learner meanings from v1
 
-**Status:** NEEDS COLD REVIEW.
+**Status:** ACCEPTED / FROZEN.
 
 **Lineage:** This is a genuinely new architectural decision made after
 ADR-0004 and ADR-0006 were accepted and frozen. It begins a new cold-review
@@ -353,10 +353,10 @@ reactivate Persian.
 
 ---
 
-## 11. Supersession record — ACTIVE on acceptance
+## 11. Supersession record — ACTIVE
 
-This table specifies the exact supersessions enacted by ADR-0007 upon approval
-and freezing. Historical ADR bodies remain unmodified.
+This table specifies the exact supersessions enacted by accepted/frozen ADR-0007.
+Historical ADR bodies remain unmodified.
 
 | Historical provision | Active ADR-0007 replacement |
 |---|---|
@@ -383,7 +383,8 @@ the broad architecture challenge for this new ADR-0007 lineage.
 
 ### Cold review #1 — broad architecture challenge
 
-*Pending dispatch to a fresh cold orchestrator session.*
+*Completed 2026-08-22. Review #1 filed O1–O3; all three objections and their
+applied resolution records are preserved below.*
 
 #### O1 — BLOCKING. Historical paid-canary item accounting is materially incorrect.
 
@@ -457,3 +458,45 @@ valid v1 request must return HTTP 422 with zero writes. Do not broaden that
 semantic validation condition to HTTP 400.
 
 **Resolution (2026-08-22 revision): APPLIED.** Removed the ambiguous "HTTP 422 / 400" phrasing in §3.1, §7.2, and D80. Requests providing unsupported `fa` (or any language outside `{de, en}`) in otherwise structurally valid learner-meaning selections or user-meaning updates deterministically fail semantic validation with HTTP 422 and perform zero writes, aligning with the accepted ADR-0002 and ADR-0004 API contracts.
+
+### Cold review #2 — FOCUSED REMEDY VERIFICATION
+
+**Reviewer:** fresh cold orchestrator session, 2026-08-22 (GPT-5.6 Sol),
+repository-only committed-state review under WORKFLOW §7 / AGENTS G7.
+
+**Verdict: APPROVED / FREEZE ADR-0007.**
+
+Cold Review #2 verified all three Cold Review #1 remedies against the accepted
+architecture and preserved Slice-6 historical evidence:
+
+- **O1 verified resolved.** Known cumulative paid spend remains exactly
+  USD 0.0008764 across four returned model-generation results before STOP:
+  3 completed, 1 rejected as `too_long`, 0 ambiguous/in-flight; item 5 was never
+  sent; the separate HTTP 401 authorization failure was unbilled; Attempt 2 made
+  zero provider calls.
+- **O2 verified resolved.** The active v1 learner-meaning domain is strictly
+  `{de, en}` at build/API validation boundaries, while physical SQLite
+  `language` columns remain open `TEXT` with no closed enumerating language CHECK
+  and no foreign key to a closed language enum/list. Structural extensibility
+  does not activate Persian or create a generic arbitrary-language v1
+  requirement.
+- **O3 verified resolved.** Unsupported `fa` in an otherwise structurally valid
+  learner-meaning request deterministically fails semantic validation with
+  HTTP 422 and zero writes. No active `422 / 400` ambiguity remains.
+
+The remedies introduce no qualifying direct knock-on contradiction. ADR-0004
+D33/D34, D36, D39/D40, D45, D46/D47; ADR-0006 D65–D69; ADR-0005 pronunciation
+ownership; stable semantic identity; provenance/derivation; and fail-closed
+Batch durability remain intact.
+
+ADR-0007's supersession record is active. Persian source ingestion, source
+packets, gap reports, generation, canaries, semantic QA, provider calls,
+RTL/browser requirements, and runtime fields are not forward v1 requirements.
+Historical Persian evidence remains preserved solely as audit evidence.
+
+No further Persian provider spending is authorized. Paid DE/EN production
+remains subject to D79's existing explicit owner/orchestrator gates; acceptance
+of ADR-0007 itself authorizes no paid provider execution.
+
+No qualifying Review-2 blocker remains. Cold Review #3 is not required merely
+for ceremony.

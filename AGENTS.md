@@ -74,7 +74,7 @@ backlog work.
 
 - **R11 — Attribution is per row, always filled.** `[reviewed]` Every `sense`
   row, every **localized meaning** row (the DE/EN learner-meaning texts hanging
-  off a sense — ADR-0004 §6 / ADR-0007, pending cold review), and every `example` row carries
+  off a sense — ADR-0004 §6 / accepted ADR-0007), and every `example` row carries
   a non-empty `source` and `license`. Provenance lives on the localized meaning
   row, not on the sense, because German and English meanings for one
   sense routinely come from different sources under different licenses.
@@ -284,7 +284,7 @@ backlog work.
   does **not** mean learner-facing meanings must be written in German, nor that
   they must be written in English. A note may display its meaning in German
   and/or English — a per-note, non-empty selection rendered over
-  structured fields (ADR-0004 / ADR-0007, pending cold review) — and that is a display
+  structured fields (ADR-0004 / accepted ADR-0007) — and that is a display
   contract, not a generalisation of the app. What stays rejected is unchanged: no
   generic note types, no cloze, no configurable templates (ADR-0001 D18, §17.8),
   and no second target language. Proposals to generalise, including making the

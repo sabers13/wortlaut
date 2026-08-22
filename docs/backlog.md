@@ -35,8 +35,9 @@ them. REJECTED items are listed so they do not resurface.
   `tasks/adr-0002-donor-notes.md`; any contradiction returns to governance. When
   that repo decomposes Phase 4, add one line to *its* backlog pointing here; do
   not file flashcard ADRs into it before then (ADR-0002 §3).
-- **Paid Stage-04 production remains owner-gated under ADR-0006/ADR-0007.**
-  Architecture-changing Slice-6 implementation is paused pending ADR-0007 cold review.
+- **Paid Stage-04 production remains owner-gated under accepted ADR-0006/ADR-0007.**
+  ADR-0007 is ACCEPTED / FROZEN; the Slice-6 implementation/design-reset is no
+  longer governance-blocked and may resume under the DE/EN-only architecture.
   API credit expires **mid-September 2026**. ADR acceptance alone
   authorizes no paid production run. Forward generation is DE/EN only: preserve only
   positively eligible source-backed German wording; uncertainty generates one

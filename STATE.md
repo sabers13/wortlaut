@@ -55,15 +55,16 @@ memory of a conversation.
   DE eligibility is conservative, Batch manifests are bounded/correlated, and
   owner source acceptance remains a hard gate. ADR acceptance itself authorizes
   no paid production work.
-* **ADR-0007 drafted with status NEEDS COLD REVIEW.** Per owner decision,
-  Persian is removed from the active v1 flashcard product scope and deferred.
-  Active learner meaning languages in v1 are restricted to German and English
-  (`{de, en}`). ADR-0007 preserves the normalized localized-meaning architecture
-  (`sense_meaning`), stable semantic references, derivation tracking, and
-  quality-preserving Batch architecture while removing Persian source-cascade
-  and RTL requirements from v1. Historical Persian investigations, prompt
-  contract repairs, and paid canary spend (USD 0.0008764) are preserved as
-  immutable audit records. No further Persian paid work is authorized.
+* **ADR-0007 is ACCEPTED / FROZEN.** Cold Review #2 — FOCUSED REMEDY
+  VERIFICATION — verified the O1–O3 remedies and found no qualifying direct
+  knock-on blocker. Its §11 supersession record is active. Active v1
+  learner-meaning languages are strictly `{de, en}` at build/API boundaries
+  while physical SQLite language columns remain open `TEXT`; unsupported `fa`
+  is HTTP 422 with zero writes. Historical Persian investigation/canary evidence
+  remains preserved, including known cumulative paid spend USD 0.0008764 across
+  four returned generation results before STOP. No further Persian provider
+  spending is authorized. ADR acceptance itself authorizes no paid DE/EN
+  production run.
 * **Two-authority workflow remains binding.** Local Git/terminal is authoritative
   for working-tree/runtime/gate/local-asset facts; private `origin` is the
   persistent authoritative mirror for committed and pushed state.
@@ -91,6 +92,10 @@ memory of a conversation.
   pre-mutation, pre-commit and post-commit `make gate` PASS evidence plus
   clean-tree/push equality returned in the review receipt; the GitHub mirror is
   not substituted for local execution evidence.
+* **ADR-0007 Cold Review #2 approval persistence:** a fresh local `make gate`
+  PASS is mandatory before the approval/activation commit; the approval is valid
+  only with clean-tree, push-equality, and unchanged `origin/slice/6` evidence in
+  the final persistence receipt.
 
 ## Escalation status
 
@@ -111,12 +116,6 @@ memory of a conversation.
 
 ## Blocked
 
-* **Slice-6 implementation is paused/blocked pending ADR-0007 cold review.**
-  Architecture-changing Slice-6 implementation cannot proceed while ADR-0007
-  remains `NEEDS COLD REVIEW`. No further Persian provider calls or paid work are
-  authorized. Following ADR-0007 acceptance, a separate implementation/design-reset
-  worker will remove Persian code from the Slice-6 branch and implement the
-  DE/EN-only pipeline under the updated task brief.
 * **ADR-0004 PART-B/runtime schema remains intentionally deferred to slice-7.**
   Remaining work includes note-local multilingual meaning state (for DE/EN),
   durable dictionary bindings, active dictionary version+SHA state and D47
@@ -128,19 +127,24 @@ memory of a conversation.
 * **Compose integration remains independently blocked** by the lecture app's
   Phase-4 decomposition and required donor evidence; slice-9 owns that boundary.
 * **Build Stage 04 remains time-bound to mid-September 2026.** API credit
-  expires mid-September 2026; paid canary and production work for DE/EN will
-  proceed only after ADR-0007 acceptance and under its explicit owner gates.
+  expires mid-September 2026; paid canary and production work for DE/EN proceeds
+  only under explicit owner gates.
 * **Non-blocking slice-3 review debt remains in `docs/backlog.md`.** T3 N1 is the
   synthetic fixture `genitive_sg` bind defect; T3 N2 is future fallback
   fingerprint hardening for potentially volatile upstream numeric bookkeeping.
 
 ## Next three actions
 
-1. Open a fresh cold orchestrator session for ADR-0007 Cold Review #1 (broad
-   architecture challenge).
-2. Upon ADR-0007 approval and freezing, dispatch the Slice-6 implementation /
-   design-reset worker to remove Persian code and implement the DE/EN-only
-   Stage 03–05 pipeline under `tasks/slice-6.md`.
-3. Slice-6 Attempt 1 executes local Stage 03 queue measurement, fake-transport
-   Stage 04, fixture Stage 05, and Docker/Piper verification; no paid production
-   run is authorized without explicit owner approval.
+1. Open the separate Slice-6 implementation/design-reset orchestration against
+   accepted/frozen ADR-0007 and the preserved `slice/6` historical branch; remove
+   the retired Persian implementation path and realign Slice-6 to the active
+   DE/EN-only contract. Governance approval itself performs no implementation
+   and authorizes no provider calls.
+2. Execute Slice-6 Phase A under the accepted brief: deterministic local Stage-03
+   DE/EN queue measurement, fake-transport Stage-04 verification, fixture
+   Stage-05 packaging, Docker/Piper prerequisite verification, and fresh gate
+   evidence.
+3. Any paid DE/EN canary or production execution remains a later explicit
+   owner/orchestrator decision under ADR-0007 D79 after its measured queue,
+   canary/QA, Batch capability, manifest and current-cost prerequisites are
+   satisfied.

@@ -1,16 +1,16 @@
 # Slice 6 — build stages 03–05: multilingual offline enrichment and packaging
 
-> [!WARNING]
-> **BLOCKED PENDING GOVERNANCE:** Architecture-changing Slice-6 implementation is
-> **BLOCKED** until ADR-0007 completes cold review and is accepted and frozen.
-> By owner decision, Persian has been removed from the active v1 flashcard product
-> scope and deferred. This task brief specifies the forward DE/EN-only enrichment
-> and packaging scope. Implementation dispatch is not authorized while ADR-0007
-> remains `NEEDS COLD REVIEW`.
+> [!NOTE]
+> **GOVERNANCE CLEARED:** ADR-0007 is `ACCEPTED / FROZEN` after Cold Review #2 —
+> FOCUSED REMEDY VERIFICATION. Persian remains deferred from active v1 scope.
+> Slice-6 implementation/design-reset may resume under this DE/EN-only brief.
+> ADR acceptance itself authorizes no paid provider execution; every paid DE/EN
+> canary or production boundary remains subject to the explicit owner/orchestrator
+> gates in the accepted architecture.
 
 Task:        Implement the maintainer-operated offline dictionary stages 03–05
              required by ADR-0001 §12, ADR-0002 §6 order 7, ADR-0004
-             D33–D34/D36–D38/D45, ADR-0006 D65–D69, pending ADR-0007 D72–D81,
+             D33–D34/D36–D38/D45, ADR-0006 D65–D69, accepted ADR-0007 D72–D81,
              and ADR-0005 D56: deterministic DE/EN enrichment queue construction,
              validation/QA, final versioned dictionary packaging, and the first
              standalone Dockerfile with the build-time Piper engine+voice
@@ -77,10 +77,10 @@ The binding architecture is:
 - ADR-0001 §12, except where superseded;
 - ADR-0002 §6 order 7;
 - ADR-0004 D33–D34, D36–D38, D45 and §§3–8 except where superseded by ADR-0006
-  and pending ADR-0007;
+  and accepted/frozen ADR-0007;
 - ADR-0005 D56 (Piper build/runtime prerequisite);
 - ADR-0006 D65–D69 (German positive source eligibility and Batch architecture);
-- ADR-0007 D72–D81 (pending cold review: defines DE/EN-only meaning scope, defers
+- ADR-0007 D72–D81 (accepted/frozen: defines DE/EN-only meaning scope, defers
   Persian from v1, and updates build/runtime contracts);
 - AGENTS R1 and R11;
 - docs/plan.md slice-6 row;
