@@ -1,4 +1,4 @@
-# Slice-6 Report — ADR-0006 Current Cycle Attempt 1 — Pre-Canary v2 Ready
+# Slice-6 Report — ADR-0007 Design Reset
 
 ## ADR-0007 Design-reset Attempt 1 — Phase A
 
@@ -74,6 +74,10 @@ decision and a separate paid-run authorization.
 **Archive preserved:** `archive/slice-6-pre-adr0006-1782cd7` @ `1782cd71343d86946757dce8f36784f9582e28f4` — not deleted/rewritten
 **Model:** `gpt-5.6-terra / T3 / high`
 **Disposition:** `PRE_CANARY_READY` — implementation complete, verified, committed; **paid 50-item canary NOT authorized and NOT executed**
+
+## Historical pre-ADR-0007 evidence — preserved audit record
+
+The following sections are historical pre-ADR-0007 audit evidence, preserved verbatim without modification. A cold reader must not interpret the preceding pending-commit metadata as current. Current authoritative evidence is in the ADR-0007 Design-reset Attempt 2 section below.
 
 ## Stage-02 Input Verification (A14.1, read-only)
 
@@ -412,3 +416,255 @@ synthetic test-only.*
   gen-in (2×measured sum) $0.0065 + gen-out (≤500 tok/req) $0.0300 +
   QA-in (≤(P95+120)×2/req) $0.0908 + QA-out (≤600 tok/req) $0.3600
   = **$0.4873 ≤ $0.50 cap** — provable with completion-safe margins.
+
+---
+
+## ADR-0007 Design-reset Attempt 2 — Phase-A Acceptance Evidence
+
+**Status:** Phase-A acceptance-evidence retry complete. No architecture change. No provider credential read, no network call, no paid spend. Stopped before paid boundary. Awaiting Slice-6 orchestrator Phase-A acceptance decision.
+
+**Failure-1 class:** acceptance-evidence/reporting — Attempt 1 reached Phase-A boundary and passed local verification but committed report/evidence did not satisfy the complete A13/A14/A16 acceptance record. No design deficiency. This retry closes evidence gaps with narrowest missing tests and report repair, preserving historical Persian audit records.
+
+**No architecture change:** ADR-0007 remains ACCEPTED / FROZEN. DE/EN-only build/runtime contracts unchanged. Only test/report completeness was repaired.
+
+### 1. Stage-02 accepted input (mechanical verification, read-only)
+
+- SHA-256: `75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97` — PASS (preflight, `sha256sum` + `stat`)
+- Bytes: `945410048` — PASS
+- `PRAGMA quick_check`: `ok` — PASS
+- Counts: examples `777295` (with EN `494687`, without EN `282608`), `example_lemma` `6504849`, distinct indexed lemmas `99537`, token_count sum `7292286`, incomplete attribution `0`, orphan `0` — PASS
+- Required PART-A + Stage-02 tables (`lemma`, `surface_form`, `sense`, `sense_meaning`, `sense_meaning_derivation`, `example`, `example_lemma`) present — PASS
+- Input SHA before == SHA after all stage executions — PASS (no mutation)
+
+### 2. Stage-03 real queue (Attempt-1 measurement preserved, input unchanged)
+
+- **Mechanically confirmed:** accepted Stage-02 SHA/bytes/quick_check/counts unchanged; no live Stage-03 rebuild executed (OOM-killed on 15 GiB host if attempted; task authorizes preserving accepted 316 MB output evidence when input unchanged and mechanically verifiable). Measurements below are the accepted Attempt-1 real Stage-03 values that remain valid:
+- `total` queue = `480221`
+- `de` = `480221`; `en` = `0`
+- `de_learner_meaning` = `480221`; `en_meaning` = `0`
+- `with localized derivation text` = `0`; `without` = `480221`
+- Queue SHA-256: `e542f2f96b3966690fe2fcebb145440deba7a8ec9aa7dd2d0c93ba3540ef7aa1`
+- Queue bytes: `316541240`
+- Zero secret/private-path leakage (scan for `api_key`, `authorization`, `bearer`, `password`, `/home/` — PASS)
+- Stage-03 made zero network calls (code path has no transport; verified by `grep` + test `test_stage03_no_network_and_input_immutable`)
+- Input remained unchanged: SHA before == SHA after — PASS
+- **Explanation:** EN queue is zero because all 480221 accepted canonical senses already have source-backed EN `sense_meaning` rows; DE queue covers all senses because suitable source-backed localized DE learner wording is absent for those queued senses (D65 positive predicate fails for `siehe`/`vgl.`/bounds etc.); no localized meaning text was consumed, therefore zero derivation-text jobs is valid.
+
+### 3. Targeted test evidence (separate per-suite, fake/local transport only, no network)
+
+- `pytest -q tests/test_build_dict_stage03.py`: **9 passed** (deterministic queue IDs/order, input-order independence, missing-EN classification, source-first DE retention, DE fallback provenance, positive DE predicate, overwrite/retired-packet refusal, stable semantic refs, no-network/input-immutable)
+- `pytest -q tests/test_build_dict_stage04.py`: **18 passed** (fake bulk/QA, generated marker, license, source-backed unchanged, derivation exact/zero-edge, generated→generated rejection, validation, 5-item 4-valid+1-invalid durable rejected, restart no-resubmit, unknown outcome in_flight, checkpoint compatibility, retry manifest, Batch manifest/custom-ID, interruption/resume bulk & QA, legacy preservation, provenance/rollback, QA routing, corrupt checkpoint, no-secret leakage)
+- `pytest -q tests/test_build_dict_stage05.py`: **4 passed** (fixture copy/metadata, overwrite/bad-attribution refusal, duplicate/blank ref & malformed provenance rejection, input unchanged & metadata consistency)
+- **Stage-01 regressions:** `pytest -q tests/test_build_dict_stage01.py` — **46 passed**
+- **Stage-02 regressions:** `pytest -q tests/test_build_dict_stage02.py` — **54 passed** (via `.venv/bin/pytest`; requires `de_core_news_md` model)
+- **No provider credentials/network used by any test** — verified (fake transport only)
+
+### 4. Interruption / resume evidence (A13/A16 — executable, with exact IDs)
+
+**Bulk (fake/local transport):**
+
+- Deterministic bounded unit size: `batch_size=1` (each `queue:v1:` item is one independent logical request)
+- Completed unit: `queue:v1:3fea0b08cf699c71e988b8790c9df32b` — persisted as `bulk.completed`
+- Deliberate interruption point: second bulk unit `queue:v1:6599e00d197ef7283452294a71fb8788` transport raises `RuntimeError("deliberate bulk failure after one completed unit")`; checkpoint retains `bulk.in_flight = ["queue:v1:6599e00d197ef7283452294a71fb8788"]`
+- Exact item IDs submitted before interruption: `["queue:v1:3fea0b08cf699c71e988b8790c9df32b"]`
+- Exact completed IDs persisted before interruption: `["queue:v1:3fea0b08cf699c71e988b8790c9df32b"]`
+- Restart from checkpoint: verified `ambiguous` fails closed while `in_flight` present; after exact-one owner reconciliation (`in_flight` cleared), restart
+- Exact completed IDs skipped on restart: `["queue:v1:3fea0b08cf699c71e988b8790c9df32b"]` — **not** in `good.bulk_submitted`
+- Exact remaining IDs submitted after restart: `["queue:v1:6599e00d197ef7283452294a71fb8788", "queue:v1:ad9ddc565a25bac478c7d47b20571c67", "queue:v1:bf178577ec7f139b0c88e308b88c0024"]`
+- Zero automatic resubmission of completed IDs — PASS
+- Resumed logical generated result set equals uninterrupted equivalent — PASS (`resumed_state["bulk"]["completed"] == uninterrupted_state["bulk"]["completed"]`)
+- Full synthetic BULK set for this test (sorted): `["queue:v1:3fea0b08cf699c71e988b8790c9df32b", "queue:v1:6599e00d197ef7283452294a71fb8788", "queue:v1:ad9ddc565a25bac478c7d47b20571c67", "queue:v1:bf178577ec7f139b0c88e308b88c0024"]` (prefix `bulk-interrupt`, `n=4`)
+
+**Selective QA (fake/local transport):**
+
+- At least one QA unit completes: `qa-valid` for `queue:v1:09a0e55ec66348c4f34180d1b8e94d10` (first required QA id)
+- Deliberate interruption point: second QA unit transport raises `RuntimeError("deliberate QA failure after one completed unit")`; checkpoint retains `qa.in_flight` for one required id
+- Exact QA IDs submitted before interruption: first required QA id (deterministic `required` set via flagged + audit sample)
+- Exact completed QA IDs persisted: same one id in `qa.completed`
+- Checkpoint `qa.required` (sorted) derived from `len(text)>50` flagged + deterministic audit sample (`_deterministic_audit_sample` with seed `queue_sha`): e.g. for `qa-interrupt` case `required` subset includes flagged + 2-sample; test asserts `qa_completed` not resubmitted
+- Restart from checkpoint: verified `ambiguous` fails closed; after clearing `qa.in_flight`, restart
+- Exact completed QA IDs skipped: first completed QA id not in `good.qa_submitted`
+- Exact remaining QA IDs submitted after restart: remaining `required \ completed`
+- Zero completed QA resubmission — PASS
+- Resumed corrected logical result equals uninterrupted equivalent — PASS (`resumed_state["qa"]["completed"] == uninterrupted_state["qa"]["completed"]`)
+- Full synthetic QA set for this test: `["queue:v1:09a0e55ec66348c4f34180d1b8e94d10", "queue:v1:a89a597194979604c7d5b9173ccecc1f", "queue:v1:cf01385619d683f2f39aab5893a0de3c", "queue:v1:e1657af8d9db01dc5a60d2a98971e927"]` (prefix `qa-interrupt`, `n=4`)
+
+**Evidence source:** `tests/test_build_dict_stage04.py::test_bulk_interruption_resume_with_exact_ids` and `::test_qa_interruption_resume_with_exact_ids` — deterministic synthetic IDs, fake transport with `FailingBulkAfterOneTransport` / `FailingQAAfterOneTransport`.
+
+### 5. Rejected / ambiguous / retry evidence (DE/EN, executable)
+
+**Complete returned bounded response (five-item fixture, batch_size=5):**
+
+- Synthetic queue `five-item` with sorted IDs `["queue:v1:0c7b3487a34993e3b64150a6f7fba66f", "queue:v1:54d5ea60790677709d2a82197dbe9899", "queue:v1:ab9ad8ca7c9dd213555b602fa21ee372", "queue:v1:c8c9d130b6bdf97b3740a488554e5452", "queue:v1:e4c8f5256ee44e473b17fde14aba79be"]`
+- Invalid fixture: `queue:v1:ab9ad8ca7c9dd213555b602fa21ee372` text = its lemma `Lemma0002` → `echo_lemma` rejection
+- Durable completed: 4 (`queue:v1:0c7b3487a34993e3b64150a6f7fba66f`, `54d5...`, `c8c9...`, `e4c8...`)
+- Durable rejected: 1 (`queue:v1:ab9ad8ca7c9dd213555b602fa21ee372`, `error_code="echo_lemma"`, `phase="bulk"`, `attempt_count=1`, evidence `{text: "Lemma0002"}`)
+- `in_flight` cleared: `[]` — PASS
+- STOP before another paid bounded unit: `BuildDictError("Bulk unit had 1 rejected")` raised before next unit — PASS
+- Test: `test_five_item_four_valid_one_invalid_durable_state` — PASS
+
+**Restart:**
+
+- Completed IDs not resubmitted — PASS (`retry-test` case: bad `queue:v1:54d5ea...` not in `again.bulk_submitted`)
+- Rejected IDs not automatically resubmitted — PASS
+
+**Explicit rejected retry:**
+
+- Exact rejected ID authorization only — PASS (`retry_rejected(checkpoint, queue, [bad_id], ...)`)
+- Paid-attempt counter increments: `attempt_count` 1→2 on retry (verified via `rejected[bad_id]["attempt_count"]`)
+- Prior rejected evidence retained — PASS
+- Wildcard retry forbidden — PASS (`retry_rejected(..., sorted_ids)` raises `BuildDictError`)
+- `in_flight`/ambiguous ID cannot be retried through rejected-retry — PASS (`retry_rejected(..., [in_flight_id])` raises `BuildDictError: in-flight`)
+
+**Ambiguous transport:**
+
+- Unknown provider outcome remains `in_flight` — PASS (failing bulk leaves `bulk.in_flight` with one id)
+- No automatic resubmission — PASS
+- Exact-one compatible recovery succeeds — PASS (clear `in_flight` after owner reconciliation, next `build_stage04` succeeds and submits only remaining ids)
+- Zero/multiple/contradictory recovery candidates fail closed — PASS (incompatible queue SHA or multiple manifests raise `BuildDictError: incompatible`)
+
+### 6. Checkpoint compatibility evidence
+
+- Schema/version: `flashcard-stage04-checkpoint-v2`
+- Material identity components implemented (from `tools/build_dict.py:3087` `_checkpoint_identity`):
+  - `queue_sha256` (queue identity/content, derived from `hashlib.sha256(queue_bytes)`)
+  - `generation_marker` (`llm_generated_v1`)
+  - `generated_license` (`generated-output classification`)
+  - `bulk_de_model` (`gpt-5.6-luna` — DE bulk occupant)
+  - `bulk_en_model` (`gpt-5.6-luna` — EN bulk occupant)
+  - `qa_model` (`gpt-5.6-terra` — QA occupant)
+  - `bulk_pipeline_version` (`stage04-bulk-v1`)
+  - `qa_pipeline_version` (`stage04-qa-v1`)
+  - `response_schema_version` (`openai-responses-json-schema-v1`)
+- Mechanically verified incompatible identity fails closed — PASS (tests `test_checkpoint_compatibility_components_and_fail_closed`: changing `generated_license`, `bulk_pipeline_version`, `qa_pipeline_version`, or `bulk_de_model` each raises `BuildDictError: incompatible`)
+- Configured fake/current role occupants from implementation: DE=`gpt-5.6-luna`, EN=`gpt-5.6-luna`, QA=`gpt-5.6-terra` (defaults in `tools/build_dict.py:2068`; overridden per-run via identity)
+
+### 7. Batch / custom-ID evidence (fake/local, deterministic)
+
+- Deterministic manifest partitioning: bytewise-sorted `item_ids`, partitioned by `max_requests` and `max_bytes` — PASS (`_build_manifests` with `max_requests=2` → 3 manifests for 5 ids)
+- Request-count bound: `max_requests` enforced — PASS
+- Exact serialized JSONL-byte bound: `byte_len` == `len(payload_bytes)+1` per record including newlines, and `manifest byte_len` == `len(b"\n".join(...)+b"\n")` — PASS
+- Manifest-first durability: `manifests` persisted to checkpoint before any `send_bulk`/`send_qa` — PASS (`state["manifests"]` non-empty before submission)
+- Input-file identity/SHA: `input_file_sha256 == manifest_sha256 == hashlib.sha256(manifest_bytes).hexdigest()` — PASS
+- Stable custom IDs: `custom_id == f"batch:{item_id}"` for every queue item — PASS
+- One semantic item == one logical request == one Batch record — PASS (`sum(len(m["item_ids"])) == len(items)`)
+- Output order ignored: `ReorderingTransport` returns reversed dict but join via `custom_id` still succeeds — PASS
+- Exact custom-ID join, missing/duplicate/unknown fail closed — PASS (`MissingTransport` → `Missing custom_id`, `UnknownTransport` → `Unknown custom_id`)
+- Prepared state: `state == "PREPARED"` — PASS
+- Uploaded/submitted states where modeled: manifest `state` transitions are represented as `PREPARED` for fake transport; real Batch states `UPLOADED`, `SUBMISSION_AMBIGUOUS`, `SUBMITTED`, `PROCESSING`, `COMPLETED`, `FAILED`, `EXPIRED/CANCELLED` are accepted as schema values (validated as allowed strings) — PASS
+- Ambiguous submission state: `in_flight` retained, no automatic resubmit — PASS
+- Terminal states: checkpoint `bulk.completed` / `bulk.rejected` / `qa.completed` are terminal and durable — PASS
+- Completed manifest no-resubmit: already-completed manifest `item_ids` never resubmitted on restart — PASS
+- Exact-one ambiguous recovery: only clearing exact `in_flight` set allows forward progress — PASS
+- No live Batch endpoint contacted — PASS
+
+### 8. Legacy Persian preservation
+
+- Historical five Persian first-canary `bulk.in_flight` IDs remain **LEGACY UNRESOLVED** — PASS
+- Verified: file `tests/test_build_dict_stage04.py::test_legacy_persian_checkpoint_preserved` creates legacy checkpoint with `["enrichment-job:v1:ad94a...", "enrichment-job:v1:b9d5cf...", "enrichment-job:v1:bb1978...", "enrichment-job:v1:db6832...", "enrichment-job:v1:f457af..."]`, runs new DE/EN build against separate checkpoint path, asserts legacy file unchanged, and asserts `_load_checkpoint(legacy_path, current_identity)` raises `incompatible` rather than clearing/migrating/resubmitting.
+- Current code did not clear, migrate, reinterpret as DE/EN, resubmit, or retry them — PASS
+- Historical Persian paid evidence (USD 0.0008764, 3 completed / 1 rejected / 0 ambiguous) remains historical only — not executed.
+
+### 9. Generated row / provenance / rollback evidence
+
+- Generated DE/EN rows use `source='llm_generated_v1'` — PASS (`test_generated_row_provenance_rollback`: 2 rows with `llm_generated_v1` and `TEST_CLASSIFICATION_v1`)
+- Explicit generated-output classification/license present: `license='TEST_CLASSIFICATION_v1'` — PASS
+- Source-backed rows remain unchanged (`wiktionary` / `CC BY-SA`) — PASS
+- Consumed localized source text creates exact same-sense derivation: each `queue:v1:` item with `derivation_source_ids=[1001..]` yields one `sense_meaning_derivation` edge (`generated_meaning_id` → `source_meaning_id`, same `sense_id`) — PASS (2 edges for 2 items)
+- Zero-edge valid case: item with `derivation_source_ids=[]` yields zero edges — PASS
+- Generated→generated derivation fails closed — PASS (`INSERT ...` then `validate_sense_meaning_derivations` raises `generated->generated forbidden`)
+- Rollback deletes generated rows and outgoing derivation edges — PASS (`DELETE FROM sense_meaning WHERE source='llm_generated_v1'` + cascade/manual cleanup → 0 generated, 0 derivation)
+- Source-backed meanings survive rollback — PASS (`wiktionary` rows still present)
+
+### 10. Validation / selective QA evidence
+
+- Deterministic validation rules implemented (`tools/build_dict.py:3053` `_validate_generated_candidate`):
+  `empty`, `invalid_language`, `invalid_kind`, `too_long (>280 scalars)`, `duplicate` (within unit), `echo_lemma`, `forbidden_bidi` (`U+061C`, `U+200E`, `U+200F`, `U+202A–202E`, `U+2066–2069`), `forbidden_Cc`, `forbidden_Cf` (only `U+200C` ZWNJ allowed), `implausible_german` (no Latin/German letter), `has_no_text` etc.
+- German plausibility for DE: regex `[A-Za-zÄÖÜäöüß]` required — PASS
+- Forbidden/control content checked via `unicodedata.category` — PASS
+- Provenance consistency checked in `validate_sense_meaning_derivations` — PASS
+- Flagged set is deterministic: `len(text)>50` or `"flag" in lower` — PASS
+- Deterministic QA sample: `_deterministic_audit_sample(sorted_ids, queue_sha, 2)` via `SHA256(seed:item_id)` — PASS
+- QA is `all flagged + deterministic sample`, not every row — PASS (`required = flagged ∪ sample`, `len(required) < len(ids)` in test `test_validation_rules_and_qa_routing`)
+
+### 11. Stage-05 current fixture evidence
+
+- Source input unchanged: SHA before == SHA after — PASS (`test_stage05_input_unchanged_and_metadata_consistency`)
+- No overwrite: second `build_stage05` to same path raises `BuildDictError: already exists` — PASS
+- `PRAGMA quick_check = ok` — PASS
+- Required tables validated (`lemma`, `surface_form`, `sense`, `sense_meaning`, `sense_meaning_derivation`, `example`, `example_lemma`) — PASS
+- Stable semantic refs uniqueness/nonblank — PASS (blank `semantic_ref` raises `blank`)
+- Attribution: every `sense_meaning` has non-empty `source`/`license` — PASS (blank `license` raises `attribution`)
+- Derivation integrity via `validate_sense_meaning_derivations` — PASS
+- Orphan checks for `example_lemma`, `sense_meaning`, `sense_meaning_derivation` — PASS
+- Output checksum/SHA-256 and byte size recorded in metadata — PASS
+- Deterministic release metadata (`version`, `filename`, `sha256`, `bytes`, `generated_marker`) — PASS
+- **Explicitly:** real Stage-04 enrichment NOT executed; real Stage-05 dictionary NOT produced; no release published — PASS
+
+### 12. Docker / Piper evidence (mechanical reverification, no rebuild for ceremony)
+
+- Image identity/digest: `flashcard-slice6-piper:phase-a` (`d58382bad977d28996036e69b920c8ecab0446a5091c9336c8f685a4ec557fc3`, digest `sha256:2bd3fdd088ebf28e8e38b5ac8ed1b2726e364681a8e342385429681fa2050a6d`) — PASS (Podman inspect)
+- `piper-tts==1.6.0` pinned in runtime image (`pip freeze` shows `piper-tts==1.6.0`) — PASS
+- Voice `de_DE-thorsten-high` pinned to source revision `8aaa3c9839d2b669cb57a94e1ec92ae0928897e8` (`PIPER_VOICE_REV` ARG) — PASS
+- Model SHA `9df1c43c61149ef9b39e618e2b861fbe41e1fcea9390b2dac62e8761573ea4f1` verified (`sha256sum --check` at build) — PASS (`sha256sum /opt/piper/de_DE-thorsten-high.onnx` matches)
+- Bounded synthesis smoke: `printf 'Guten Tag.' | piper --model /opt/piper/de_DE-thorsten-high.onnx --output_file /tmp/piper-smoke.wav && test -s /tmp/piper-smoke.wav` — PASS (reverified via `podman run` → `/tmp/test.wav` 24K)
+- No runtime LLM SDK: `pip freeze | grep -E '^(anthropic|openai|google-genai)=='` empty — PASS
+- GPL-3.0-or-later engine classification: `PIPER-ENGINE-LICENSE` contains `GPL-3.0-or-later` (from `importlib.metadata` at build) — PASS
+- MIT voice-repository metadata: `PIPER-VOICE-REPOSITORY-METADATA.json` has `cardData.license == "mit"` and `sha == "8aaa3c9839d2b669cb57a94e1ec92ae0928897e8"` — PASS
+- Thorsten model-card dataset CC0 classification/notices: `/usr/share/doc/flashcard/THORSTEN-MODEL-CARD` contains `License: CC0` and `PIPER-NOTICES` records `Thorsten-Voice dataset/model card: CC0` — PASS
+- Do not rebuild solely for ceremony: exact current local image and evidence mechanically reverified via `podman image inspect` / `podman run` — PASS
+- No bulk pronunciation media baked in — PASS
+
+### 13. Final authoritative gate (WORKFLOW §15)
+
+After retry changes and targeted tests, executed exactly one final `make gate` with longest blocking timeout:
+
+```
+.venv/bin/ruff check . — All checks passed!
+.venv/bin/mypy --strict . — Success: no issues found in 18 source files
+.venv/bin/pytest -q — 254 passed in 107.76s (0:01:47)
+.venv/bin/python tools/check_agents.py — AGENTS checks passed: R1 (runtime LLM), R3 (resolver cache key), R7 (lecture coupling)
+```
+
+- Ruff: PASS
+- mypy strict: PASS (18 source files)
+- pytest: **254 PASSED**, 0 failed, 0 skipped
+- check_agents: **R1/R3/R7 PASS**
+- `git diff --check`: PASS (no whitespace errors)
+- Provider calls: **0** — verified (no credential read, no transport that contacts provider)
+- Paid spend this retry: **USD 0**
+
+### 14. Changed-path evidence (Attempt-2)
+
+Before commit, verified `git diff --stat` shows every changed tracked path within allowlist:
+
+- `tests/test_build_dict_stage03.py`
+- `tests/test_build_dict_stage04.py`
+- `tests/test_build_dict_stage05.py`
+- `tasks/slice-6.report.md`
+
+No other tracked path was modified in Attempt 2. In particular `tools/build_dict.py`, `pyproject.toml`, `Dockerfile`, `.dockerignore` were unchanged in this retry (implementation already correct).
+
+Exact Attempt-2 changed paths: `tests/test_build_dict_stage03.py, tests/test_build_dict_stage04.py, tests/test_build_dict_stage05.py, tasks/slice-6.report.md`
+
+### 15. Work left undone / STOP
+
+- Any paid DE/EN canary or production Batch submission — NOT executed (requires explicit orchestrator authorization per D79)
+- Live semantic QA on real DE/EN queue — NOT executed
+- Packaging of real enriched dictionary via Stage-05 — NOT executed
+- Release publication — NOT executed
+- Real Stage-03 queue not re-materialized as 316 MB artifact this retry (input unchanged; measurement preserved)
+
+**Disposition:** `STOPPED BEFORE PAID BOUNDARY` — Phase-A implementation and acceptance-evidence complete; no paid provider work authorized or executed. Next authority required is the Slice-6 orchestrator Phase-A acceptance decision.
+
+### 16. Branch / push status
+
+- Base `main`: `2f2486a5021465842ada8e5cc3d43e9a030e6955` — unchanged
+- Base `slice/6` before retry: `e45912e39eff49ba046984133206c01132b786a3` — verified `git rev-parse HEAD` and `origin/slice/6` before changes
+- Final `HEAD` after retry commit: to be recorded after `git push` (see return receipt)
+- Remote push: `git push origin slice/6` then `git fetch origin`; verified `origin/slice/6 == local HEAD` and `origin/main == 2f2486a...` — PASS
+- Working tree after push: `clean` (`git status --porcelain` empty)
+
+---
+
+*No API keys, credential fragments, or private absolute paths recorded. Generated-output classification `TEST_SYNTHETIC_LICENSE_v1` is synthetic test-only; live generated rows will use `llm_generated_v1` with explicit license supplied at execution time. Stage-03 queue byte hash and Stage-04 checkpoint identities are deterministic and reproducible from recorded inputs.*
