@@ -357,3 +357,70 @@ the broad architecture challenge for this new ADR-0007 lineage.
 ### Cold review #1 — broad architecture challenge
 
 *Pending dispatch to a fresh cold orchestrator session.*
+
+#### O1 — BLOCKING. Historical paid-canary item accounting is materially incorrect.
+
+**Concrete defect.** ADR-0007 §1.2 says the Slice-6 Attempt-1 paid canary
+"spent exactly USD 0.0008764 on 5 test items." The committed Slice-6 report
+records a different execution history: the authorized 50-item canary stopped
+when generation item 4 returned and failed deterministic validation; generation
+state was 3 completed + 1 rejected + 0 ambiguous/in-flight, and the contract
+stopped before item 5. A separate HTTP 401 authorization failure was unbilled.
+Attempt 2 performed no provider calls.
+
+**Why blocking.** D81 makes the canary/spend history an immutable audit record.
+Freezing an unsupported five-item paid-execution claim would make the
+architecture's historical accounting materially false.
+
+**Affected contract/files.** ADR-0007 §1.2, D81 and §8.1;
+tasks/slice-6.report.md on the preserved slice/6 branch.
+
+**Required remedy direction.** Preserve the exact known cumulative spend
+USD 0.0008764, but record that four model-generation items actually returned
+before STOP (3 completed, 1 rejected), item 5 was never sent after that STOP,
+the separate 401 was unbilled, and Attempt 2 made zero provider calls. Do not
+rewrite or delete historical evidence.
+
+#### O2 — BLOCKING. The DE/EN scope wording can incorrectly close the physical language schema.
+
+**Concrete defect.** ADR-0007 D74 / §3.2 describes sense_meaning and
+note_user_meaning using `language IN ('de', 'en')`. Accepted ADR-0004 D36 /
+§6.1 and D44 / §6.4 deliberately require no enumerating language CHECK and no
+closed-list language foreign key in those normalized relations; the currently
+supported language set is enforced by the build/API so a future language does
+not require a schema migration. ADR-0007 also says it preserves that normalized,
+migration-friendly architecture.
+
+**Why blocking.** The current wording can reasonably be implemented as a
+physical SQLite CHECK restricted to DE/EN, directly contradicting a preserved
+accepted invariant and creating the future migration D36 explicitly rejected.
+The owner decision to ship DE/EN only does not require physically closing the
+schema.
+
+**Affected contract/files.** ADR-0007 D74, §3.2 and its D36/D44 supersession
+wording; accepted ADR-0004 D36 §6.1 and D44 §6.4.
+
+**Required remedy direction.** State explicitly that `{de,en}` is the active v1
+build/API domain, while the physical language columns remain open TEXT with no
+closed enumerating CHECK or language-enum FK. The v1 API/build rejects `fa`.
+Future Persian still requires a fresh explicit owner decision and architectural
+review; no generic multilingual product scope is implied.
+
+#### O3 — BLOCKING. ADR-0007 makes unsupported-language HTTP validation ambiguous.
+
+**Concrete defect.** ADR-0007 §3.1 says requests supplying `fa` in language
+selection or user-meaning updates fail with "HTTP 422 / 400". The accepted
+ADR-0004 / ADR-0002 request contracts already require unsupported language codes
+to fail semantic validation with HTTP 422 before any write.
+
+**Why blocking.** Slice-7 cannot implement and test one deterministic API
+contract while the new ADR permits two status codes for the same validation
+condition. This is a direct forward API-contract contradiction, not an
+implementation preference.
+
+**Affected contract/files.** ADR-0007 §3.1 and D80; ADR-0004 D44 §6.4;
+ADR-0002 picker/commit and language-bearing gloss validation contracts.
+
+**Required remedy direction.** Unsupported `fa` in an otherwise structurally
+valid v1 request must return HTTP 422 with zero writes. Do not broaden that
+semantic validation condition to HTTP 400.
