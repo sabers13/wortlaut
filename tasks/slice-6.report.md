@@ -2494,3 +2494,276 @@ unauthorized** pending a separate measured full-Stage-04 production plan
 (partition manifests, Batch limits/correlation verification, measured
 bulk+QA token/cost bounds, hard spend cap, recovery/resume plan, exact
 artifact SHAs) and explicit owner authorization.
+
+---
+
+## German Stage-04 full production plan (measured, ZERO-SPEND) — zero-spend
+
+Fulfills the deferred item above: deterministic Luna Batch production
+manifests plus measured bulk/QA cost bounds, built entirely from committed
+repository code (`tools/build_dict.py`'s single-source request builders,
+token constants, and worst-case cost helpers). No repository code or test
+changed — every artifact below was produced by throwaway local scripts under
+`tmp/de-production-v1/` (gitignored). **Zero provider calls. Zero
+`OPENAI_API_KEY` reads. Zero Batches created.**
+
+### 1. Repository/queue state verification
+
+- `slice/6` HEAD = `origin/slice/6` = `ea8de9c7a138d374a778fe361c3889d8f973de96` — **MATCH**.
+- `main` = `origin/main` = `2f2486a5021465842ada8e5cc3d43e9a030e6955` — **MATCH**.
+- Working tree clean (including untracked) before and after — **MATCH**.
+- `/tmp/flashcard-stage03-v2.json`: SHA-256
+  `114dd20f1e071708ca43ff433284ce1be0e9662763db5a589930a8f5a045cf2a`, bytes
+  `334605426`, format `flashcard-stage03-queue-v2` — all **MATCH** the
+  expected values, verified from disk (not assumed). Queue not modified.
+- Independently recomputed the queue's own `items_sha256` trailer
+  (`dc32611224e20ab3bdaeb5ac8dd77d01e8a81ffe5a4922c55175edf458787198`) using
+  the exact `build_stage03` algorithm (canonical per-item JSON, comma-joined,
+  bracket-wrapped) — **MATCH**, an integrity check beyond the whole-file SHA.
+- Full-queue census (single streaming pass, `_iter_stage03_queue_items`):
+  `480221` items, all `language=de`, all `job_class=de_learner_meaning` — the
+  file is DE-only; matches the task's `German jobs: 480221`.
+
+### 2. Canary reuse determination — SAFE, reused
+
+Checked all six required conditions against the durable local evidence
+(`~/.cache/flashcard/stage04-runs/slice-6-de-canary-v4/checkpoint.json`,
+outside the repo) and the frozen selection
+(`tmp/de-canary-v2/de-canary-selection-v2.json`, SHA
+`1ffa5e76c7315467a39a5b7b953e07fba924b37dbc77512130e720adb3ab7475`, 50 IDs):
+
+1. **Exact same Stage-03 item identity** — selection resolves against the
+   same full-queue SHA (`114dd20f1...`) recorded in the checkpoint's
+   `authorized_queue_sha256`.
+2. **Exact same request body semantics** — checkpoint identity records
+   `bulk_de_model=gpt-5.6-luna`, `bulk_de_reasoning_effort=none`,
+   `bulk_de_max_output_tokens=512`, `bulk_pipeline_version=stage04-bulk-v4`,
+   unchanged from the current accepted contract.
+3. **Accepted final result available for all 50** — `bulk.completed=50`,
+   `bulk.rejected=0`, `bulk.in_flight=0`; `qa.required=36`,
+   `qa.completed=36`, `qa.rejected=0`, `qa.in_flight=0`. No ambiguous state.
+4. **QA/manual adjudication history unambiguous** — confirmed by (3) plus the
+   2 manual adjudications below.
+5. **All validator rules now accept the accepted final** — independently
+   re-ran (not just trusted the prior report) `pytest
+   tests/test_build_dict_stage04.py -k "canary_v4 or
+   non_recoverable_semantic_failure_remains_hard_rejection or
+   structural_failure_on_morphology_item_remains_hard_rejection or
+   manual_adjudication_on_its_own"` → **54 passed**, including the 48-case
+   accepted-finals regression table and both manual-final preservation
+   checks.
+6. **Historical provider evidence retained; manual values labeled
+   `contributed`, never model output** — 86 spend-ledger entries (50 bulk +
+   36 QA), all `accounting=ACTUAL`, cumulative `USD 0.0716368`, unique
+   `response_id`s; `manual_adjudications["queue:v2:3a99e45482575743acf4789f24789062"]`
+   (→ `Marmarameer`) and `["queue:v2:fca20836b82737bbbe7083358ad66f93"]`
+   (→ `Mod`) both carry `"source": "contributed"`, untouched.
+
+**PRODUCTION_SEEDED_CANARY_ITEMS = 50, PENDING_BULK = 480171.** No canary
+item is retransmitted in the bulk manifest below.
+
+### 3. Measured bulk request set (all 480,171 pending items)
+
+Single streaming pass over the full queue (bounded memory, no full-file
+materialization), building each request via the committed
+`de_learner_meaning_request_body(item, "gpt-5.6-luna")` and wrapping it in
+the canonical Batch record `{"custom_id","method","url","body"}`
+(`_canonical_line`, sorted keys, no spaces — same serializer the accepted
+canary REQUEST/BATCH SHAs already use):
+
+- `PENDING_BULK_REQUEST_COUNT` = **480171**
+- `TOTAL_SERIALIZED_REQUEST_BYTES` = **1,377,518,105**
+- `TOTAL_MEASURED_BULK_INPUT_TOKENS` = **321,576,223** (mean ≈669.7/request)
+  — measured with `tiktoken==0.14.0`, encoding `o200k_base`, over the
+  canonical JSON of `model+input+reasoning+max_output_tokens+text.format` per
+  item, matching the previously established measurement method. `o200k_base`
+  remains a nearest-available proxy — no public tokenizer for `gpt-5.6-luna`
+  is confirmed. tiktoken is a local build-time measurement aid only, not a
+  project dependency (`pyproject.toml` unchanged).
+- Overall logical artifact `tmp/de-production-v1/bulk-logical-requests.jsonl`:
+  SHA-256 `08db26906599d7ba6978dd5cb929c89d8954385efd1a79925ed62a4b1212dde9`,
+  bytes `1377518105` (matches the sum of per-record bytes exactly).
+- One record per pending item, zero duplicates, deterministic
+  item_id-ascending order (identical to the queue's own file order).
+
+### 4. Tier-safe partition manifests
+
+**A. Tier-1-safe default** (`MAX_LUNA_PARTITION_PROMPT_TOKENS=4,500,000`,
+plus the hard provider caps of ≤50,000 requests / ≤200MB per Batch):
+
+- **72 partitions**, binding constraint = measured prompt tokens (not the
+  request or byte cap) — first partition: 6,719 items / 4,499,705 tokens /
+  19,275,865 bytes; last (72nd): 3,135 items / 2,098,946 tokens / 8,991,485
+  bytes. Full 72-entry manifest (index, item count, first/last item ID,
+  byte count, measured tokens, SHA-256, custom_id count, model, endpoint)
+  in `tmp/de-production-v1/bulk-partition-manifest.json`.
+- **Coverage proof:** union of all 72 partitions' custom_ids == the exact
+  480,171-item pending set; pairwise intersection empty; zero duplicate
+  `custom_id` within or across partitions — **PASS**.
+- Submission policy: one Luna Batch at a time (Tier-1 default).
+
+**B. Higher-tier informational plan** (no request body or custom_id
+changes — partition *count* only):
+
+| Tier | Queue token ceiling | Partitions | Binding constraint |
+| --- | --- | --- | --- |
+| 1 | 4,500,000 | 72 | tokens |
+| 2 | 20,000,000 | 17 | tokens |
+| 3 | 40,000,000 | 10 | requests (50,000 cap) |
+| 4 | 1,000,000,000 | 10 | requests (50,000 cap) |
+| 5 | 15,000,000,000 | 10 | requests (50,000 cap) |
+
+From Tier 3 upward the 50,000-request-per-Batch hard cap binds before token
+headroom does (`ceil(480171/50000)=10`); the 200MB byte cap never binds
+(`ceil(1,377,518,105/209,715,200)=7`, always looser than the request cap).
+Informational only — owner authorization must name one specific plan.
+
+### 5. Bulk (Luna) cost — current Batch rates (input $0.10, output $0.60 /MTok)
+
+| Figure | Value |
+| --- | --- |
+| Measured-input cost (321,576,223 tok × $0.10/MTok) | **$32.16** |
+| Conservative output reservation (480,171 × 512 tok × $0.60/MTok) | **$147.51** |
+| Conservative max (2× safety-multiplier input + full output reservation) | **$211.82** |
+| Empirical canary-based projection (50-item Luna actuals: mean 602.68 in /
+  34.4 out tok/req, scaled ×480,171) | **≈$38.85*** |
+| **Recommended Phase-1 hard cap** | **$222.50** |
+
+*Empirical figure is a labeled comparison only, not an authorization bound —
+the canary's 50 items are not a representative token-length sample of the
+full 480,171 (canary mean 602.68 vs. full-set mean 669.7 input
+tokens/request; canary output ran far below the 512-token ceiling).
+The 512-token output ceiling is a provider maximum, never disguised as
+expected actual output; conservative figures charge it in full for every
+request.
+
+### 6. QA preknown floor — the dominant cost driver, surfaced explicitly
+
+Computed strictly from **input-known** triggers only (never from bulk
+output, which does not exist yet):
+
+- **Morphology-routed** (`_morphology_feature_keys(item)` truthy — always
+  QA-routed per `build_stage04`, source-verifiable from the queue item
+  itself): **349,913 / 480,171 pending items (72.9%)**.
+- **Deterministic audit sample** (`_deterministic_audit_sample`, seed = full
+  queue SHA-256, `sample_size=2`, matching `build_stage04`'s committed
+  default): 2 IDs, neither in the seeded canary; 1 already covered by the
+  morphology set, 1 new.
+- **PREKNOWN_QA_COUNT = 349,914** (union, no double count).
+- Output-dependent QA triggers (provisional semantic-error recoverable
+  routing, >50-char candidate text, `flag` substring) are explicitly **not**
+  counted — they cannot be known before bulk generation runs.
+
+QA reason breakdown: `{"morphology_de": 349913,
+"deterministic_audit_sample_pending": 2, "overlap_morphology_and_audit": 1}`.
+
+**This preknown floor alone (worst-case, current Batch Terra rates $1.00/
+$6.00 per MTok, 2× safety multiplier on input, full 512-token output
+reservation) = $1,429.16** — already far larger than the entire Luna bulk
+cost. This is a measured floor, not a guess: German morphology forms are the
+majority of the queue and are unconditionally QA-routed by the accepted
+architecture. **The owner should not read Phase 1's ~$32–$212 bulk cost as
+representative of total production cost; Terra QA is the larger line item
+even before any output-dependent QA triggers fire.**
+
+### 7. QA cost bounds (three tiers, per task contract)
+
+| Tier | Count | Cost (USD) | Label |
+| --- | --- | --- | --- |
+| A. Preknown floor | 349,914 | **$1,429.16** | exact bound for the currently-knowable mandatory set |
+| B. Empirical canary-based projection | 345,723 (72%×480,171, canary's 36/50 QA-selection rate) | **≈$305.13** | empirical comparison only, NOT an authorization bound |
+| C. Absolute fail-closed ceiling | 480,171 (100%, every pending item) | **$1,961.17** | intentionally pessimistic, NOT expected actual spend |
+
+(B is far lower than A primarily because A is a deliberately worst-case
+bound — 2× input safety multiplier plus the full 512-token output ceiling
+charged on every one of 349,914 requests — while B uses genuine canary
+averages with no multiplier and a real mean QA output of only 78.5 tokens,
+a small fraction of the 512 ceiling; B's smaller population (345,723 vs.
+349,914) and smaller mean input-token estimate are secondary contributors.
+Both effects are disclosed, not smoothed over.)
+
+Full breakdown, methodology, and per-tier token sums:
+`tmp/de-production-v1/qa-preknown-analysis.json`,
+`tmp/de-production-v1/production-cost-plan.json`.
+
+### 8. Recovery / correlation contract (design only, zero Batches created)
+
+`tmp/de-production-v1/recovery-plan.json` documents, per partition: local
+manifest SHA, provider input-file ID / Batch ID / status / output-file ID /
+error-file ID (all empty pre-submission), and the exact
+`custom_id -> item_id` mapping. Output reconciliation never depends on
+order; exact-one `custom_id` match; unknown/duplicate custom_ids rejected;
+missing IDs stay unresolved (never assumed complete or failed); completed
+results survive a later Batch expiration; expired/failed requests are never
+auto-resubmitted; a retry requires a new deterministic manifest naming only
+explicitly approved unresolved IDs — never a full-partition replay.
+Documented failure modes: validating failure, failed Batch, expired Batch
+with partial outputs, network interruption during polling, output-download
+interruption, malformed individual response, semantic candidate rejection,
+duplicate/unknown/missing `custom_id`.
+
+### 9. Production checkpoint design (new path, never the canary path)
+
+Proposed run directory:
+`/home/saber/.cache/flashcard/stage04-runs/slice-6-de-production-v1/`
+(distinct from `slice-6-de-canary-v4/`; never reused). Identity binds: full
+Stage-03 queue SHA, production-selection SHA, seeded-canary artifact SHA,
+bulk/QA pipeline versions (`stage04-bulk-v4`/`stage04-qa-v4`), response
+schema version, model IDs, reasoning efforts, `max_output_tokens=512`,
+pricing contract, partition-manifest-set SHA, generation marker, generated
+license. Any mismatch fails closed before any upload/submission.
+
+### 10. Provider contract verification
+
+Verified against **current** official OpenAI documentation (checked this
+session, `2026-08-23`, since the assistant's training cutoff predates the
+current date by several months): `/v1/responses` is Batch-supported; 50%
+Batch discount; 24h completion window; ≤50,000 requests/Batch; ≤200MB input
+file; unique `custom_id` required; output order not guaranteed; 2,000 Batch
+creations/hour. All **MATCH** the task's stated contract, independently
+re-confirmed via live documentation search, not assumed.
+
+`gpt-5.6-luna` / `gpt-5.6-terra` are **this project's own internal model
+identifiers** (`tools/build_dict.py:2172-2174`, `docs/plan.md`,
+`WORKFLOW.md`) — they do not correspond to any real OpenAI product, so their
+per-tier queued-prompt-token limits and prices cannot be independently
+verified against real OpenAI documentation. The prices and Tier-1..5 limits
+used above are the task-supplied values, which match the project's own
+already-accepted contract (`bulk_input_price_per_mtok=0.2`,
+`qa_input_price_per_mtok=2` non-Batch, in the accepted canary checkpoint
+identity; Batch rates here are those non-Batch rates at the documented 50%
+discount). This distinction is reported rather than glossed over.
+
+### 11. Artifacts (all local, gitignored under `tmp/`)
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `production-selection.json` | `7b4ac3297bf0bc4b44f7a68767549ed370180ffc0dfb3017ddc433385206bb20` |
+| `seeded-canary.json` | `79e6b5cf47fa2200ad90a02176fad679a52bd05a789eb4ff67025e48d2100ea9` |
+| `bulk-logical-requests.jsonl` | `08db26906599d7ba6978dd5cb929c89d8954385efd1a79925ed62a4b1212dde9` |
+| `bulk-partition-manifest.json` | `bb7ac594fab26b8d3b3a1e4e03101588da2a5824e7ee1ea89d8e04a9a6d0435f` |
+| `production-cost-plan.json` | `99b9bc4e51d9985f20537c603fc11ac0156936d804d9144b89688bf4fb7f8dc9` |
+| `qa-preknown-analysis.json` | `65c3c861aecd29f424c665061038e48459862070076645d1f45244d7817896e6` |
+| `recovery-plan.json` | `cee8ee71e928cd763b2d7f779d3467ee851f1504076df53ca7a3e844776cc0de` |
+| `production-plan.json` (binds all of the above) | `cdc9a5c1b49a30db1e9ec3c631b680facee7c23e6e0a3d186da6b3c2737377f8` |
+
+### 12. No paid action
+
+Provider calls: `0`. Files uploaded to OpenAI: `0`. Batches created: `0`.
+Paid spend: `USD 0`. `OPENAI_API_KEY` read: `NO`.
+
+### 13. Gate
+
+`make gate` — `ruff check .` PASS; `mypy --strict .` PASS (18 source files);
+`pytest -q` **534 passed** (unchanged from prior close — no test added, none
+needed); `check_agents.py` R1/R3/R7 PASS. **Changed tracked paths:**
+`tasks/slice-6.report.md` only.
+
+**Disposition:** `GERMAN_STAGE04_PRODUCTION_PLAN_READY` — Phase-1
+(Luna-bulk-only) plan is fully measured and ready for owner review:
+recommended hard cap **$222.50** against a Phase-1 scope of 480,171 Luna
+requests. **Production remains unauthorized.** The owner should weigh
+Phase-1's bulk cost together with the measured Terra QA preknown floor
+(§6–7, **$1,429.16** minimum once QA is separately authorized in Phase 2) —
+this plan intentionally does not request or imply Phase-2 authorization.
+`PHASE2_TERRA_AUTHORIZATION: NOT_REQUESTED_YET`.
