@@ -11,17 +11,20 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
 import sys
 import tempfile
 import unicodedata
+import urllib.request
 from collections import Counter
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Final, Sequence
+from typing import IO, Any, Callable, Final, Sequence
 
 # Ensure repository root is on sys.path for direct script execution
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -1911,6 +1914,89 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Transport batch size",
     )
 
+    # Live synchronous OpenAI Responses activation (strict opt-in; zero-network
+    # and zero-credential by default). All authorization inputs are explicit
+    # operational arguments; nothing is hard-coded.
+    stage04_parser.add_argument(
+        "--live-openai-responses",
+        action="store_true",
+        help="Explicitly activate live synchronous OpenAI Responses execution "
+        "(requires all live authorization arguments; reads OPENAI_API_KEY only "
+        "after every authorization artifact is verified)",
+    )
+    stage04_parser.add_argument(
+        "--live-selection", type=Path, default=None, help="Canonical frozen selection artifact"
+    )
+    stage04_parser.add_argument(
+        "--live-selection-sha", type=str, default=None, help="Expected frozen selection SHA-256"
+    )
+    stage04_parser.add_argument(
+        "--expected-queue-sha", type=str, default=None, help="Accepted queue SHA-256"
+    )
+    stage04_parser.add_argument(
+        "--expected-queue-bytes", type=int, default=None, help="Accepted queue byte count"
+    )
+    stage04_parser.add_argument(
+        "--authorized-request-sha",
+        type=str,
+        default=None,
+        help="Authorized synchronous request artifact SHA-256",
+    )
+    stage04_parser.add_argument(
+        "--authorized-batch-equivalence-sha",
+        type=str,
+        default=None,
+        help="Authorized Batch-equivalence artifact SHA-256",
+    )
+    stage04_parser.add_argument(
+        "--live-cost-plan", type=Path, default=None, help="Canonical cost-plan artifact"
+    )
+    stage04_parser.add_argument(
+        "--live-cost-plan-sha", type=str, default=None, help="Expected cost-plan SHA-256"
+    )
+    stage04_parser.add_argument(
+        "--live-subset-queue",
+        type=Path,
+        default=None,
+        help="Output path for the derived 50-item authorized subset queue (must not exist)",
+    )
+    stage04_parser.add_argument(
+        "--live-hard-spend-cap-usd", type=str, default=None, help="Hard spend cap in USD"
+    )
+    stage04_parser.add_argument(
+        "--live-bulk-input-price-per-mtok", type=str, default=None, help="Bulk input price USD/MTok"
+    )
+    stage04_parser.add_argument(
+        "--live-bulk-output-price-per-mtok",
+        type=str,
+        default=None,
+        help="Bulk output price USD/MTok",
+    )
+    stage04_parser.add_argument(
+        "--live-qa-input-price-per-mtok", type=str, default=None, help="QA input price USD/MTok"
+    )
+    stage04_parser.add_argument(
+        "--live-qa-output-price-per-mtok", type=str, default=None, help="QA output price USD/MTok"
+    )
+    stage04_parser.add_argument(
+        "--live-input-safety-multiplier",
+        type=str,
+        default=None,
+        help="Input-token safety multiplier (e.g. 2.0)",
+    )
+    stage04_parser.add_argument(
+        "--approved-bulk-model", type=str, default=None, help="Owner-approved bulk model"
+    )
+    stage04_parser.add_argument(
+        "--approved-qa-model", type=str, default=None, help="Owner-approved QA model"
+    )
+    stage04_parser.add_argument(
+        "--live-timeout-seconds",
+        type=int,
+        default=STAGE04_LIVE_DEFAULT_TIMEOUT_SECONDS,
+        help="Finite HTTP timeout in seconds for live requests",
+    )
+
     stage05_parser = subparsers.add_parser(
         "stage05",
         help="Stage 05: Final dictionary packaging",
@@ -1987,17 +2073,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "stage04":
         try:
-            build_stage04(
-                queue_path=args.queue,
-                stage02_path=args.stage02,
-                output_path=args.output,
-                checkpoint_path=args.checkpoint,
-                generated_license=args.generated_license,
-                bulk_de_model=args.bulk_de_model,
-                bulk_en_model=args.bulk_en_model,
-                qa_model=args.qa_model,
-                batch_size=args.batch_size,
-            )
+            if args.live_openai_responses:
+                run_stage04_live(args)
+            else:
+                _reject_dangling_live_args(args)
+                build_stage04(
+                    queue_path=args.queue,
+                    stage02_path=args.stage02,
+                    output_path=args.output,
+                    checkpoint_path=args.checkpoint,
+                    generated_license=args.generated_license,
+                    bulk_de_model=args.bulk_de_model,
+                    bulk_en_model=args.bulk_en_model,
+                    qa_model=args.qa_model,
+                    batch_size=args.batch_size,
+                )
             return 0
         except Exception as e:
             sys.stderr.write(f"Error during stage 04 build: {e}\n")
@@ -2075,6 +2165,22 @@ STAGE04_DEFAULT_QA_MODEL: Final[str] = "gpt-5.6-terra"
 STAGE04_DEFAULT_BATCH_SIZE: Final[int] = 100
 STAGE04_DEFAULT_PROVIDER_MAX_BYTES: Final[int] = 200 * 1024 * 1024
 STAGE04_DEFAULT_PROVIDER_MAX_REQUESTS: Final[int] = 50000
+
+# Live synchronous OpenAI Responses transport (strict opt-in; zero-network by default).
+STAGE04_LIVE_RESPONSES_URL: Final[str] = "https://api.openai.com/v1/responses"
+STAGE04_BATCH_RECORD_URL: Final[str] = "/v1/responses"
+STAGE04_LIVE_TRANSPORT_ID: Final[str] = "openai-responses-sync-v1"
+STAGE04_LIVE_API_KEY_ENV: Final[str] = "OPENAI_API_KEY"
+STAGE04_LIVE_DEFAULT_TIMEOUT_SECONDS: Final[int] = 120
+STAGE04_COST_PLAN_ARTIFACT: Final[str] = "flashcard-stage04-live-cost-plan-v1"
+STAGE04_SPEND_LEDGER_FORMAT: Final[str] = "flashcard-stage04-spend-ledger-v1"
+STAGE04_LIVE_CANARY_SELECTION_COUNT: Final[int] = 50
+# Frozen German-canary authorization contract (german-canary-quality-contract-v3-frozen):
+# recorded aggregate conservative input-token estimates that the live cost-plan artifact
+# must carry for the exact authorized 50-item selection.
+STAGE04_LIVE_CANARY_BULK_INPUT_TOKEN_ESTIMATE: Final[int] = 23996
+STAGE04_LIVE_CANARY_QA_BOUND_INPUT_TOKEN_ESTIMATE: Final[int] = 24546
+_DECIMAL_TOKENS_PER_MTOK: Final[Decimal] = Decimal(1000000)
 
 FA_JOB_CLASS: Final[str] = "fa_generated_meaning"
 FA_ITEM_VERSION: Final[str] = "fa-generation-job:v2"
@@ -2377,11 +2483,14 @@ def credential_format_ok(value: str) -> bool:
     """Local/no-network credential-format sanity check (never prints/persists).
 
     Rejects empty values, surrounding quotes left in by naive .env parsing
-    (Attempt-1 operational defect), and embedded whitespace.
+    (Attempt-1 operational defect), embedded whitespace, and whitespace-only
+    values.
     """
     if not value:
         return False
     v = value.strip()
+    if not v:
+        return False
     if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
         return False
     if any(c.isspace() for c in v):
@@ -3118,7 +3227,17 @@ def _returned_response_rejection_code(cand: dict[str, object]) -> str | None:
     valid generated candidate; its partial JSON must not be extracted. Returns
     the deterministic rejection error code, or None when the response is
     completed (envelope keys are then removed from the working candidate).
+
+    The live transport additionally tags candidates whose provider payload
+    could not be extracted/accounted (missing/multiple/malformed output text,
+    unusable envelope, unavailable usage) with ``extraction_error``; that code
+    is deterministic and always fails closed.
     """
+    extraction_error = cand.get("extraction_error")
+    if extraction_error is not None:
+        if not isinstance(extraction_error, str) or not extraction_error.strip():
+            return "invalid_response_envelope"
+        return extraction_error
     status = cand.get("response_status")
     incomplete = cand.get("incomplete_details")
     reason = ""
@@ -3141,7 +3260,11 @@ def _returned_response_rejection_code(cand: dict[str, object]) -> str | None:
 
 def _pop_response_envelope(cand: dict[str, object]) -> dict[str, object]:
     """Return a copy of the candidate without provider envelope metadata."""
-    return {k: v for k, v in cand.items() if k not in ("response_status", "incomplete_details")}
+    return {
+        k: v
+        for k, v in cand.items()
+        if k not in ("response_status", "incomplete_details", "extraction_error")
+    }
 
 
 def _checkpoint_identity(
@@ -3237,6 +3360,8 @@ def _load_checkpoint(path: Path, expected_identity: dict[str, str]) -> dict[str,
     manifests = data.get("manifests")
     if not isinstance(manifests, list):
         raise BuildDictError("Stage 04 checkpoint has invalid manifests")
+    if data.get("spend") is not None:
+        _validate_spend_state(data["spend"])
     return data
 
 
@@ -3338,6 +3463,1039 @@ def _build_manifests(
     return manifests
 
 
+# ----------------------------------------------------------------------
+# Stage 04 — live synchronous OpenAI Responses transport (opt-in)
+#
+# Security contract (slice-6 live activation brief):
+#   * zero-network / zero-credential by default; live execution requires the
+#     explicit ``--live-openai-responses`` CLI opt-in;
+#   * every authorization artifact is SHA-verified BEFORE OPENAI_API_KEY is
+#     read from the process environment;
+#   * fixed endpoint https://api.openai.com/v1/responses (no override);
+#   * one HTTP attempt per paid request: no redirects followed, no retries,
+#     finite timeout; uncertain outcomes keep in_flight and STOP;
+#   * Decimal arithmetic at the pre-transmission spend-cap boundary;
+#   * durable per-request spend ledger inside the checkpoint.
+# ----------------------------------------------------------------------
+
+
+class Stage04TransportAmbiguous(BuildDictError):
+    """Uncertain paid-request outcome; item remains in_flight and execution stops."""
+
+
+class Stage04PretransmissionBlocked(BuildDictError):
+    """Next paid request would exceed the authorized hard cap; STOP before transmission."""
+
+
+def _parse_decimal_input(value: str, label: str, *, minimum: Decimal | None = None) -> Decimal:
+    """Parse an operational decimal authorization input; fail closed."""
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise BuildDictError(f"{label} must be a decimal number") from exc
+    if not parsed.is_finite():
+        raise BuildDictError(f"{label} must be a finite decimal number")
+    if minimum is not None and parsed < minimum:
+        raise BuildDictError(f"{label} must be >= {minimum}")
+    return parsed
+
+
+def _decimal_to_wire(value: Decimal) -> str:
+    """Canonical non-exponent decimal string for checkpoint/ledger persistence."""
+    return format(value.normalize(), "f")
+
+
+def stage04_worst_case_request_cost_usd_decimal(
+    input_token_estimate: int,
+    max_output_tokens: int,
+    input_price_per_mtok: Decimal,
+    output_price_per_mtok: Decimal,
+    input_safety_multiplier: Decimal,
+) -> Decimal:
+    """Deterministic worst-case cost of ONE request using exact Decimal arithmetic.
+
+    All ``max_output_tokens`` are charged at the output rate (the API ceiling
+    covers visible plus reasoning tokens); the input estimate is inflated by
+    the accepted safety multiplier. Prices are operational inputs.
+    """
+    if input_token_estimate < 0 or max_output_tokens <= 0:
+        raise BuildDictError("Token estimates must be non-negative/max-positive")
+    if input_price_per_mtok < 0 or output_price_per_mtok < 0:
+        raise BuildDictError("Authorized prices must be non-negative")
+    if input_safety_multiplier < 1:
+        raise BuildDictError("Input safety multiplier must be >= 1")
+    return (
+        Decimal(input_token_estimate) * input_safety_multiplier * input_price_per_mtok
+        + Decimal(max_output_tokens) * output_price_per_mtok
+    ) / _DECIMAL_TOKENS_PER_MTOK
+
+
+def stage04_pretransmission_guard_blocks_decimal(
+    recorded_spend_usd: Decimal,
+    authorized_hard_cap_usd: Decimal,
+    next_request_worst_case_usd: Decimal,
+) -> bool:
+    """True => the next request MUST NOT be transmitted (exact Decimal boundary)."""
+    if recorded_spend_usd < 0 or authorized_hard_cap_usd < 0:
+        raise BuildDictError("Spend figures must be non-negative")
+    if next_request_worst_case_usd < 0:
+        raise BuildDictError("Worst-case cost must be non-negative")
+    return recorded_spend_usd + next_request_worst_case_usd > authorized_hard_cap_usd
+
+
+_SPEND_ACCOUNTING_MODES: Final[frozenset[str]] = frozenset({"ACTUAL", "WORST_CASE_RESERVED"})
+
+
+def _empty_spend_state(authorization: dict[str, str]) -> dict[str, object]:
+    """Fresh durable German-canary spend ledger bound to its authorization identity."""
+    return {
+        "format": STAGE04_SPEND_LEDGER_FORMAT,
+        "authorization": dict(authorization),
+        "entries": [],
+    }
+
+
+def _validate_spend_state(spend: object) -> dict[str, object]:
+    """Structurally validate a persisted spend ledger; corrupt state fails closed."""
+    if not isinstance(spend, dict):
+        raise BuildDictError("Stage 04 checkpoint has a corrupt spend ledger")
+    if spend.get("format") != STAGE04_SPEND_LEDGER_FORMAT:
+        raise BuildDictError("Stage 04 checkpoint has an incompatible spend ledger format")
+    auth = spend.get("authorization")
+    if not isinstance(auth, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in auth.items()
+    ):
+        raise BuildDictError("Stage 04 checkpoint has a corrupt spend ledger authorization")
+    entries = spend.get("entries")
+    if not isinstance(entries, list):
+        raise BuildDictError("Stage 04 checkpoint has a corrupt spend ledger entry list")
+    running = Decimal(0)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise BuildDictError("Stage 04 checkpoint has a corrupt spend ledger entry")
+        phase = entry.get("phase")
+        item_id = entry.get("item_id")
+        accounting = entry.get("accounting")
+        if phase not in ("bulk", "qa") or not isinstance(item_id, str) or not item_id:
+            raise BuildDictError("Stage 04 checkpoint has a corrupt spend ledger entry key")
+        if accounting not in _SPEND_ACCOUNTING_MODES:
+            raise BuildDictError("Stage 04 checkpoint has a corrupt spend accounting mode")
+        response_id = entry.get("response_id")
+        if response_id is not None and not isinstance(response_id, str):
+            raise BuildDictError("Stage 04 checkpoint has a corrupt spend response id")
+        for field_name in ("reported_input_tokens", "reported_output_tokens", "reported_reasoning_tokens"):  # noqa: E501
+            tok = entry.get(field_name)
+            if tok is None:
+                continue
+            if isinstance(tok, bool) or not isinstance(tok, int) or tok < 0:
+                raise BuildDictError(f"Stage 04 checkpoint has a corrupt spend field {field_name}")
+        charge_s = entry.get("charge_usd")
+        cumulative_s = entry.get("cumulative_usd")
+        if not isinstance(charge_s, str) or not isinstance(cumulative_s, str):
+            raise BuildDictError("Stage 04 checkpoint has a corrupt spend amount encoding")
+        try:
+            charge = Decimal(charge_s)
+            recorded_cumulative = Decimal(cumulative_s)
+        except InvalidOperation as exc:
+            raise BuildDictError("Stage 04 checkpoint has a corrupt spend amount") from exc
+        if charge < 0 or recorded_cumulative < 0:
+            raise BuildDictError("Stage 04 checkpoint has a negative spend amount")
+        running += charge
+        if recorded_cumulative != running:
+            raise BuildDictError("Stage 04 checkpoint spend cumulative chain mismatch")
+    return spend
+
+
+def _spend_total_usd(spend: dict[str, object]) -> Decimal:
+    """Cumulative recorded + reserved spend (validated state only)."""
+    entries = spend.get("entries")
+    total = Decimal(0)
+    if isinstance(entries, list):
+        for entry in entries:
+            if isinstance(entry, dict):
+                total += Decimal(str(entry["charge_usd"]))
+    return total
+
+
+def _read_openai_api_key() -> str:
+    """Credential boundary: the ONLY place the project reads OPENAI_API_KEY.
+
+    Called exclusively after every live authorization artifact has been
+    SHA-verified. The value is never printed, logged, persisted, or embedded
+    in exception text.
+    """
+    return os.environ.get(STAGE04_LIVE_API_KEY_ENV, "").strip()
+
+
+class _LiveForbiddenRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Decline every redirect: urllib then raises HTTPError instead of following."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
+def build_live_responses_opener() -> urllib.request.OpenerDirector:
+    """Opener with verified-TLS defaults, NO env proxies, and redirects disabled.
+
+    Environment proxy configuration could silently reroute the Authorization
+    header to another host, so proxies are explicitly emptied; the credential
+    destination is therefore never configurable.
+    """
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _LiveForbiddenRedirectHandler(),
+    )
+
+
+@dataclass
+class _Stage04HttpOutcome:
+    kind: str  # "ambiguous" | "complete"
+    status_code: int | None = None
+    raw_body: bytes | None = None
+
+
+def _extract_assistant_output_texts(output: object) -> list[str]:
+    """Collect output_text payloads; reasoning items may coexist and are ignored."""
+    texts: list[str] = []
+    if not isinstance(output, list):
+        return texts
+    for entry in output:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") != "message":
+            continue
+        content = entry.get("content")
+        if not isinstance(content, list):
+            continue
+        for piece in content:
+            if isinstance(piece, dict) and piece.get("type") == "output_text":
+                text = piece.get("text")
+                if isinstance(text, str):
+                    texts.append(text)
+    return texts
+
+
+def _parse_provider_usage(usage: object) -> tuple[int, int, int | None] | None:
+    """Parse usage.input/output tokens; malformed or missing usage returns None."""
+    if not isinstance(usage, dict):
+        return None
+    tin = usage.get("input_tokens")
+    tout = usage.get("output_tokens")
+    if isinstance(tin, bool) or isinstance(tout, bool):
+        return None
+    if not isinstance(tin, int) or not isinstance(tout, int):
+        return None
+    if tin < 0 or tout < 0:
+        return None
+    reasoning: int | None = None
+    details = usage.get("output_tokens_details")
+    if isinstance(details, dict):
+        rt = details.get("reasoning_tokens")
+        if not isinstance(rt, bool) and isinstance(rt, int) and rt >= 0:
+            reasoning = rt
+    return (tin, tout, reasoning)
+
+
+class OpenAILiveResponsesTransport:
+    """Zero-retry synchronous transport for exactly the authorized canary requests.
+
+    The transmitted JSON body for each bulk item is the exact logical body
+    object whose canonical serialization participates in the verified request
+    artifact SHA; QA bodies come from the committed single-source QA builder.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        bulk_bodies: dict[str, dict[str, object]],
+        item_records: dict[str, dict[str, object]],
+        token_estimates: dict[tuple[str, str], int],
+        hard_cap_usd: Decimal,
+        bulk_input_price_per_mtok: Decimal,
+        bulk_output_price_per_mtok: Decimal,
+        qa_input_price_per_mtok: Decimal,
+        qa_output_price_per_mtok: Decimal,
+        input_safety_multiplier: Decimal,
+        qa_model: str,
+        spend_state: dict[str, object],
+        timeout_seconds: int = STAGE04_LIVE_DEFAULT_TIMEOUT_SECONDS,
+        opener: Any = None,
+    ) -> None:
+        if not credential_format_ok(api_key):
+            raise BuildDictError(
+                "STOP before provider transmission: "
+                f"{STAGE04_LIVE_API_KEY_ENV} is missing or blank"
+            )
+        if timeout_seconds <= 0:
+            raise BuildDictError("Live timeout must be a positive number of seconds")
+        if not spend_state.get("format") == STAGE04_SPEND_LEDGER_FORMAT:
+            raise BuildDictError("Live transport requires a validated spend ledger state")
+        self._api_key = api_key
+        self._bulk_bodies = bulk_bodies
+        self._item_records = item_records
+        self._token_estimates = token_estimates
+        self._hard_cap_usd = hard_cap_usd
+        self._prices = {
+            "bulk": (bulk_input_price_per_mtok, bulk_output_price_per_mtok),
+            "qa": (qa_input_price_per_mtok, qa_output_price_per_mtok),
+        }
+        self._safety_multiplier = input_safety_multiplier
+        self._qa_model = qa_model
+        self._spend_state = spend_state
+        self._timeout_seconds = timeout_seconds
+        self._opener: Any = opener if opener is not None else build_live_responses_opener()
+        self.qa_candidate_lookup: dict[str, str] = {}
+
+    def __repr__(self) -> str:  # never include the credential
+        return f"<OpenAILiveResponsesTransport endpoint={STAGE04_LIVE_RESPONSES_URL}>"
+
+    @property
+    def endpoint(self) -> str:
+        return STAGE04_LIVE_RESPONSES_URL
+
+    # ---------------- spend ledger ----------------
+
+    def _estimate_for(self, phase: str, item_id: str) -> int:
+        try:
+            return self._token_estimates[(phase, item_id)]
+        except KeyError as exc:
+            raise BuildDictError(
+                f"STOP before transmission: item {item_id!r} phase {phase!r} is outside "
+                "the authorized live selection"
+            ) from exc
+
+    def _append_entry(
+        self,
+        *,
+        phase: str,
+        item_id: str,
+        accounting: str,
+        charge: Decimal,
+        response_id: str | None,
+        reported_input_tokens: int | None,
+        reported_output_tokens: int | None,
+        reported_reasoning_tokens: int | None,
+    ) -> None:
+        entries = self._spend_state["entries"]
+        if not isinstance(entries, list):  # pragma: no cover - guarded on construction
+            raise BuildDictError("Spend ledger entry list corrupted")
+        running_before = _spend_total_usd(self._spend_state)
+        cumulative = running_before + charge
+        entries.append(
+            {
+                "phase": phase,
+                "item_id": item_id,
+                "accounting": accounting,
+                "response_id": response_id,
+                "reported_input_tokens": reported_input_tokens,
+                "reported_output_tokens": reported_output_tokens,
+                "reported_reasoning_tokens": reported_reasoning_tokens,
+                "charge_usd": _decimal_to_wire(charge),
+                "cumulative_usd": _decimal_to_wire(cumulative),
+            }
+        )
+
+    def pretransmission_reserve(self, phase: str, unit_ids: Sequence[str]) -> None:
+        """Cap guard + conservative worst-case reservation BEFORE any transmission.
+
+        Called by build_stage04 before the unit's in_flight state is written, so
+        a blocked request leaves zero checkpoint side effects and an admitted
+        request persists its reservation together with in_flight atomically.
+        """
+        if len(unit_ids) != 1:
+            raise BuildDictError("Live synchronous transport requires units of exactly one item")
+        item_id = unit_ids[0]
+        estimate = self._estimate_for(phase, item_id)
+        price_in, price_out = self._prices[phase]
+        worst_case = stage04_worst_case_request_cost_usd_decimal(
+            estimate,
+            STAGE04_MAX_OUTPUT_TOKENS,
+            price_in,
+            price_out,
+            self._safety_multiplier,
+        )
+        recorded = _spend_total_usd(self._spend_state)
+        if stage04_pretransmission_guard_blocks_decimal(recorded, self._hard_cap_usd, worst_case):
+            raise Stage04PretransmissionBlocked(
+                f"STOP before transmission: recorded/reserved spend "
+                f"{_decimal_to_wire(recorded)} USD plus worst-case "
+                f"{_decimal_to_wire(worst_case)} USD exceeds hard cap "
+                f"{_decimal_to_wire(self._hard_cap_usd)} USD"
+            )
+        self._append_entry(
+            phase=phase,
+            item_id=item_id,
+            accounting="WORST_CASE_RESERVED",
+            charge=worst_case,
+            response_id=None,
+            reported_input_tokens=None,
+            reported_output_tokens=None,
+            reported_reasoning_tokens=None,
+        )
+
+    def _finalize_actual_usage(
+        self,
+        phase: str,
+        item_id: str,
+        response_id: str | None,
+        usage: tuple[int, int, int | None],
+    ) -> None:
+        """Convert the standing worst-case reservation into the ACTUAL charge."""
+        entries = self._spend_state["entries"]
+        if not isinstance(entries, list):  # pragma: no cover - guarded on construction
+            raise BuildDictError("Spend ledger entry list corrupted")
+        idx: int | None = None
+        for pos in range(len(entries) - 1, -1, -1):
+            entry = entries[pos]
+            if (
+                isinstance(entry, dict)
+                and entry.get("phase") == phase
+                and entry.get("item_id") == item_id
+                and entry.get("accounting") == "WORST_CASE_RESERVED"
+            ):
+                idx = pos
+                break
+        if idx is None:
+            raise BuildDictError(
+                "Spend ledger invariant violated: no standing reservation for billed item"
+            )
+        del entries[idx]
+        input_tokens, output_tokens, reasoning_tokens = usage
+        price_in, price_out = self._prices[phase]
+        charge = (
+            Decimal(input_tokens) * price_in + Decimal(output_tokens) * price_out
+        ) / _DECIMAL_TOKENS_PER_MTOK
+        self._append_entry(
+            phase=phase,
+            item_id=item_id,
+            accounting="ACTUAL",
+            charge=charge,
+            response_id=response_id,
+            reported_input_tokens=input_tokens,
+            reported_output_tokens=output_tokens,
+            reported_reasoning_tokens=reasoning_tokens,
+        )
+
+    # ---------------- HTTP layer ----------------
+
+    def _http_once(self, body: dict[str, object]) -> _Stage04HttpOutcome:
+        """Exactly ONE transmission attempt; any uncertainty is ambiguous."""
+        payload = json.dumps(
+            body, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            STAGE04_LIVE_RESPONSES_URL,
+            data=payload,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with self._opener.open(request, timeout=self._timeout_seconds) as response:
+                status_code = int(response.status)
+                raw = response.read()
+        except Exception as exc:
+            raise Stage04TransportAmbiguous(
+                f"STOP: uncertain transport outcome ({type(exc).__name__}) for "
+                f"{STAGE04_LIVE_RESPONSES_URL}; in_flight preserved; no automatic resend"
+            ) from exc
+        if not 200 <= status_code < 300:
+            raise Stage04TransportAmbiguous(
+                f"STOP: unexpected HTTP status {status_code} for "
+                f"{STAGE04_LIVE_RESPONSES_URL}; outcome treated as ambiguous"
+            )
+        return _Stage04HttpOutcome(kind="complete", status_code=status_code, raw_body=raw)
+
+    def _request_body_for(self, phase: str, item_id: str) -> dict[str, object]:
+        if phase == "bulk":
+            try:
+                return self._bulk_bodies[item_id]
+            except KeyError as exc:
+                raise BuildDictError(
+                    f"STOP before transmission: item {item_id!r} is outside the "
+                    "authorized live selection"
+                ) from exc
+        if phase == "qa":
+            record = self._item_records.get(item_id)
+            candidate_text = self.qa_candidate_lookup.get(item_id)
+            if record is None or candidate_text is None:
+                raise BuildDictError(
+                    "STOP before QA transmission: prerequisite bulk state missing for "
+                    f"{item_id!r}"
+                )
+            return de_learner_qa_request_body(record, candidate_text, self._qa_model)
+        raise BuildDictError(f"Unknown live phase: {phase}")
+
+    def _send_one(self, phase: str, item_id: str) -> dict[str, dict[str, object]]:
+        body = self._request_body_for(phase, item_id)
+        outcome = self._http_once(body)
+        assert outcome.raw_body is not None  # complete outcomes always carry bytes
+        try:
+            envelope = json.loads(outcome.raw_body.decode("utf-8"))
+        except Exception:
+            envelope = None
+        if not isinstance(envelope, dict):
+            return {item_id: {"extraction_error": "invalid_response_envelope"}}
+        response_id = envelope.get("id")
+        response_id = response_id if isinstance(response_id, str) else None
+        status = envelope.get("status")
+        incomplete = envelope.get("incomplete_details")
+        if incomplete is not None and not isinstance(incomplete, dict):
+            candidate: dict[str, object] = {"extraction_error": "invalid_response_envelope"}
+            return {item_id: candidate}
+        usage = _parse_provider_usage(envelope.get("usage"))
+        if usage is not None:
+            self._finalize_actual_usage(phase, item_id, response_id, usage)
+        # Missing/malformed usage keeps the standing WORST_CASE_RESERVED entry.
+        if not isinstance(status, str):
+            return {item_id: {"extraction_error": "invalid_response_envelope"}}
+        if status != "completed":
+            candidate = {"response_status": status}
+            if incomplete is not None:
+                candidate["incomplete_details"] = incomplete
+            return {item_id: candidate}
+        if usage is None:
+            # Complete provider response whose billing usage is unavailable or
+            # malformed: reserve worst-case (already standing), reject fail-closed.
+            return {item_id: {"extraction_error": "provider_usage_unavailable"}}
+        texts = _extract_assistant_output_texts(envelope.get("output"))
+        if len(texts) == 0:
+            return {item_id: {"extraction_error": "missing_output_text"}}
+        if len(texts) > 1:
+            return {item_id: {"extraction_error": "multiple_output_text"}}
+        try:
+            parsed = json.loads(texts[0])
+        except Exception:
+            return {item_id: {"extraction_error": "malformed_output_json"}}
+        if not isinstance(parsed, dict):
+            return {item_id: {"extraction_error": "output_not_object"}}
+        result: dict[str, object] = dict(parsed)
+        return {item_id: result}
+
+    # ---------------- transport interface ----------------
+
+    def send_bulk(self, unit_ids: Sequence[str]) -> dict[str, dict[str, object]]:
+        if len(unit_ids) != 1:
+            raise BuildDictError("Live synchronous transport requires units of exactly one item")
+        return self._send_one("bulk", unit_ids[0])
+
+    def send_qa(self, unit_ids: Sequence[str]) -> dict[str, dict[str, object]]:
+        if len(unit_ids) != 1:
+            raise BuildDictError("Live synchronous transport requires units of exactly one item")
+        return self._send_one("qa", unit_ids[0])
+
+
+# ----------------------------------------------------------------------
+# Live authorization preflight (all checks run BEFORE any credential read)
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class Stage04LivePlan:
+    """Verified live authorization artifacts; contains no credential material."""
+
+    subset_queue_path: Path
+    selected_item_ids: list[str]
+    selection_records: dict[str, dict[str, object]]
+    bulk_bodies: dict[str, dict[str, object]]
+    token_estimates: dict[tuple[str, str], int]
+    identity_extensions: dict[str, str]
+    generated_license: str
+    bulk_de_model: str
+    bulk_en_model: str
+    qa_model: str
+    hard_cap_usd: Decimal
+    bulk_input_price_per_mtok: Decimal
+    bulk_output_price_per_mtok: Decimal
+    qa_input_price_per_mtok: Decimal
+    qa_output_price_per_mtok: Decimal
+    input_safety_multiplier: Decimal
+    timeout_seconds: int
+    checkpoint_path: Path
+
+    @property
+    def spend_authorization(self) -> dict[str, str]:
+        return dict(self.identity_extensions)
+
+
+_QUEUE_RECORD_SEPARATOR: Final[bytes] = b'{"custom_id":"batch:'
+
+
+def _canonical_line(obj: object) -> str:
+    return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _iter_stage03_queue_items(path: Path) -> Any:
+    """Bounded-memory streaming iteration over accepted queue:v2 records."""
+    decoder = json.JSONDecoder()
+    with path.open("rb") as handle:
+        head = handle.read(8192)
+        marker = b'"items":['
+        idx = head.find(marker)
+        if idx < 0:
+            raise BuildDictError("Stage 03 queue header items array not found")
+        header = json.loads(head[:idx].decode("utf-8").rstrip(",") + "}")
+        if not isinstance(header, dict) or header.get("format") != STAGE03_QUEUE_FORMAT:
+            raise BuildDictError("Stage 03 queue format mismatch")
+        handle.seek(idx + len(marker))
+        carry = b""
+        while True:
+            chunk = handle.read(8 << 20)
+            if not chunk:
+                break
+            parts = (carry + chunk).split(_QUEUE_RECORD_SEPARATOR)
+            carry = parts.pop()
+            for segment in parts:
+                if not segment:
+                    continue
+                obj, _end = decoder.raw_decode(
+                    (_QUEUE_RECORD_SEPARATOR + segment).decode("utf-8")
+                )
+                yield obj
+        if carry.strip():
+            remainder = carry
+            suffix = b"]}"
+            if remainder.endswith(suffix):
+                remainder = remainder[: -len(suffix)]
+            if remainder.strip():
+                obj, _end = decoder.raw_decode(
+                    (_QUEUE_RECORD_SEPARATOR + remainder).decode("utf-8")
+                )
+                yield obj
+
+
+def _resolve_live_selection_against_queue(
+    queue_path: Path,
+    expected_queue_sha256: str,
+    expected_queue_bytes: int,
+    frozen_by_id: dict[str, dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    """Resolve each frozen selected item against the EXACT accepted queue asset."""
+    queue_sha = sha256_file(queue_path)
+    queue_bytes = queue_path.stat().st_size
+    if queue_sha != expected_queue_sha256 or queue_bytes != expected_queue_bytes:
+        raise BuildDictError(
+            "STOP BEFORE KEY READ: accepted queue identity mismatch for live mode"
+        )
+    matched: dict[str, dict[str, object]] = {}
+    seen_frozen_hits: set[str] = set()
+    for record in _iter_stage03_queue_items(queue_path):
+        item_id = str(record.get("item_id", ""))
+        if item_id in frozen_by_id:
+            if item_id in seen_frozen_hits:
+                raise BuildDictError(f"Duplicate queue record for frozen id {item_id}")
+            seen_frozen_hits.add(item_id)
+            matched[item_id] = record
+    missing = [iid for iid in sorted(frozen_by_id.keys()) if iid not in matched]
+    if missing:
+        raise BuildDictError(
+            f"STOP BEFORE KEY READ: frozen selection IDs missing from queue ({len(missing)})"
+        )
+    wrong: list[str] = []
+    for item_id, frozen_record in sorted(frozen_by_id.items()):
+        queue_record = matched[item_id]
+        if any(key not in frozen_record or frozen_record[key] != value
+               for key, value in queue_record.items()):
+            wrong.append(item_id)
+    if wrong:
+        raise BuildDictError(
+            f"STOP BEFORE KEY READ: frozen selection records diverge from queue ({len(wrong)})"
+        )
+    return matched
+
+
+def prepare_stage04_live(
+    *,
+    queue_path: Path,
+    stage02_path: Path,
+    checkpoint_path: Path,
+    output_path: Path,
+    subset_queue_path: Path,
+    selection_path: Path,
+    expected_selection_sha: str,
+    expected_queue_sha: str,
+    expected_queue_bytes: int,
+    authorized_request_sha: str,
+    authorized_batch_equivalence_sha: str,
+    cost_plan_path: Path,
+    cost_plan_sha: str,
+    generated_license: str,
+    bulk_de_model: str,
+    bulk_en_model: str,
+    qa_model: str,
+    approved_bulk_model: str,
+    approved_qa_model: str,
+    hard_spend_cap_usd: str,
+    bulk_input_price_per_mtok: str,
+    bulk_output_price_per_mtok: str,
+    qa_input_price_per_mtok: str,
+    qa_output_price_per_mtok: str,
+    input_safety_multiplier: str,
+    timeout_seconds: int,
+) -> Stage04LivePlan:
+    """Verify every live authorization artifact; STOP before any credential read."""
+    del stage02_path, output_path  # consumed later by execute_stage04_live
+    if approved_bulk_model != bulk_de_model or approved_bulk_model != bulk_en_model:
+        raise BuildDictError(
+            "STOP BEFORE KEY READ: approved bulk model does not match configured bulk roles"
+        )
+    if approved_qa_model != qa_model:
+        raise BuildDictError(
+            "STOP BEFORE KEY READ: approved QA model does not match configured QA role"
+        )
+    cap = _parse_decimal_input(hard_spend_cap_usd, "hard spend cap USD", minimum=Decimal(0))
+    bulk_in = _parse_decimal_input(
+        bulk_input_price_per_mtok, "bulk input price", minimum=Decimal(0)
+    )
+    bulk_out = _parse_decimal_input(
+        bulk_output_price_per_mtok, "bulk output price", minimum=Decimal(0)
+    )
+    qa_in = _parse_decimal_input(qa_input_price_per_mtok, "QA input price", minimum=Decimal(0))
+    qa_out = _parse_decimal_input(qa_output_price_per_mtok, "QA output price", minimum=Decimal(0))
+    safety = _parse_decimal_input(
+        input_safety_multiplier, "input safety multiplier", minimum=Decimal(1)
+    )
+    if timeout_seconds <= 0:
+        raise BuildDictError("Live timeout must be a positive number of seconds")
+
+    # Fence 1 — canonical frozen selection (accepted SHA-verifying reader).
+    selection_records = _render_canary_receipt(selection_path, expected_selection_sha)
+    if len(selection_records) != STAGE04_LIVE_CANARY_SELECTION_COUNT:
+        raise BuildDictError("STOP BEFORE KEY READ: frozen selection count != 50")
+    sel_ids = [str(rec["item_id"]) for rec in selection_records]
+    if len(set(sel_ids)) != STAGE04_LIVE_CANARY_SELECTION_COUNT:
+        raise BuildDictError("STOP BEFORE KEY READ: frozen selection item IDs not unique")
+
+    # Fence 2 — resolve against the exact queue:v2 asset.
+    matched = _resolve_live_selection_against_queue(
+        queue_path, expected_queue_sha, expected_queue_bytes,
+        {str(rec["item_id"]): rec for rec in selection_records},
+    )
+
+    # Regenerate the exact authorized synchronous requests from committed builders.
+    bodies: dict[str, dict[str, object]] = {}
+    for item_id in sel_ids:
+        bodies[item_id] = _request_body_for_item(matched[item_id], bulk_de_model, bulk_en_model)
+
+    # Fence 3 — frozen request-SHA fence (regenerated artifact must match).
+    request_blob = "".join(
+        _canonical_line(
+            {"body": bodies[iid], "custom_id": f"batch:{iid}", "item_id": iid}
+        )
+        + "\n"
+        for iid in sel_ids
+    ).encode("utf-8")
+    request_sha = hashlib.sha256(request_blob).hexdigest()
+    if request_sha != authorized_request_sha:
+        raise BuildDictError(
+            f"STOP BEFORE KEY READ: regenerated request SHA {request_sha} does not match "
+            f"authorized request SHA {authorized_request_sha}"
+        )
+
+    # Fence 4 — Batch-equivalence bytes fence.
+    batch_blob = "".join(
+        _canonical_line(
+            {
+                "body": bodies[iid],
+                "custom_id": f"batch:{iid}",
+                "method": "POST",
+                "url": STAGE04_BATCH_RECORD_URL,
+            }
+        )
+        + "\n"
+        for iid in sel_ids
+    ).encode("utf-8")
+    batch_sha = hashlib.sha256(batch_blob).hexdigest()
+    if batch_sha != authorized_batch_equivalence_sha:
+        raise BuildDictError(
+            f"STOP BEFORE KEY READ: regenerated Batch-equivalence SHA {batch_sha} does not "
+            f"match authorized {authorized_batch_equivalence_sha}"
+        )
+
+    # Fence 5 — cost-plan fence.
+    if not cost_plan_path.is_file():
+        raise BuildDictError("STOP BEFORE KEY READ: cost plan artifact not found")
+    cost_plan_raw = cost_plan_path.read_bytes()
+    actual_cost_plan_sha = hashlib.sha256(cost_plan_raw).hexdigest()
+    if actual_cost_plan_sha != cost_plan_sha:
+        raise BuildDictError("STOP BEFORE KEY READ: cost plan SHA mismatch")
+    try:
+        cost_plan = json.loads(cost_plan_raw.decode("utf-8"))
+    except Exception as exc:
+        raise BuildDictError("STOP BEFORE KEY READ: cost plan is malformed JSON") from exc
+    if not isinstance(cost_plan, dict):
+        raise BuildDictError("STOP BEFORE KEY READ: cost plan must be a JSON object")
+    if cost_plan.get("artifact") != STAGE04_COST_PLAN_ARTIFACT:
+        raise BuildDictError("STOP BEFORE KEY READ: unknown cost plan artifact type")
+    if cost_plan.get("selection_sha256") != expected_selection_sha:
+        raise BuildDictError("STOP BEFORE KEY READ: cost plan bound to different selection")
+    if cost_plan.get("request_sha256") != authorized_request_sha:
+        raise BuildDictError("STOP BEFORE KEY READ: cost plan bound to different requests")
+    items_field = cost_plan.get("items")
+    if not isinstance(items_field, list) or len(items_field) != len(sel_ids):
+        raise BuildDictError("STOP BEFORE KEY READ: cost plan item count mismatch")
+    token_estimates: dict[tuple[str, str], int] = {}
+    seen_ids: set[str] = set()
+    aggregate_bulk = 0
+    aggregate_qa = 0
+    for entry in items_field:
+        if not isinstance(entry, dict):
+            raise BuildDictError("STOP BEFORE KEY READ: cost plan item malformed")
+        cp_item_id = entry.get("item_id")
+        if not isinstance(cp_item_id, str) or cp_item_id in seen_ids:
+            raise BuildDictError("STOP BEFORE KEY READ: cost plan item IDs invalid")
+        seen_ids.add(cp_item_id)
+        estimates: dict[str, int] = {}
+        for field_name, phase in (("bulk_input_tokens", "bulk"), ("qa_bound_input_tokens", "qa")):
+            value = entry.get(field_name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise BuildDictError(
+                    f"STOP BEFORE KEY READ: cost plan {field_name} must be a nonnegative integer"
+                )
+            estimates[phase] = value
+        token_estimates[("bulk", cp_item_id)] = estimates["bulk"]
+        token_estimates[("qa", cp_item_id)] = estimates["qa"]
+        aggregate_bulk += estimates["bulk"]
+        aggregate_qa += estimates["qa"]
+    if seen_ids != set(sel_ids):
+        raise BuildDictError(
+            "STOP BEFORE KEY READ: cost plan item IDs do not equal the frozen selection"
+        )
+    if aggregate_bulk != cost_plan.get("aggregate_bulk_input_tokens"):
+        raise BuildDictError("STOP BEFORE KEY READ: cost plan bulk aggregate mismatch")
+    if aggregate_qa != cost_plan.get("aggregate_qa_bound_input_tokens"):
+        raise BuildDictError("STOP BEFORE KEY READ: cost plan QA-bound aggregate mismatch")
+    if aggregate_bulk != STAGE04_LIVE_CANARY_BULK_INPUT_TOKEN_ESTIMATE:
+        raise BuildDictError(
+            "STOP BEFORE KEY READ: cost plan bulk aggregate does not match the frozen "
+            "German-canary contract"
+        )
+    if aggregate_qa != STAGE04_LIVE_CANARY_QA_BOUND_INPUT_TOKEN_ESTIMATE:
+        raise BuildDictError(
+            "STOP BEFORE KEY READ: cost plan QA-bound aggregate does not match the frozen "
+            "German-canary contract"
+        )
+
+    # Materialize the derived 50-item working queue (mechanical authorization fence).
+    if subset_queue_path.exists():
+        raise BuildDictError(f"Subset queue path already exists: {subset_queue_path}")
+    subset_doc = {
+        "format": STAGE03_QUEUE_FORMAT,
+        "items": [matched[iid] for iid in sel_ids],
+    }
+    subset_queue_path.parent.mkdir(parents=True, exist_ok=True)
+    subset_queue_path.write_text(
+        _canonical_line(subset_doc) + "\n", encoding="utf-8"
+    )
+
+    normalized_prices = {
+        "hard_spend_cap_usd": _decimal_to_wire(cap),
+        "bulk_input_price_per_mtok": _decimal_to_wire(bulk_in),
+        "bulk_output_price_per_mtok": _decimal_to_wire(bulk_out),
+        "qa_input_price_per_mtok": _decimal_to_wire(qa_in),
+        "qa_output_price_per_mtok": _decimal_to_wire(qa_out),
+        "input_safety_multiplier": _decimal_to_wire(safety),
+    }
+    identity_extensions: dict[str, str] = {
+        "live_transport": STAGE04_LIVE_TRANSPORT_ID,
+        "live_endpoint": STAGE04_LIVE_RESPONSES_URL,
+        "authorized_queue_sha256": expected_queue_sha,
+        "live_selection_sha256": expected_selection_sha,
+        "authorized_request_sha256": authorized_request_sha,
+        "authorized_batch_equivalence_sha256": authorized_batch_equivalence_sha,
+        "cost_plan_sha256": cost_plan_sha,
+        **normalized_prices,
+        "approved_bulk_model": approved_bulk_model,
+        "approved_qa_model": approved_qa_model,
+    }
+
+    print(
+        "LIVE_PREFLIGHT_OK "
+        f"selection={expected_selection_sha[:12]} request_sha={request_sha[:12]} "
+        "batch_equiv_ok cost_plan_ok; credential boundary next"
+    )
+    return Stage04LivePlan(
+        subset_queue_path=subset_queue_path,
+        selected_item_ids=sel_ids,
+        selection_records=matched,
+        bulk_bodies=bodies,
+        token_estimates=token_estimates,
+        identity_extensions=identity_extensions,
+        generated_license=generated_license,
+        bulk_de_model=bulk_de_model,
+        bulk_en_model=bulk_en_model,
+        qa_model=qa_model,
+        hard_cap_usd=cap,
+        bulk_input_price_per_mtok=bulk_in,
+        bulk_output_price_per_mtok=bulk_out,
+        qa_input_price_per_mtok=qa_in,
+        qa_output_price_per_mtok=qa_out,
+        input_safety_multiplier=safety,
+        timeout_seconds=timeout_seconds,
+        checkpoint_path=checkpoint_path,
+    )
+
+
+def execute_stage04_live(
+    plan: Stage04LivePlan,
+    *,
+    api_key: str,
+    stage02_path: Path,
+    output_path: Path,
+    opener: Any = None,
+) -> dict[str, object]:
+    """Construct the live transport (credential boundary) and run Stage 04."""
+    subset_sha = sha256_file(plan.subset_queue_path)
+    identity = _checkpoint_identity(
+        subset_sha,
+        GENERATED_MARKER,
+        plan.generated_license,
+        plan.bulk_de_model,
+        plan.bulk_en_model,
+        plan.qa_model,
+    )
+    identity.update(plan.identity_extensions)
+    ckpt_p = plan.checkpoint_path
+    if ckpt_p.exists():
+        state = _load_checkpoint(ckpt_p, identity)
+        existing_spend = state.get("spend")
+        spend_state = (
+            _validate_spend_state(existing_spend)
+            if existing_spend is not None
+            else _empty_spend_state(plan.spend_authorization)
+        )
+    else:
+        spend_state = _empty_spend_state(plan.spend_authorization)
+    transport = OpenAILiveResponsesTransport(
+        api_key=api_key,
+        bulk_bodies=dict(plan.bulk_bodies),
+        item_records=dict(plan.selection_records),
+        token_estimates=plan.token_estimates,
+        hard_cap_usd=plan.hard_cap_usd,
+        bulk_input_price_per_mtok=plan.bulk_input_price_per_mtok,
+        bulk_output_price_per_mtok=plan.bulk_output_price_per_mtok,
+        qa_input_price_per_mtok=plan.qa_input_price_per_mtok,
+        qa_output_price_per_mtok=plan.qa_output_price_per_mtok,
+        input_safety_multiplier=plan.input_safety_multiplier,
+        qa_model=plan.qa_model,
+        spend_state=spend_state,
+        timeout_seconds=plan.timeout_seconds,
+        opener=opener,
+    )
+
+    def bind_qa_candidates(completed: dict[str, Any]) -> None:
+        transport.qa_candidate_lookup = {
+            iid: str(val.get("text", "")) for iid, val in completed.items() if isinstance(val, dict)
+        }
+
+    return build_stage04(
+        queue_path=plan.subset_queue_path,
+        stage02_path=stage02_path,
+        output_path=output_path,
+        checkpoint_path=ckpt_p,
+        generated_license=plan.generated_license,
+        bulk_de_model=plan.bulk_de_model,
+        bulk_en_model=plan.bulk_en_model,
+        qa_model=plan.qa_model,
+        transport=transport,
+        batch_size=1,
+        identity_extensions=plan.identity_extensions,
+        spend_state=spend_state,
+        qa_context_callback=bind_qa_candidates,
+    )
+
+
+_LIVE_ONLY_ARGS: Final[tuple[str, ...]] = (
+    "live_selection",
+    "live_selection_sha",
+    "expected_queue_sha",
+    "expected_queue_bytes",
+    "authorized_request_sha",
+    "authorized_batch_equivalence_sha",
+    "live_cost_plan",
+    "live_cost_plan_sha",
+    "live_subset_queue",
+    "live_hard_spend_cap_usd",
+    "live_bulk_input_price_per_mtok",
+    "live_bulk_output_price_per_mtok",
+    "live_qa_input_price_per_mtok",
+    "live_qa_output_price_per_mtok",
+    "live_input_safety_multiplier",
+    "approved_bulk_model",
+    "approved_qa_model",
+)
+
+
+def _reject_dangling_live_args(ns: argparse.Namespace) -> None:
+    """Fail closed when live authorization arguments appear without the live flag."""
+    dangling = [name for name in _LIVE_ONLY_ARGS if getattr(ns, name, None) is not None]
+    if dangling:
+        raise BuildDictError(
+            "Live authorization arguments require --live-openai-responses: "
+            + ", ".join(dangling)
+        )
+
+
+def _require_live_ns(ns: argparse.Namespace) -> None:
+    """Fail closed when the live flag is present but authorization inputs are missing."""
+    missing = [name for name in _LIVE_ONLY_ARGS if getattr(ns, name, None) is None]
+    if missing:
+        raise BuildDictError(
+            "--live-openai-responses requires explicit authorization arguments; "
+            "missing: " + ", ".join(missing)
+        )
+
+
+def run_stage04_live(ns: argparse.Namespace) -> dict[str, object]:
+    """CLI live activation: full preflight first, THEN the single credential read."""
+    _require_live_ns(ns)
+    plan = prepare_stage04_live(
+        queue_path=ns.queue,
+        stage02_path=ns.stage02,
+        checkpoint_path=ns.checkpoint,
+        output_path=ns.output,
+        subset_queue_path=ns.live_subset_queue,
+        selection_path=ns.live_selection,
+        expected_selection_sha=ns.live_selection_sha,
+        expected_queue_sha=ns.expected_queue_sha,
+        expected_queue_bytes=ns.expected_queue_bytes,
+        authorized_request_sha=ns.authorized_request_sha,
+        authorized_batch_equivalence_sha=ns.authorized_batch_equivalence_sha,
+        cost_plan_path=ns.live_cost_plan,
+        cost_plan_sha=ns.live_cost_plan_sha,
+        generated_license=ns.generated_license,
+        bulk_de_model=ns.bulk_de_model,
+        bulk_en_model=ns.bulk_en_model,
+        qa_model=ns.qa_model,
+        approved_bulk_model=ns.approved_bulk_model,
+        approved_qa_model=ns.approved_qa_model,
+        hard_spend_cap_usd=ns.live_hard_spend_cap_usd,
+        bulk_input_price_per_mtok=ns.live_bulk_input_price_per_mtok,
+        bulk_output_price_per_mtok=ns.live_bulk_output_price_per_mtok,
+        qa_input_price_per_mtok=ns.live_qa_input_price_per_mtok,
+        qa_output_price_per_mtok=ns.live_qa_output_price_per_mtok,
+        input_safety_multiplier=ns.live_input_safety_multiplier,
+        timeout_seconds=ns.live_timeout_seconds,
+    )
+    api_key = _read_openai_api_key()
+    return execute_stage04_live(
+        plan,
+        api_key=api_key,
+        stage02_path=ns.stage02,
+        output_path=ns.output,
+    )
+
+
 def build_stage04(
     queue_path: Path | str,
     stage02_path: Path | str,
@@ -3354,6 +4512,9 @@ def build_stage04(
     provider_max_bytes: int = STAGE04_DEFAULT_PROVIDER_MAX_BYTES,
     provider_max_requests: int = STAGE04_DEFAULT_PROVIDER_MAX_REQUESTS,
     audit_sample_size: int = 2,
+    identity_extensions: dict[str, str] | None = None,
+    spend_state: dict[str, object] | None = None,
+    qa_context_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, object]:
     """Execute Stage 04 enrichment with checkpointing. Transport is fake/local for tests."""
     queue_p = Path(queue_path)
@@ -3415,8 +4576,18 @@ def build_stage04(
     # Override pipeline versions if provided
     identity["bulk_pipeline_version"] = bulk_pipeline_version
     identity["qa_pipeline_version"] = qa_pipeline_version
+    # Live authorization inputs participate in checkpoint compatibility: any change
+    # to a material live authorization input invalidates checkpoint reuse.
+    if identity_extensions:
+        identity.update(identity_extensions)
 
     state = _load_checkpoint(ckpt_p, identity)
+    if spend_state is not None:
+        existing_spend = state.get("spend")
+        if existing_spend is not None:
+            spend_state = _validate_spend_state(existing_spend)
+        else:
+            state["spend"] = spend_state
     # Ensure manifests exist based on current provider limits - but preserve existing manifests if compatible?  # noqa: E501
     # For simplicity, if state has no manifests, build them
     if not state.get("manifests"):
@@ -3510,6 +4681,12 @@ def build_stage04(
         unit_size = batch_size
         for i in range(0, len(pending_bulk_ids), unit_size):
             unit_ids = pending_bulk_ids[i : i + unit_size]
+            # Live transports guard the cap and durably reserve worst-case spend
+            # BEFORE in_flight is written, so a blocked request leaves zero side
+            # effects and an admitted one persists reservation + in_flight together.
+            reserve_hook = getattr(transport, "pretransmission_reserve", None)
+            if callable(reserve_hook):
+                reserve_hook("bulk", list(unit_ids))
             # Mark in_flight before submission (persist)
             bulk_state["in_flight"] = list(unit_ids)
             _write_checkpoint(ckpt_p, identity, state)
@@ -3778,9 +4955,14 @@ def build_stage04(
         raise BuildDictError("No local deterministic Stage 04 QA transport configured")
 
     if pending_qa_ids and transport is not None and hasattr(transport, "send_qa"):
+        if qa_context_callback is not None:
+            qa_context_callback(bulk_completed)
         unit_size = batch_size
         for i in range(0, len(pending_qa_ids), unit_size):
             unit_ids = pending_qa_ids[i : i + unit_size]
+            reserve_hook = getattr(transport, "pretransmission_reserve", None)
+            if callable(reserve_hook):
+                reserve_hook("qa", list(unit_ids))
             qa_state["in_flight"] = list(unit_ids)
             _write_checkpoint(ckpt_p, identity, state)
             try:

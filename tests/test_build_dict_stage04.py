@@ -2,34 +2,60 @@
 # mypy: disable-error-code="attr-defined,unused-ignore,operator,index,type-var,arg-type,override"
 
 import hashlib
+import inspect
 import json
+import socket
 import sqlite3
+import urllib.error
+import urllib.request
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from tests.test_build_dict_stage03 import make_stage02, make_stage02_with_en_counts
+from tools import build_dict as bd
 from tools.build_dict import (
+    GENERATED_MARKER,
     STAGE01_SCHEMA_SQL,
     STAGE02_EXAMPLE_SCHEMA_SQL,
     STAGE04_BULK_REASONING_EFFORT,
+    STAGE04_COST_PLAN_ARTIFACT,
+    STAGE04_DEFAULT_BULK_DE_MODEL,
+    STAGE04_DEFAULT_BULK_EN_MODEL,
+    STAGE04_DEFAULT_QA_MODEL,
+    STAGE04_LIVE_API_KEY_ENV,
+    STAGE04_LIVE_CANARY_BULK_INPUT_TOKEN_ESTIMATE,
+    STAGE04_LIVE_CANARY_QA_BOUND_INPUT_TOKEN_ESTIMATE,
+    STAGE04_LIVE_RESPONSES_URL,
     STAGE04_MAX_OUTPUT_TOKENS,
     STAGE04_QA_REASONING_EFFORT,
     BuildDictError,
+    OpenAILiveResponsesTransport,
+    Stage04PretransmissionBlocked,
+    _canonical_line,
     _checkpoint_identity,
+    _decimal_to_wire,
     _deterministic_audit_sample,
+    _empty_spend_state,
     _load_checkpoint,
     _render_canary_receipt,
+    _spend_total_usd,
     _validate_generated_candidate,
+    _validate_spend_state,
     _write_canary_selection_manifest,
     build_stage03,
     build_stage04,
     de_learner_meaning_request_body,
     de_learner_qa_request_body,
     en_meaning_request_body,
+    execute_stage04_live,
+    main,
+    prepare_stage04_live,
     retry_rejected,
     stage04_pretransmission_guard_blocks,
     stage04_worst_case_request_cost_usd,
+    stage04_worst_case_request_cost_usd_decimal,
 )
 from tools.resolver_hash import get_resolver_hash
 
@@ -1291,3 +1317,1254 @@ def test_pretransmission_spend_guard_permits_within_cap() -> None:
         stage04_worst_case_request_cost_usd(100, 0, 0.20, 1.20)
     with pytest.raises(BuildDictError):
         stage04_worst_case_request_cost_usd(100, 512, 0.20, 1.20, input_safety_multiplier=0.5)
+
+
+# ======================================================================
+# Live synchronous OpenAI Responses transport — zero-network tests
+# (strict opt-in; every HTTP interaction is an injected fake opener)
+# ======================================================================
+
+LIVE_TEST_KEY = "sk-test-LIVE-SECRET-ZZ9Q"
+
+
+@pytest.fixture(autouse=True)
+def _live_tests_never_see_a_real_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(STAGE04_LIVE_API_KEY_ENV, raising=False)
+
+
+class FakeLiveResponse:
+    def __init__(
+        self,
+        env: dict[str, object] | None = None,
+        *,
+        raw: bytes | None = None,
+        status: int = 200,
+        fail_read: bool = False,
+    ) -> None:
+        if raw is not None:
+            self._raw = raw
+        else:
+            self._raw = json.dumps(env or {}).encode("utf-8")
+        self.status = status
+        self._fail_read = fail_read
+
+    def read(self) -> bytes:
+        if self._fail_read:
+            raise ConnectionResetError("connection lost mid-read")
+        return self._raw
+
+    def __enter__(self) -> "FakeLiveResponse":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+
+class FakeLiveOpener:
+    """Scripted opener: records every call; never performs DNS/network I/O."""
+
+    def __init__(self, outcomes: list[object]) -> None:
+        self._outcomes = list(outcomes)
+        self.calls: list[dict[str, object]] = []
+
+    def open(self, request: object, timeout: float | None = None) -> object:
+        headers = {str(k).lower(): str(v) for k, v in request.header_items()}  # type: ignore[attr-defined]
+        data = bytes(request.data) if request.data is not None else b""  # type: ignore[attr-defined]
+        self.calls.append(
+            {
+                "url": request.full_url,  # type: ignore[attr-defined]
+                "method": request.get_method(),  # type: ignore[attr-defined]
+                "headers": headers,
+                "data": data,
+                "timeout": timeout,
+            }
+        )
+        if not self._outcomes:
+            raise AssertionError("unexpected additional HTTP call")
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def _distribute(total: int, n: int) -> list[int]:
+    base = total // n
+    rem = total - base * n
+    return [base + (1 if i < rem else 0) for i in range(n)]
+
+
+def _build_live_fixture(tmp_path: Path, n: int = 55) -> dict[str, object]:
+    workdir = tmp_path / "livefx"
+    db, queue, items = make_stage02_with_n(workdir, n, prefix="live")
+    sorted_ids = sorted(items.keys(), key=lambda s: s.encode())
+    assert len(sorted_ids) >= 50
+    sel_ids = sorted_ids[:50]
+    selection_records = []
+    for iid in sel_ids:
+        rec = dict(items[iid])
+        rec["stratum"] = "lexical"
+        selection_records.append(rec)
+    sel_bytes = json.dumps(
+        selection_records, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    sel_path = workdir / "selection.json"
+    sel_path.write_bytes(sel_bytes)
+
+    bodies = {
+        iid: de_learner_meaning_request_body(iid_rec, STAGE04_DEFAULT_BULK_DE_MODEL)
+        for iid, iid_rec in ((iid, items[iid]) for iid in sel_ids)
+    }
+    req_blob = "".join(
+        _canonical_line({"body": bodies[iid], "custom_id": f"batch:{iid}", "item_id": iid}) + "\n"
+        for iid in sel_ids
+    ).encode("utf-8")
+    batch_blob = "".join(
+        _canonical_line(
+            {
+                "body": bodies[iid],
+                "custom_id": f"batch:{iid}",
+                "method": "POST",
+                "url": "/v1/responses",
+            }
+        )
+        + "\n"
+        for iid in sel_ids
+    ).encode("utf-8")
+
+    bulk_ests = _distribute(STAGE04_LIVE_CANARY_BULK_INPUT_TOKEN_ESTIMATE, len(sel_ids))
+    qa_ests = _distribute(STAGE04_LIVE_CANARY_QA_BOUND_INPUT_TOKEN_ESTIMATE, len(sel_ids))
+    cost_doc = {
+        "artifact": STAGE04_COST_PLAN_ARTIFACT,
+        "selection_sha256": hashlib.sha256(sel_bytes).hexdigest(),
+        "request_sha256": hashlib.sha256(req_blob).hexdigest(),
+        "aggregate_bulk_input_tokens": sum(bulk_ests),
+        "aggregate_qa_bound_input_tokens": sum(qa_ests),
+        "items": [
+            {"item_id": iid, "bulk_input_tokens": b, "qa_bound_input_tokens": q}
+            for iid, b, q in zip(sel_ids, bulk_ests, qa_ests)
+        ],
+    }
+    cost_bytes = _canonical_line(cost_doc).encode("utf-8")
+    cost_path = workdir / "cost-plan.json"
+    cost_path.write_bytes(cost_bytes)
+
+    return {
+        "db": db,
+        "queue": queue,
+        "items": items,
+        "sel_ids": sel_ids,
+        "sel_path": sel_path,
+        "sel_sha": hashlib.sha256(sel_bytes).hexdigest(),
+        "bodies": bodies,
+        "req_sha": hashlib.sha256(req_blob).hexdigest(),
+        "batch_sha": hashlib.sha256(batch_blob).hexdigest(),
+        "cost_path": cost_path,
+        "cost_sha": hashlib.sha256(cost_bytes).hexdigest(),
+        "queue_sha": hashlib.sha256(queue.read_bytes()).hexdigest(),
+        "queue_bytes": queue.stat().st_size,
+        "workdir": workdir,
+        "bulk_ests": dict(zip(sel_ids, bulk_ests)),
+        "qa_ests": dict(zip(sel_ids, qa_ests)),
+    }
+
+
+_LIVE_DEFAULT_AUTH: dict[str, str] = {
+    "hard_spend_cap_usd": "0.45",
+    "bulk_input_price_per_mtok": "0.20",
+    "bulk_output_price_per_mtok": "1.20",
+    "qa_input_price_per_mtok": "2.00",
+    "qa_output_price_per_mtok": "12.00",
+    "input_safety_multiplier": "2.0",
+}
+
+
+def _live_prepare_kwargs(
+    fx: dict[str, object], tmp_path: Path, tag: str, **overrides: object
+) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "queue_path": fx["queue"],
+        "stage02_path": fx["db"],
+        "checkpoint_path": tmp_path / f"{tag}-checkpoint.json",
+        "output_path": tmp_path / f"{tag}-output.sqlite",
+        "subset_queue_path": tmp_path / f"{tag}-subset-queue.json",
+        "selection_path": fx["sel_path"],
+        "expected_selection_sha": fx["sel_sha"],
+        "expected_queue_sha": fx["queue_sha"],
+        "expected_queue_bytes": fx["queue_bytes"],
+        "authorized_request_sha": fx["req_sha"],
+        "authorized_batch_equivalence_sha": fx["batch_sha"],
+        "cost_plan_path": fx["cost_path"],
+        "cost_plan_sha": fx["cost_sha"],
+        "generated_license": "CC BY-SA",
+        "bulk_de_model": STAGE04_DEFAULT_BULK_DE_MODEL,
+        "bulk_en_model": STAGE04_DEFAULT_BULK_EN_MODEL,
+        "qa_model": STAGE04_DEFAULT_QA_MODEL,
+        "approved_bulk_model": STAGE04_DEFAULT_BULK_DE_MODEL,
+        "approved_qa_model": STAGE04_DEFAULT_QA_MODEL,
+        "timeout_seconds": 5,
+        **dict(_LIVE_DEFAULT_AUTH),
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _prepare_live(
+    fx: dict[str, object], tmp_path: Path, tag: str, **overrides: object
+) -> object:
+    return prepare_stage04_live(**_live_prepare_kwargs(fx, tmp_path, tag, **overrides))  # type: ignore[arg-type]
+
+
+def _execute_live(plan, fx: dict[str, object], opener: object, key: str = LIVE_TEST_KEY):  # type: ignore[no-untyped-def]
+    return execute_stage04_live(
+        plan,
+        api_key=key,
+        stage02_path=fx["db"],  # type: ignore[arg-type]
+        output_path=plan.checkpoint_path.parent / (plan.checkpoint_path.stem + "-out.sqlite"),
+        opener=opener,
+    )
+
+
+def _completed_env(
+    *,
+    meaning: str = "ein schlichtes Gebäude",
+    kind: str = "definition",
+    usage: tuple[int, int, int] | None = (100, 40, 10),
+    status: str = "completed",
+    incomplete: dict[str, str] | None = None,
+    output: list[dict[str, object]] | None = None,
+    response_id: str = "resp_live_test_1",
+) -> dict[str, object]:
+    if output is None:
+        payload = json.dumps({"meaning": meaning, "kind": kind})
+        output = [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": payload}],
+            }
+        ]
+    env: dict[str, object] = {"id": response_id, "status": status, "output": output}
+    if incomplete is not None:
+        env["incomplete_details"] = incomplete
+    if usage is not None:
+        env["usage"] = {
+            "input_tokens": usage[0],
+            "output_tokens": usage[1],
+            "output_tokens_details": {"reasoning_tokens": usage[2]},
+        }
+    return env
+
+
+def _read_state(path: Path) -> dict[str, object]:
+    loaded: dict[str, object] = json.loads(path.read_text(encoding="utf-8"))
+    return loaded
+
+
+def _happy_opener(count: int = 52) -> FakeLiveOpener:
+    return FakeLiveOpener([FakeLiveResponse(env=_completed_env()) for _ in range(count)])
+
+
+def test_default_stage04_remains_zero_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fx = _build_live_fixture(tmp_path)
+    probes = {"key_reads": 0, "opener_builds": 0}
+
+    def _no_key() -> str:
+        probes["key_reads"] += 1
+        return ""
+
+    def _no_opener() -> object:
+        probes["opener_builds"] += 1
+        raise AssertionError("live opener constructed without opt-in")
+
+    monkeypatch.setattr(bd, "_read_openai_api_key", _no_key)
+    monkeypatch.setattr(bd, "build_live_responses_opener", _no_opener)
+    rc = main(
+        [
+            "stage04",
+            "--queue",
+            str(fx["queue"]),
+            "--stage02",
+            str(fx["db"]),
+            "--output",
+            str(tmp_path / "out.sqlite"),
+            "--checkpoint",
+            str(tmp_path / "ckpt.json"),
+            "--generated-license",
+            "CC BY-SA",
+        ]
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "No local deterministic Stage 04 transport configured" in err
+    assert probes["key_reads"] == 0
+    assert probes["opener_builds"] == 0
+
+
+def test_live_flag_absent_never_reads_api_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx = _build_live_fixture(tmp_path)
+    probes = {"reads": 0}
+
+    def _tripwire() -> str:
+        probes["reads"] += 1
+        return ""
+
+    monkeypatch.setattr(bd, "_read_openai_api_key", _tripwire)
+    rc = main(
+        [
+            "stage04",
+            "--queue",
+            str(fx["queue"]),
+            "--stage02",
+            str(fx["db"]),
+            "--output",
+            str(tmp_path / "out.sqlite"),
+            "--checkpoint",
+            str(tmp_path / "ckpt.json"),
+            "--generated-license",
+            "CC BY-SA",
+            "--batch-size",
+            "100",
+        ]
+    )
+    assert rc == 1
+    assert probes["reads"] == 0
+
+
+def test_cli_rejects_dangling_live_args_without_flag(tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    fx = _build_live_fixture(tmp_path)
+    rc = main(
+        [
+            "stage04",
+            "--queue",
+            str(fx["queue"]),
+            "--stage02",
+            str(fx["db"]),
+            "--output",
+            str(tmp_path / "out.sqlite"),
+            "--checkpoint",
+            str(tmp_path / "ckpt.json"),
+            "--generated-license",
+            "CC BY-SA",
+            "--live-selection",
+            str(fx["sel_path"]),
+        ]
+    )
+    assert rc == 1
+    assert "--live-openai-responses" in capsys.readouterr().err
+
+
+def _cli_base_args(fx: dict[str, object], tmp_path: Path, tag: str) -> list[str]:
+    return [
+        "--queue",
+        str(fx["queue"]),
+        "--stage02",
+        str(fx["db"]),
+        "--output",
+        str(tmp_path / f"{tag}-out.sqlite"),
+        "--checkpoint",
+        str(tmp_path / f"{tag}-ckpt.json"),
+        "--generated-license",
+        "CC BY-SA",
+    ]
+
+
+def _cli_live_args(fx: dict[str, object], tmp_path: Path, tag: str) -> list[str]:
+    return _cli_base_args(fx, tmp_path, tag) + [
+        "--live-openai-responses",
+        "--live-selection",
+        str(fx["sel_path"]),
+        "--live-selection-sha",
+        str(fx["sel_sha"]),
+        "--expected-queue-sha",
+        str(fx["queue_sha"]),
+        "--expected-queue-bytes",
+        str(fx["queue_bytes"]),
+        "--authorized-request-sha",
+        str(fx["req_sha"]),
+        "--authorized-batch-equivalence-sha",
+        str(fx["batch_sha"]),
+        "--live-cost-plan",
+        str(fx["cost_path"]),
+        "--live-cost-plan-sha",
+        str(fx["cost_sha"]),
+        "--live-subset-queue",
+        str(tmp_path / f"{tag}-subset.json"),
+        "--live-hard-spend-cap-usd",
+        "0.45",
+        "--live-bulk-input-price-per-mtok",
+        "0.20",
+        "--live-bulk-output-price-per-mtok",
+        "1.20",
+        "--live-qa-input-price-per-mtok",
+        "2.00",
+        "--live-qa-output-price-per-mtok",
+        "12.00",
+        "--live-input-safety-multiplier",
+        "2.0",
+        "--approved-bulk-model",
+        STAGE04_DEFAULT_BULK_DE_MODEL,
+        "--approved-qa-model",
+        STAGE04_DEFAULT_QA_MODEL,
+        "--live-timeout-seconds",
+        "5",
+    ]
+
+
+def test_cli_live_preflight_stops_at_credential_boundary_no_side_effects(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Full live preflight passes on correct artifacts, then stops at key read."""
+    fx = _build_live_fixture(tmp_path)
+    rc = main(["stage04", *_cli_live_args(fx, tmp_path, "boundary")])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "missing or blank" in err
+    ckpt = tmp_path / "boundary-ckpt.json"
+    out = tmp_path / "boundary-out.sqlite"
+    subset = tmp_path / "boundary-subset.json"
+    assert not ckpt.exists(), "credential boundary must precede any checkpoint creation"
+    assert not out.exists()
+    assert subset.exists(), "fences run before the credential boundary and derive the subset"
+    subset_ids = [rec["item_id"] for rec in json.loads(subset.read_text(encoding="utf-8"))["items"]]
+    assert sorted(subset_ids, key=lambda s: s.encode()) == fx["sel_ids"]
+
+
+def _key_read_probe(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    probes = {"reads": 0}
+
+    def _boom() -> str:
+        probes["reads"] += 1
+        raise AssertionError("OPENAI_API_KEY must not be read before preflight passes")
+
+    monkeypatch.setattr(bd, "_read_openai_api_key", _boom)
+    return probes
+
+
+def test_live_activation_requires_exact_selection_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx = _build_live_fixture(tmp_path)
+    probes = _key_read_probe(monkeypatch)
+    with pytest.raises(BuildDictError, match="Canary SHA mismatch"):
+        _prepare_live(fx, tmp_path, "badsel", expected_selection_sha="0" * 64)
+    assert probes["reads"] == 0
+
+
+def test_live_mode_requires_exactly_50_unique_frozen_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx = _build_live_fixture(tmp_path)
+    probes = _key_read_probe(monkeypatch)
+
+    records = json.loads(Path(str(fx["sel_path"])).read_text(encoding="utf-8"))
+    short_path = tmp_path / "short-selection.json"
+    short_path.write_bytes(
+        json.dumps(records[:49], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    )
+    with pytest.raises(BuildDictError, match="count != 50"):
+        prepare_stage04_live(
+            **_live_prepare_kwargs(
+                fx,
+                tmp_path,
+                "short",
+                selection_path=short_path,
+                expected_selection_sha=hashlib.sha256(short_path.read_bytes()).hexdigest(),
+            )
+        )
+
+    dup = list(records)
+    dup[1] = dict(dup[0])
+    dup_path = tmp_path / "dup-selection.json"
+    dup_bytes = json.dumps(dup, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    dup_path.write_bytes(dup_bytes)
+    with pytest.raises(BuildDictError):
+        prepare_stage04_live(
+            **_live_prepare_kwargs(
+                fx,
+                tmp_path,
+                "dup",
+                selection_path=dup_path,
+                expected_selection_sha=hashlib.sha256(dup_bytes).hexdigest(),
+            )
+        )
+    assert probes["reads"] == 0
+
+
+def test_selection_divergence_stops_before_key_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx = _build_live_fixture(tmp_path)
+    probes = _key_read_probe(monkeypatch)
+    records = json.loads(Path(str(fx["sel_path"])).read_text(encoding="utf-8"))
+    tampered = json.loads(json.dumps(records))
+    tampered[7]["derivation_inputs"][0]["text"] = (
+        str(tampered[7]["derivation_inputs"][0]["text"]) + " mutated"
+    )
+    path = tmp_path / "tampered-selection.json"
+    blob = json.dumps(tampered, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    path.write_bytes(blob)
+    with pytest.raises(BuildDictError, match="diverge from queue"):
+        prepare_stage04_live(
+            **_live_prepare_kwargs(
+                fx,
+                tmp_path,
+                "tamp",
+                selection_path=path,
+                expected_selection_sha=hashlib.sha256(blob).hexdigest(),
+            )
+        )
+    assert probes["reads"] == 0
+
+
+def test_request_sha_mismatch_stops_before_key_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx = _build_live_fixture(tmp_path)
+    probes = _key_read_probe(monkeypatch)
+    with pytest.raises(BuildDictError, match="STOP BEFORE KEY READ.*request SHA"):
+        _prepare_live(fx, tmp_path, "reqsha", authorized_request_sha="f" * 64)
+    assert probes["reads"] == 0
+
+
+def test_batch_equivalence_sha_mismatch_stops_before_key_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx = _build_live_fixture(tmp_path)
+    probes = _key_read_probe(monkeypatch)
+    with pytest.raises(BuildDictError, match="STOP BEFORE KEY READ"):
+        _prepare_live(fx, tmp_path, "batsha", authorized_batch_equivalence_sha="e" * 64)
+    assert probes["reads"] == 0
+
+
+def test_cost_plan_mismatches_stop_before_key_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx = _build_live_fixture(tmp_path)
+    probes = _key_read_probe(monkeypatch)
+
+    def cost_variant(mutator) -> tuple[Path, str]:  # type: ignore[no-untyped-def]
+        doc = json.loads(Path(str(fx["cost_path"])).read_text(encoding="utf-8"))
+        mutator(doc)
+        blob = _canonical_line(doc).encode("utf-8")
+        path = tmp_path / f"cost-{abs(hash(blob))}.json"
+        path.write_bytes(blob)
+        return path, hashlib.sha256(blob).hexdigest()
+
+    # wrong artifact SHA supplied
+    with pytest.raises(BuildDictError, match="cost plan SHA mismatch"):
+        _prepare_live(fx, tmp_path, "cpsha", cost_plan_sha="a" * 64)
+    # unknown item id
+    p, s = cost_variant(lambda d: d["items"][3].update({"item_id": "queue:v2:alien"}))
+    with pytest.raises(BuildDictError, match="item IDs"):
+        _prepare_live(fx, tmp_path, "cpid", cost_plan_path=p, cost_plan_sha=s)
+    # negative estimate
+    p, s = cost_variant(lambda d: d["items"][5].update({"bulk_input_tokens": -4}))
+    with pytest.raises(BuildDictError, match="nonnegative"):
+        _prepare_live(fx, tmp_path, "cpneg", cost_plan_path=p, cost_plan_sha=s)
+    # boolean estimate rejected
+    p, s = cost_variant(lambda d: d["items"][6].update({"qa_bound_input_tokens": True}))
+    with pytest.raises(BuildDictError, match="nonnegative"):
+        _prepare_live(fx, tmp_path, "cpbool", cost_plan_path=p, cost_plan_sha=s)
+    # aggregate mismatch vs recorded items
+    p, s = cost_variant(lambda d: d.update({"aggregate_bulk_input_tokens": 12}))
+    with pytest.raises(BuildDictError, match="aggregate mismatch"):
+        _prepare_live(fx, tmp_path, "cpagg", cost_plan_path=p, cost_plan_sha=s)
+    # frozen canary contract aggregates not satisfied
+    doc = json.loads(Path(str(fx["cost_path"])).read_text(encoding="utf-8"))
+    doc["items"] = [
+        {**rec, "bulk_input_tokens": rec["bulk_input_tokens"] + 1} for rec in doc["items"]
+    ]
+    doc["aggregate_bulk_input_tokens"] += 50
+    blob = _canonical_line(doc).encode("utf-8")
+    p = tmp_path / "cost-shifted.json"
+    p.write_bytes(blob)
+    with pytest.raises(BuildDictError, match="frozen German-canary contract"):
+        _prepare_live(
+            fx, tmp_path, "cpfrozen", cost_plan_path=p, cost_plan_sha=hashlib.sha256(blob).hexdigest()
+        )
+    assert probes["reads"] == 0
+
+
+def _minimal_transport(tmp_path: Path, opener: object, **overrides: object) -> OpenAILiveResponsesTransport:
+    kwargs: dict[str, object] = {
+        "api_key": LIVE_TEST_KEY,
+        "bulk_bodies": {},
+        "item_records": {},
+        "token_estimates": {},
+        "hard_cap_usd": Decimal("0.45"),
+        "bulk_input_price_per_mtok": Decimal("0.20"),
+        "bulk_output_price_per_mtok": Decimal("1.20"),
+        "qa_input_price_per_mtok": Decimal("2.00"),
+        "qa_output_price_per_mtok": Decimal("12.00"),
+        "input_safety_multiplier": Decimal("2"),
+        "qa_model": STAGE04_DEFAULT_QA_MODEL,
+        "spend_state": _empty_spend_state({"k": "v"}),
+        "timeout_seconds": 5,
+        "opener": opener,
+    }
+    kwargs.update(overrides)
+    return OpenAILiveResponsesTransport(**kwargs)  # type: ignore[arg-type]
+
+
+def test_missing_or_blank_key_stops_before_http(tmp_path: Path) -> None:
+    for bad_key in ("", "   ", '"sk-wrapped"', "'x'"):
+        opener = FakeLiveOpener([])
+        with pytest.raises(BuildDictError, match="missing or blank"):
+            _minimal_transport(tmp_path, opener, api_key=bad_key)
+    opener = FakeLiveOpener([AssertionError("must never transmit")])
+    transport = _minimal_transport(tmp_path, opener)
+    with pytest.raises(BuildDictError):
+        transport.send_bulk(["whatever"])
+    assert opener.calls == []
+
+
+def test_fixed_endpoint_and_no_configurable_credential_destination(tmp_path: Path) -> None:
+    assert STAGE04_LIVE_RESPONSES_URL == "https://api.openai.com/v1/responses"
+    params = set(inspect.signature(OpenAILiveResponsesTransport.__init__).parameters)
+    assert not params & {"endpoint", "url", "base_url", "host", "api_base", "api_url"}
+    opener = FakeLiveOpener([])
+    with pytest.raises(TypeError):
+        _minimal_transport(tmp_path, opener, endpoint="http://127.0.0.1:9/v1")  # type: ignore[call-arg]
+    transport = _minimal_transport(
+        tmp_path,
+        FakeLiveOpener([FakeLiveResponse(env=_completed_env())]),
+        bulk_bodies={"i": {"model": "m"}},
+        token_estimates={("bulk", "i"): 100},
+    )
+    assert transport.endpoint == STAGE04_LIVE_RESPONSES_URL
+    transport.pretransmission_reserve("bulk", ["i"])
+    transport.send_bulk(["i"])
+
+
+def test_transmitted_body_is_exact_authorized_logical_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx = _build_live_fixture(tmp_path)
+    first_id = fx["sel_ids"][0]  # type: ignore[index]
+    opener = FakeLiveOpener([FakeLiveResponse(env=_completed_env()), ConnectionResetError("stop")])
+    plan = _prepare_live(fx, tmp_path, "body")
+    with pytest.raises(BuildDictError):
+        _execute_live(plan, fx, opener)
+    assert len(opener.calls) == 2  # unit 1 completed; unit 2 attempted once, ambiguous
+    call = opener.calls[0]
+    assert call["url"] == STAGE04_LIVE_RESPONSES_URL
+    assert call["method"] == "POST"
+    assert call["timeout"] == 5
+    expected_body = plan.bulk_bodies[first_id]
+    assert _canonical_line(json.loads(call["data"])) == _canonical_line(expected_body)
+    # canonical compact serialization of the exact logical body object
+    assert call["data"] == _canonical_line(expected_body).encode("utf-8")
+    probes = _key_read_probe(monkeypatch)
+    assert probes["reads"] == 0
+
+
+def test_authorization_header_built_but_never_logged_or_persisted(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path)
+    outcomes: list[object] = [FakeLiveResponse(env=_completed_env())]
+    outcomes.append(ConnectionResetError("ambiguous after first"))
+    opener = FakeLiveOpener(outcomes)
+    plan = _prepare_live(fx, tmp_path, "hdr")
+    with pytest.raises(BuildDictError):
+        _execute_live(plan, fx, opener)
+    headers = opener.calls[0]["headers"]
+    assert headers["authorization"] == f"Bearer {LIVE_TEST_KEY}"
+    ckpt_bytes = plan.checkpoint_path.read_bytes()
+    assert LIVE_TEST_KEY.encode() not in ckpt_bytes
+    subset_bytes = plan.subset_queue_path.read_bytes()
+    assert LIVE_TEST_KEY.encode() not in subset_bytes
+
+
+def test_transport_repr_never_contains_credential(tmp_path: Path) -> None:
+    transport = _minimal_transport(tmp_path, FakeLiveOpener([]))
+    rendered = repr(transport)
+    assert LIVE_TEST_KEY not in rendered
+    assert STAGE04_LIVE_RESPONSES_URL in rendered
+
+
+def _run_first_unit_failure(fx: dict[str, object], tmp_path: Path, tag: str, outcome: object):  # type: ignore[no-untyped-def]
+    opener = FakeLiveOpener([outcome, AssertionError("no further calls allowed")])
+    plan = _prepare_live(fx, tmp_path, tag)
+    with pytest.raises(BuildDictError):
+        _execute_live(plan, fx, opener)
+    return plan, opener
+
+
+def test_successful_completed_structured_response_parsed_and_persisted(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path)
+    opener = _happy_opener(52)
+    plan = _prepare_live(fx, tmp_path, "happy")
+    summary = _execute_live(plan, fx, opener)
+    assert summary["bulk_completed"] == 50
+    assert summary["qa_completed"] == 2
+    state = _read_state(plan.checkpoint_path)
+    bulk_completed = state["bulk"]["completed"]  # type: ignore[index]
+    assert len(bulk_completed) == 50
+    sample = bulk_completed[fx["sel_ids"][0]]  # type: ignore[index]
+    assert sample["text"] == "ein schlichtes Gebäude"
+    assert sample["kind"] == "definition"
+    assert sample["source"] == GENERATED_MARKER
+    assert sample["license"] == "CC BY-SA"
+    assert state["bulk"]["in_flight"] == []  # type: ignore[index]
+    assert state["qa"]["in_flight"] == []  # type: ignore[index]
+    entries = state["spend"]["entries"]  # type: ignore[index]
+    assert len(entries) == 52
+    assert all(e["accounting"] == "ACTUAL" for e in entries)
+    out = sqlite3.connect(plan.checkpoint_path.parent / "happy-checkpoint-out.sqlite")
+    rows = out.execute(
+        "SELECT COUNT(*) FROM sense_meaning WHERE source=?", (GENERATED_MARKER,)
+    ).fetchone()[0]
+    out.close()
+    assert rows == 50
+
+
+def test_reasoning_item_coexists_without_exposure(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path)
+    hidden = "SECRET-REASONING-CHAIN-CONTENT-XYZ"
+    output = [
+        {"type": "reasoning", "summary": [{"type": "summary_text", "text": hidden}]},
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": json.dumps({"meaning": "kurz und klar", "kind": "synonym"}),
+                }
+            ],
+        },
+    ]
+    env = _completed_env(output=output)
+    blob = json.dumps(env)
+    assert hidden in blob
+    opener = FakeLiveOpener([FakeLiveResponse(env=env), ConnectionResetError("stop")])
+    plan = _prepare_live(fx, tmp_path, "reasoning")
+    with pytest.raises(BuildDictError):
+        _execute_live(plan, fx, opener)
+    state = _read_state(plan.checkpoint_path)
+    completed = state["bulk"]["completed"]  # type: ignore[index]
+    assert list(completed.values())[0]["text"] == "kurz und klar"  # type: ignore[index]
+    ckpt_bytes = plan.checkpoint_path.read_bytes()
+    assert hidden.encode() not in ckpt_bytes
+
+
+def test_missing_output_text_fails_closed_durable(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path)
+    # Usage unavailable takes precedence and rejects fail-closed.
+    plan, opener = _run_first_unit_failure(
+        fx,
+        tmp_path,
+        "missingtext",
+        FakeLiveResponse(env=_completed_env(output=[], usage=None)),
+    )
+    assert len(opener.calls) == 1
+    state = _read_state(plan.checkpoint_path)
+    rejected = state["bulk"]["rejected"]  # type: ignore[index]
+    first_id = fx["sel_ids"][0]  # type: ignore[index]
+    assert (
+        rejected[first_id]["error_code"] == "provider_usage_unavailable"  # type: ignore[index]
+    )
+    assert state["bulk"]["in_flight"] == []  # type: ignore[index]
+    entries = state["spend"]["entries"]  # type: ignore[index]
+    assert len(entries) == 1
+    assert entries[0]["accounting"] == "WORST_CASE_RESERVED"
+
+    # With valid usage but no usable output_text payload: durable rejection,
+    # actual charge accounted, STOP.
+    fx2 = _build_live_fixture(tmp_path / "mt2")
+    plan2, opener2 = _run_first_unit_failure(
+        fx2,
+        tmp_path / "mt2",
+        "missingtext2",
+        FakeLiveResponse(env=_completed_env(output=[])),
+    )
+    assert len(opener2.calls) == 1
+    state2 = _read_state(plan2.checkpoint_path)
+    first_id2 = fx2["sel_ids"][0]  # type: ignore[index]
+    assert (
+        state2["bulk"]["rejected"][first_id2]["error_code"] == "missing_output_text"  # type: ignore[index]
+    )
+    entry = state2["spend"]["entries"][0]  # type: ignore[index]
+    assert entry["accounting"] == "ACTUAL"
+    assert Decimal(entry["charge_usd"]) == Decimal("0.000068")
+
+
+def test_multiple_output_text_fails_closed_durable(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path)
+    text = json.dumps({"meaning": "eins", "kind": "definition"})
+    output = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text}, {"type": "output_text", "text": text}],
+        }
+    ]
+    plan, opener = _run_first_unit_failure(
+        fx, tmp_path, "multitext", FakeLiveResponse(env=_completed_env(output=output))
+    )
+    assert len(opener.calls) == 1
+    state = _read_state(plan.checkpoint_path)
+    first_id = fx["sel_ids"][0]  # type: ignore[index]
+    assert (
+        state["bulk"]["rejected"][first_id]["error_code"] == "multiple_output_text"  # type: ignore[index]
+    )
+
+
+def test_malformed_json_output_fails_closed(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path)
+    output = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "{not-json"}],
+        }
+    ]
+    plan, _opener = _run_first_unit_failure(
+        fx, tmp_path, "badjson", FakeLiveResponse(env=_completed_env(output=output))
+    )
+    state = _read_state(plan.checkpoint_path)
+    first_id = fx["sel_ids"][0]  # type: ignore[index]
+    assert state["bulk"]["rejected"][first_id]["error_code"] == "malformed_output_json"  # type: ignore[index]
+
+
+def test_non_object_output_fails_closed(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path)
+    output = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": '["array-not-object"]'}],
+        }
+    ]
+    plan, _opener = _run_first_unit_failure(
+        fx, tmp_path, "notobj", FakeLiveResponse(env=_completed_env(output=output))
+    )
+    state = _read_state(plan.checkpoint_path)
+    first_id = fx["sel_ids"][0]  # type: ignore[index]
+    assert state["bulk"]["rejected"][first_id]["error_code"] == "output_not_object"  # type: ignore[index]
+
+
+def test_provider_status_incomplete_fails_closed_via_live_transport(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path)
+    env = _completed_env(
+        status="incomplete",
+        incomplete={"reason": "max_output_tokens"},
+        usage=(300, 512, 400),
+    )
+    plan, opener = _run_first_unit_failure(fx, tmp_path, "incomplete", FakeLiveResponse(env=env))
+    assert len(opener.calls) == 1
+    state = _read_state(plan.checkpoint_path)
+    first_id = fx["sel_ids"][0]  # type: ignore[index]
+    assert (
+        state["bulk"]["rejected"][first_id]["error_code"] == "incomplete_max_output_tokens"  # type: ignore[index]
+    )
+    entry = state["spend"]["entries"][0]  # type: ignore[index]
+    assert entry["accounting"] == "ACTUAL"
+    assert entry["reported_output_tokens"] == 512
+
+    fx2 = _build_live_fixture(tmp_path / "failed")
+    env2 = _completed_env(status="failed", usage=None)
+    plan2, opener2 = _run_first_unit_failure(fx2, tmp_path / "failed", "failed", FakeLiveResponse(env=env2))
+    assert len(opener2.calls) == 1
+    state2 = _read_state(plan2.checkpoint_path)
+    first_id2 = fx2["sel_ids"][0]  # type: ignore[index]
+    assert (
+        state2["bulk"]["rejected"][first_id2]["error_code"] == "provider_status_failed"  # type: ignore[index]
+    )
+    assert state2["spend"]["entries"][0]["accounting"] == "WORST_CASE_RESERVED"  # type: ignore[index]
+
+
+def test_usage_accounted_as_actual_charge_persisted(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path)
+    opener = FakeLiveOpener([FakeLiveResponse(env=_completed_env()), ConnectionResetError("stop")])
+    plan = _prepare_live(fx, tmp_path, "usage")
+    with pytest.raises(BuildDictError):
+        _execute_live(plan, fx, opener)
+    state = _read_state(plan.checkpoint_path)
+    entries = state["spend"]["entries"]  # type: ignore[index]
+    assert len(entries) == 2
+    entry = entries[0]
+    expected_charge = (Decimal(100) * Decimal("0.20") + Decimal(40) * Decimal("1.20")) / Decimal(
+        1000000
+    )
+    assert Decimal(entry["charge_usd"]) == expected_charge
+    assert entry["charge_usd"] == "0.000068"
+    assert entry["cumulative_usd"] == "0.000068"
+    assert entry["accounting"] == "ACTUAL"
+    assert entry["response_id"] == "resp_live_test_1"
+    assert entry["reported_input_tokens"] == 100
+    assert entry["reported_output_tokens"] == 40
+    assert entry["reported_reasoning_tokens"] == 10
+    assert entry["phase"] == "bulk"
+    second_id = fx["sel_ids"][1]  # type: ignore[index]
+    assert entries[1]["item_id"] == second_id
+    assert entries[1]["accounting"] == "WORST_CASE_RESERVED"
+    worst_second = stage04_worst_case_request_cost_usd_decimal(
+        int(fx["bulk_ests"][second_id]),  # type: ignore[index]
+        STAGE04_MAX_OUTPUT_TOKENS,
+        Decimal("0.20"),
+        Decimal("1.20"),
+        Decimal("2"),
+    )
+    assert Decimal(entries[1]["charge_usd"]) == worst_second
+    assert (
+        Decimal(entries[1]["cumulative_usd"])  # type: ignore[index]
+        == Decimal("0.000068") + worst_second
+    )
+
+
+def test_missing_usage_reserves_worst_case_and_stops(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path)
+    env = _completed_env(usage=None)
+    plan, opener = _run_first_unit_failure(fx, tmp_path, "nousage", FakeLiveResponse(env=env))
+    assert len(opener.calls) == 1
+    state = _read_state(plan.checkpoint_path)
+    first_id = fx["sel_ids"][0]  # type: ignore[index]
+    assert (
+        state["bulk"]["rejected"][first_id]["error_code"] == "provider_usage_unavailable"  # type: ignore[index]
+    )
+    entry = state["spend"]["entries"][0]  # type: ignore[index]
+    est = fx["bulk_ests"][first_id]  # type: ignore[index]
+    expected_worst = stage04_worst_case_request_cost_usd_decimal(
+        int(est), STAGE04_MAX_OUTPUT_TOKENS, Decimal("0.20"), Decimal("1.20"), Decimal("2")
+    )
+    assert Decimal(entry["charge_usd"]) == expected_worst
+    assert entry["accounting"] == "WORST_CASE_RESERVED"
+
+
+def test_malformed_envelope_fails_closed_with_reservation(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path)
+    plan, _opener = _run_first_unit_failure(
+        fx, tmp_path, "malformedenv", FakeLiveResponse(raw=b"{not a json envelope")
+    )
+    state = _read_state(plan.checkpoint_path)
+    first_id = fx["sel_ids"][0]  # type: ignore[index]
+    assert (
+        state["bulk"]["rejected"][first_id]["error_code"] == "invalid_response_envelope"  # type: ignore[index]
+    )
+    assert state["spend"]["entries"][0]["accounting"] == "WORST_CASE_RESERVED"  # type: ignore[index]
+
+
+AMBIGUOUS_OUTCOMES = {
+    "timeout": TimeoutError("timed out"),
+    "urlerror": urllib.error.URLError("connection refused"),
+    "http429": urllib.error.HTTPError(STAGE04_LIVE_RESPONSES_URL, 429, "Too Many Requests", {}, None),  # type: ignore[arg-type]
+    "http500": urllib.error.HTTPError(STAGE04_LIVE_RESPONSES_URL, 500, "Server Error", {}, None),  # type: ignore[arg-type]
+    "reset": ConnectionResetError("reset by peer"),
+    "eof_mid_read": FakeLiveResponse(env=_completed_env(), fail_read=True),
+}
+
+
+@pytest.mark.parametrize("scenario", sorted(AMBIGUOUS_OUTCOMES.keys()))
+def test_ambiguous_outcomes_preserve_in_flight_zero_retries(
+    tmp_path: Path, scenario: str
+) -> None:
+    fx = _build_live_fixture(tmp_path / f"amb-{scenario}")
+    outcome: object = AMBIGUOUS_OUTCOMES[scenario]
+    plan, opener = _run_first_unit_failure(fx, tmp_path / f"amb-{scenario}", scenario, outcome)
+    assert len(opener.calls) == 1
+    state = _read_state(plan.checkpoint_path)
+    first_id = fx["sel_ids"][0]  # type: ignore[index]
+    assert state["bulk"]["in_flight"] == [first_id]  # type: ignore[index]
+    entries = state["spend"]["entries"]  # type: ignore[index]
+    assert len(entries) == 1
+    assert entries[0]["accounting"] == "WORST_CASE_RESERVED"
+
+
+def test_redirect_is_not_followed(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path / "redir")
+    redirect = urllib.error.HTTPError(STAGE04_LIVE_RESPONSES_URL, 301, "Moved", {"Location": "https://evil.example/v1/responses"}, None)  # type: ignore[arg-type]
+    opener = FakeLiveOpener([redirect, AssertionError("redirect must never be followed")])
+    plan = _prepare_live(fx, tmp_path / "redir", "redirect")
+    with pytest.raises(BuildDictError):
+        _execute_live(plan, fx, opener)
+    assert len(opener.calls) == 1
+    state = _read_state(plan.checkpoint_path)
+    first_id = fx["sel_ids"][0]  # type: ignore[index]
+    assert state["bulk"]["in_flight"] == [first_id]  # type: ignore[index]
+
+
+def test_item_outside_authorization_cannot_transmit(tmp_path: Path) -> None:
+    opener = FakeLiveOpener([])
+    transport = _minimal_transport(tmp_path, opener)
+    with pytest.raises(BuildDictError, match="outside the authorized live selection"):
+        transport.send_bulk(["queue:v2:not-in-frozen-50"])
+    with pytest.raises(BuildDictError, match="outside the authorized live selection"):
+        transport.pretransmission_reserve("qa", ["queue:v2:not-in-frozen-50"])
+    assert opener.calls == []
+
+
+def test_pretransmission_guard_blocks_over_cap_before_http(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx = _build_live_fixture(tmp_path)
+    probes = _key_read_probe(monkeypatch)
+    opener = FakeLiveOpener([AssertionError("no HTTP allowed past the guard")])
+    plan = _prepare_live(fx, tmp_path, "guard", hard_spend_cap_usd="0.000001")
+    with pytest.raises(Stage04PretransmissionBlocked):
+        _execute_live(plan, fx, opener)
+    assert opener.calls == []
+    state = _read_state(plan.checkpoint_path)
+    assert state["bulk"]["in_flight"] == []  # type: ignore[index]
+    assert state["spend"]["entries"] == []  # type: ignore[index]
+    assert probes["reads"] == 0
+
+
+def test_restart_preserves_cumulative_spend_and_constrains_cap(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path)
+    first_id = fx["sel_ids"][0]  # type: ignore[index]
+    est_first = int(fx["bulk_ests"][first_id])  # type: ignore[index]
+    worst_first = stage04_worst_case_request_cost_usd_decimal(
+        est_first, STAGE04_MAX_OUTPUT_TOKENS, Decimal("0.20"), Decimal("1.20"), Decimal("2")
+    )
+    cap = worst_first + (worst_first / Decimal(2))
+
+    # Run 1: first request admitted and completed; second admitted (reserved),
+    # transmission ambiguous => reservation stands; process stops.
+    outcomes: list[object] = [
+        FakeLiveResponse(env=_completed_env()),
+        FakeLiveResponse(env=_completed_env()),
+        ConnectionResetError("ambiguous"),
+        AssertionError("no further calls"),
+    ]
+    plan1 = _prepare_live(fx, tmp_path, "restart", hard_spend_cap_usd=_decimal_to_wire(cap))
+    with pytest.raises(BuildDictError):
+        _execute_live(plan1, fx, FakeLiveOpener(outcomes))
+    state1 = _read_state(plan1.checkpoint_path)
+    persisted_spend = _spend_total_usd(_validate_spend_state(state1["spend"]))  # type: ignore[index]
+
+    # Restart simulation: fresh ledger loaded from disk must reproduce exactly
+    # the recorded cumulative spend.
+    reloaded = _empty_spend_state({"k": "v"})
+    reloaded["entries"] = json.loads(json.dumps(state1["spend"]["entries"]))  # type: ignore[index]
+    assert _spend_total_usd(_validate_spend_state(reloaded)) == persisted_spend
+    assert persisted_spend > Decimal(0)
+
+    # A restarted transport constrained by the same cap admits strictly fewer
+    # further reservations than an empty-ledger transport would.
+    def count_admissible(spend_state: dict[str, object]) -> int:
+        t = _minimal_transport(
+            tmp_path,
+            FakeLiveOpener([]),
+            hard_cap_usd=cap,
+            spend_state=spend_state,
+            token_estimates={("bulk", f"i{n}"): 100 for n in range(50)},
+        )
+        admitted = 0
+        try:
+            while True:
+                t.pretransmission_reserve("bulk", [f"i{admitted}"])
+                admitted += 1
+        except Stage04PretransmissionBlocked:
+            return admitted
+
+    empty_admissible = count_admissible(_empty_spend_state({"k": "v"}))
+    restarted_admissible = count_admissible(reloaded)
+    assert restarted_admissible < empty_admissible
+
+
+def test_bulk_and_qa_share_the_same_hard_cap(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path)
+    first_id = fx["sel_ids"][0]  # type: ignore[index]
+    bulk_actual = (Decimal(100) * Decimal("0.20") + Decimal(40) * Decimal("1.20")) / Decimal(
+        1000000
+    )
+    qa_worst = stage04_worst_case_request_cost_usd_decimal(
+        int(fx["qa_ests"][first_id]),  # type: ignore[index]
+        STAGE04_MAX_OUTPUT_TOKENS,
+        Decimal("2.00"),
+        Decimal("12.00"),
+        Decimal("2"),
+    )
+    cap = bulk_actual + (qa_worst * Decimal("4") / Decimal(10))
+    spend = _empty_spend_state({"auth": "live"})
+    opener = FakeLiveOpener([FakeLiveResponse(env=_completed_env()), AssertionError("QA blocked")])
+    transport = _minimal_transport(
+        tmp_path,
+        opener,
+        hard_cap_usd=cap,
+        spend_state=spend,
+        token_estimates={
+            ("bulk", str(first_id)): int(fx["bulk_ests"][first_id]),  # type: ignore[index]
+            ("qa", str(first_id)): int(fx["qa_ests"][first_id]),  # type: ignore[index]
+        },
+        item_records={},
+        bulk_bodies={str(first_id): {"model": "m"}},
+        qa_model=STAGE04_DEFAULT_QA_MODEL,
+    )
+    transport.pretransmission_reserve("bulk", [str(first_id)])
+    transport.qa_candidate_lookup[str(first_id)] = "Kandidat"
+    transport.send_bulk([str(first_id)])
+    assert len(opener.calls) == 1
+    with pytest.raises(Stage04PretransmissionBlocked):
+        transport.pretransmission_reserve("qa", [str(first_id)])
+    assert len(opener.calls) == 1, "blocked QA request must never be transmitted"
+
+
+def test_classification_change_invalidates_live_checkpoint(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path)
+    plan1 = _prepare_live(fx, tmp_path, "clsA")
+    ckpt = plan1.checkpoint_path
+    with pytest.raises(BuildDictError):
+        _execute_live(plan1, fx, FakeLiveOpener([FakeLiveResponse(env=_completed_env())]))
+    assert ckpt.exists()
+    plan2 = _prepare_live(
+        fx, tmp_path, "clsB", checkpoint_path=ckpt, generated_license="CC0-1.0"
+    )
+    tripwire_opener = FakeLiveOpener([AssertionError("incompatible must not transmit")])
+    with pytest.raises(BuildDictError, match="incompatible"):
+        _execute_live(plan2, fx, tripwire_opener)
+    assert tripwire_opener.calls == []
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"hard_spend_cap_usd": "0.46"},
+        {"bulk_input_price_per_mtok": "0.21"},
+        {"input_safety_multiplier": "2.5"},
+    ],
+)
+def test_authorization_input_change_invalidates_live_checkpoint(
+    tmp_path: Path, override: dict[str, str]
+) -> None:
+    fx = _build_live_fixture(tmp_path)
+    plan1 = _prepare_live(fx, tmp_path, "authA")
+    ckpt = plan1.checkpoint_path
+    with pytest.raises(BuildDictError):
+        _execute_live(plan1, fx, FakeLiveOpener([FakeLiveResponse(env=_completed_env())]))
+    plan2 = _prepare_live(fx, tmp_path, "authB", checkpoint_path=ckpt, **override)  # type: ignore[arg-type]
+    tripwire_opener = FakeLiveOpener([AssertionError("incompatible must not transmit")])
+    with pytest.raises(BuildDictError, match="incompatible"):
+        _execute_live(plan2, fx, tripwire_opener)
+    assert tripwire_opener.calls == []
+
+
+def test_historical_persian_checkpoint_untouched_by_live_path(tmp_path: Path) -> None:
+    legacy_identity = {
+        "format": "flashcard-stage04-checkpoint-v2",
+        "queue_sha256": "legacy-queue",
+        "generation_marker": "llm_generated_v1",
+        "generated_license": "AI_GENERATED_FROM_WIKTIONARY_ATTRIBUTED_v1",
+        "bulk_de_model": "gpt-5.6-luna",
+        "bulk_en_model": "gpt-5.6-luna",
+        "qa_model": "gpt-5.6-terra",
+        "bulk_pipeline_version": "stage04-bulk-v1",
+        "qa_pipeline_version": "stage04-qa-v1",
+        "response_schema_version": "openai-responses-json-schema-v1",
+    }
+    legacy_ids = ["enrichment-job:v1:a", "enrichment-job:v1:b"]
+    legacy = {
+        "format": "flashcard-stage04-checkpoint-v2",
+        "identity": legacy_identity,
+        "bulk": {"completed": {}, "rejected": {}, "in_flight": legacy_ids},
+        "qa": {"required": [], "completed": {}, "rejected": {}, "in_flight": []},
+        "manifests": [],
+    }
+    workdir = tmp_path / "legacy"
+    workdir.mkdir()
+    legacy_path = workdir / "legacy-checkpoint.json"
+    legacy_bytes = json.dumps(legacy, sort_keys=True).encode("utf-8")
+    legacy_path.write_bytes(legacy_bytes)
+
+    fx = _build_live_fixture(workdir)
+    plan = _prepare_live(fx, workdir, "legacyrun", checkpoint_path=legacy_path)
+    tripwire_opener = FakeLiveOpener([AssertionError("legacy must never transmit")])
+    with pytest.raises(BuildDictError):
+        _execute_live(plan, fx, tripwire_opener)
+    assert tripwire_opener.calls == []
+    assert legacy_path.read_bytes() == legacy_bytes
+    current_identity = dict(
+        _checkpoint_identity(
+            "q",
+            GENERATED_MARKER,
+            "CC BY-SA",
+            STAGE04_DEFAULT_BULK_DE_MODEL,
+            STAGE04_DEFAULT_BULK_EN_MODEL,
+            STAGE04_DEFAULT_QA_MODEL,
+        )
+    )
+    with pytest.raises(BuildDictError, match="format"):
+        _load_checkpoint(legacy_path, current_identity)
+
+
+def test_live_serialization_format_pinned() -> None:
+    body = de_learner_meaning_request_body(
+        {
+            "lemma_text": "Ärzte",
+            "pos": "NOUN",
+            "gender": None,
+            "lemma_semantic_ref": "lemma:v1:x",
+            "sense_semantic_ref": "sense:v1:x",
+            "derivation_inputs": [{"text": "doctor", "source": "wiktionary"}],
+        },
+        STAGE04_DEFAULT_BULK_DE_MODEL,
+    )
+    line = _canonical_line({"body": body, "custom_id": "batch:i", "item_id": "i"})
+    parsed = json.loads(line)
+    assert set(parsed.keys()) == {"body", "custom_id", "item_id"}
+    assert parsed["body"] == body
+    # pinned compact key ordering (readiness artifact property)
+    assert line.startswith('{"body":')
+    assert '"custom_id":"batch:i"' in line
+    assert line.endswith('"item_id":"i"}')
+    assert "Ä" in line  # non-ASCII preserved raw (readiness artifact property)
+    batch_line = _canonical_line(
+        {"body": body, "custom_id": "batch:i", "method": "POST", "url": "/v1/responses"}
+    )
+    parsed_batch = json.loads(batch_line)
+    assert set(parsed_batch.keys()) == {"body", "custom_id", "method", "url"}
+    assert parsed_batch["method"] == "POST"
+    assert parsed_batch["url"] == "/v1/responses"
+    assert _canonical_line(parsed_batch["body"]) == _canonical_line(parsed["body"])
+
+
+def test_no_credential_in_any_error_string_or_artifact(tmp_path: Path) -> None:
+    fx = _build_live_fixture(tmp_path)
+    captured_errors: list[str] = []
+    for tag, outcome in (
+        ("leak1", ConnectionResetError("ambiguous")),
+        ("leak2", urllib.error.HTTPError(STAGE04_LIVE_RESPONSES_URL, 500, "boom", {}, None)),  # type: ignore[arg-type]
+    ):
+        opener = FakeLiveOpener([outcome, AssertionError("stop")])
+        plan = _prepare_live(fx, tmp_path, tag)
+        try:
+            _execute_live(plan, fx, opener)
+        except BuildDictError as exc:
+            captured_errors.append(str(exc))
+    transport_repr = repr(_minimal_transport(tmp_path, FakeLiveOpener([])))
+    artifacts = list((tmp_path).glob("*"))
+    blobs = b""
+    for path in artifacts:
+        if path.is_file():
+            blobs += path.read_bytes()
+    assert LIVE_TEST_KEY.encode() not in blobs
+    assert all(LIVE_TEST_KEY not in message for message in captured_errors)
+    assert LIVE_TEST_KEY not in transport_repr
+
+
+def test_no_real_provider_calls_in_entire_live_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fx = _build_live_fixture(tmp_path)
+    probes = {"urlopen": 0, "socket": 0}
+
+    def _no_urlopen(*args: object, **kwargs: object) -> object:
+        probes["urlopen"] += 1
+        raise AssertionError("real provider call attempted")
+
+    class _NoSocket:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("real socket attempted")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _no_urlopen)
+    monkeypatch.setattr(socket, "socket", _NoSocket)
+    monkeypatch.setattr(bd, "_read_openai_api_key", lambda: LIVE_TEST_KEY)
+    plan = _prepare_live(fx, tmp_path, "nonet")
+    summary = _execute_live(plan, fx, _happy_opener(52), key=LIVE_TEST_KEY)
+    assert summary["bulk_completed"] == 50
+    assert probes["urlopen"] == 0
+    assert probes["socket"] == 0

@@ -889,3 +889,170 @@ Batch hashes above must never be transmitted.
 **Disposition:** `CANARY_PAID_REQUEST_BOUNDS_REPAIR_COMPLETE`
 
 *No private absolute paths, no API keys, no credentials recorded.*
+
+---
+
+## ADR-0007 Live Responses transport activation — Attempt 1
+
+**Status:** ZERO-SPEND implementation of the missing live Stage-04 OpenAI
+Responses transport. The owner had already authorized the exact German Canary
+v3, but execution remained SUSPENDED because the accepted code had no real
+provider transport: the stage04 CLI invoked `build_stage04` without a transport
+argument, `transport` defaulted to `None`, pending work with `transport=None`
+failed closed ("No local deterministic Stage 04 transport configured"), and the
+only existing transports were fake/local test seams. This attempt repairs that
+defect without performing any provider call.
+
+**Provider calls:** `0`. **Paid spend this attempt:** `USD 0`.
+No credential was read, validated against a provider, or transmitted; no
+canary ran; execution authorization remains suspended pending the mandated T3
+full-diff review.
+
+### Explicit opt-in activation
+
+- New stage04 CLI flag `--live-openai-responses` plus required explicit
+  operational authorization arguments (selection artifact+SHA, accepted queue
+  SHA+bytes, authorized request SHA, authorized Batch-equivalence SHA,
+  cost-plan artifact+SHA, hard spend cap USD, bulk/QA input/output prices per
+  MTok, input safety multiplier, approved bulk/QA models, finite HTTP timeout).
+- Default behavior is unchanged and zero-network/zero-credential: without the
+  flag the CLI never reads `OPENAI_API_KEY`, never constructs a live transport,
+  and never contacts any host. Live authorization arguments supplied without
+  the flag fail closed.
+- Credential read boundary: every authorization artifact is SHA-verified by
+  `prepare_stage04_live` BEFORE `_read_openai_api_key()` runs (the only place
+  the project touches `OPENAI_API_KEY`). Missing/blank key stops before any
+  provider transmission. The key is never printed, logged, persisted, embedded
+  in exception text, included in checkpoints/reports/request artifacts, or
+  exposed via `repr`.
+
+### Provider endpoint / network security
+
+- Fixed endpoint constant `https://api.openai.com/v1/responses`; POST with
+  `Authorization: Bearer …` + `Content-Type: application/json`; verified-TLS
+  defaults; environment proxies explicitly emptied so the credential
+  destination is not configurable; no CLI/API-base override exists anywhere.
+- Redirects are never followed (declining redirect handler ⇒ HTTPError);
+  redirect responses are treated as ambiguous outcomes.
+- Exactly ONE transmission attempt per paid request: no retry wrappers, no
+  backoff, no automatic resends of 429/5xx/timeouts/EOF. Connection failure,
+  timeout, TLS failure, EOF, or any non-2xx outcome preserves `in_flight`,
+  keeps the conservative worst-case reservation, and STOPs.
+
+### Authorization fences (all BEFORE key read)
+
+- Frozen-selection fence: canonical selection re-read via the accepted
+  SHA-verifying reader (`_render_canary_receipt`), count == 50, 50 unique IDs,
+  each selected item resolved record-by-record against the byte-exact accepted
+  queue:v2 asset (streaming, bounded memory); missing/divergent records stop.
+- Working-set fence: live pending work is limited to exactly the 50 authorized
+  IDs by materializing a derived 50-item subset queue; the full 480221-item
+  queue can never become eligible for transmission.
+- Request-SHA fence: the 50 synchronous request bodies are regenerated through
+  the committed single-source builders and serialized in the readiness
+  artifact format; SHA must equal the authorized value or STOP.
+- Batch-equivalence fence: Batch-envelope bytes are re-materialized and their
+  SHA must equal the authorized value or STOP.
+- Cost-plan fence: maintainer-local cost plan must be SHA-exact, bound to the
+  same selection+request SHAs, cover exactly the 50 IDs, carry nonnegative
+  integer estimates, and match the frozen German-canary aggregates
+  (bulk `23996`, QA-bound `24546`).
+
+### Durable spend ledger and pre-transmission cap
+
+- Checkpoint-embedded ledger (`flashcard-stage04-spend-ledger-v1`) records, per
+  paid request: phase, item ID, provider response ID when known, reported
+  input/output/reasoning tokens, computed charge, cumulative chain, ACTUAL vs
+  WORST_CASE_RESERVED accounting, plus the full authorization mirror
+  (selection SHA, request SHA, cap, prices, multiplier). Corrupt ledgers fail
+  closed on load; restarts preserve cumulative spend; bulk and QA share the
+  single USD cap. Historical Persian spend remains separate and untouched.
+- Before EACH transmission the guard computes
+  `worst_case = safety × estimate × input_price + 512 × output_price` in exact
+  Decimal arithmetic and blocks (`recorded_or_reserved + worst_case > cap`)
+  BEFORE the unit's `in_flight` state is written — a blocked request leaves
+  zero checkpoint side effects. An admitted request persists its worst-case
+  reservation together with `in_flight` atomically before transmission.
+- Complete response + valid usage ⇒ reservation converts to ACTUAL charge at
+  authorized rates (output tokens include reasoning) atomically with the item
+  result. Complete response + missing/malformed usage ⇒ WORST_CASE_RESERVED
+  stands, durable rejection `provider_usage_unavailable`, STOP.
+
+### Response parsing (fail-closed)
+
+- Safe metadata recorded: response id, status, incomplete_details, usage
+  tokens (+ reasoning tokens when supplied).
+- Non-completed status and max_output_tokens exhaustion flow into the existing
+  durable rejected/incomplete state machine; partial JSON is never extracted.
+- Completed responses may carry provider reasoning items alongside the final
+  assistant message; exactly one usable assistant output_text payload is
+  required, parsed as JSON, required to be an object, then passed through the
+  existing strict deterministic candidate validation. Missing / multiple /
+  malformed / non-object payloads produce deterministic durable rejections
+  (`missing_output_text`, `multiple_output_text`, `malformed_output_json`,
+  `output_not_object`, `invalid_response_envelope`). Raw reasoning content is
+  neither persisted nor exposed.
+
+### QA boundary
+
+Live QA remains exactly all deterministically flagged candidates UNION the
+deterministic audit sample; Terra bodies (`gpt-5.6-terra`, reasoning low,
+max_output_tokens 512) come from the committed single-source QA builder; the
+same ledger, cap, reservation, in-flight and parsing rules apply; QA requests
+are sent only after all prerequisite bulk state is durably checkpointed.
+
+### Unchanged frozen logical requests (zero-spend re-verification)
+
+The committed live preflight was executed end-to-end against the real accepted
+queue (`114dd20f…`, 334605426 bytes) and real frozen selection
+(`1ffa5e76c7…`, 50 items), with tiktoken-measured cost-plan aggregates
+matching the frozen contract (23996 / 24546):
+
+- Regenerated synchronous request artifact SHA:
+  `5e2f6f92a72e83c3a14e61d78380fbcf5e76233e9133381440de4724ca731f7b` — EXACT MATCH
+- Regenerated Batch-equivalence bytes SHA:
+  `ad9cb8c10a479155015b1fa97a552bf129a129268231ecd8e1e73c39d203d6d6` — EXACT MATCH
+- Preflight printed `LIVE_PREFLIGHT_OK`, then stopped at the credential
+  boundary ("OPENAI_API_KEY is missing or blank"); no checkpoint file was
+  created and nothing was transmitted. REQUEST_SHA UNCHANGED / BATCH_SHA
+  UNCHANGED: PASS.
+
+### Executable evidence
+
+- Stage-04 targeted: `pytest -q tests/test_build_dict_stage04.py` — **87 passed**
+  (43 prior + 44 new live-transport tests covering the mandatory matrix:
+  default zero-network; flag-gated key access; selection/count/uniqueness/
+  divergence fences pre-key-read; request/Batch/cost-plan SHA fences;
+  outside-authorization items cannot transmit; fixed endpoint and no
+  configurable credential destination; redirect not followed; header built but
+  never logged/persisted; exact authorized body transmitted unchanged;
+  structured completion parsing; reasoning coexistence without exposure;
+  missing/multiple/malformed output failures; incomplete status; usage ACTUAL
+  accounting; missing-usage worst-case reservation; timeout/network/HTTP-error
+  ambiguity preserving in_flight; zero automatic retries on every error path;
+  over-cap guard blocking before HTTP; restart-preserving cumulative spend;
+  shared bulk+QA cap; classification/cap/price/multiplier checkpoint
+  invalidation; legacy Persian preservation; pinned serialization format; no
+  credential leakage; no real provider calls).
+- Stage-03 targeted: `pytest -q tests/test_build_dict_stage03.py` — **16 passed**
+- Full gate: `make gate` — Ruff PASS; mypy --strict PASS (18 source files);
+  pytest **330 passed**; check_agents R1/R3/R7 PASS — PASS (single final run)
+- `git diff --check`: PASS
+
+**Changed paths:** `tools/build_dict.py`, `tests/test_build_dict_stage04.py`,
+`tasks/slice-6.report.md`
+
+**Branch/push:** Base `slice/6`
+`033085ccf59cc52110d9a9a139fc16ad945b077a`; base `main`
+`2f2486a5021465842ada8e5cc3d43e9a030e6955` unchanged. Final HEAD recorded in
+the return receipt after push.
+
+**Work left undone / next authority:** Independent fresh T3 auth-security
+full-diff review of the slice range. No paid call is permitted before review
+acceptance; the owner's existing Canary v3 authorization may then be used only
+if the frozen logical request bodies remain byte-identical (re-provable by the
+committed preflight).
+
+**Disposition:** `LIVE_RESPONSES_TRANSPORT_IMPLEMENTATION_COMPLETE`
+
+*No API keys, credential fragments, or private absolute paths recorded.*
