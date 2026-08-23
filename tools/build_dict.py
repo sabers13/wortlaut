@@ -2152,8 +2152,8 @@ GENERATED_MARKER_PATTERN: Final[re.Pattern[str]] = re.compile(r"^llm_generated_v
 STAGE03_QUEUE_FORMAT: Final[str] = "flashcard-stage03-queue-v2"
 STAGE04_CHECKPOINT_FORMAT: Final[str] = "flashcard-stage04-checkpoint-v3"
 STAGE04_MAX_TEXT_LENGTH: Final[int] = 280
-STAGE04_BULK_PIPELINE_VERSION: Final[str] = "stage04-bulk-v3"
-STAGE04_QA_PIPELINE_VERSION: Final[str] = "stage04-qa-v3"
+STAGE04_BULK_PIPELINE_VERSION: Final[str] = "stage04-bulk-v4"
+STAGE04_QA_PIPELINE_VERSION: Final[str] = "stage04-qa-v4"
 STAGE04_RESPONSE_SCHEMA_VERSION: Final[str] = "openai-responses-json-schema-v2"
 STAGE04_BULK_REASONING_EFFORT: Final[str] = "none"
 STAGE04_QA_REASONING_EFFORT: Final[str] = "low"
@@ -2175,11 +2175,11 @@ STAGE04_LIVE_DEFAULT_TIMEOUT_SECONDS: Final[int] = 120
 STAGE04_COST_PLAN_ARTIFACT: Final[str] = "flashcard-stage04-live-cost-plan-v1"
 STAGE04_SPEND_LEDGER_FORMAT: Final[str] = "flashcard-stage04-spend-ledger-v1"
 STAGE04_LIVE_CANARY_SELECTION_COUNT: Final[int] = 50
-# Frozen German-canary authorization contract (german-canary-quality-contract-v3-frozen):
-# recorded aggregate conservative input-token estimates that the live cost-plan artifact
-# must carry for the exact authorized 50-item selection.
-STAGE04_LIVE_CANARY_BULK_INPUT_TOKEN_ESTIMATE: Final[int] = 23996
-STAGE04_LIVE_CANARY_QA_BOUND_INPUT_TOKEN_ESTIMATE: Final[int] = 24546
+# Frozen German-canary authorization contract.  The values are deliberately kept
+# with the prompt contract: a source-fidelity change invalidates every old request
+# and cost-plan artifact before any credential can be read.
+STAGE04_LIVE_CANARY_BULK_INPUT_TOKEN_ESTIMATE: Final[int] = 33646
+STAGE04_LIVE_CANARY_QA_BOUND_INPUT_TOKEN_ESTIMATE: Final[int] = 31096
 _DECIMAL_TOKENS_PER_MTOK: Final[Decimal] = Decimal(1000000)
 
 FA_JOB_CLASS: Final[str] = "fa_generated_meaning"
@@ -2258,17 +2258,22 @@ def fa_v3_request_body(item: dict[str, object], model: str) -> dict[str, object]
 
 DE_LEARNER_INSTRUCTIONS: Final[str] = (
     "Work only on the supplied single semantic sense.\n"
-    "The supplied English meaning text defines that sense.\n"
+    "SOURCE FIDELITY OVERRIDES stylistic naturalness: every statement in the German output "
+    "must be entailed by the supplied English source rows.\n"
+    "The supplied English meaning text defines the complete allowed evidence for that sense.\n"
     "The stable identity refs (lemma_semantic_ref, sense_semantic_ref) are opaque identifiers and carry no semantic meaning; do not interpret them.\n"  # noqa: E501
     "Output German only.\n"
-    "Prefer one simple/common German synonym when it truly preserves the exact sense.\n"
-    "Otherwise produce one short learner-friendly German explanation.\n"
+    "Set kind=synonym only for a simple German synonym that is semantically equivalent in the supplied sense; a broader, narrower, associated, or merely similar term is not a synonym.\n"  # noqa: E501
+    "If no exact simple synonym is available, set kind=definition and give one short "
+    "source-faithful German explanation.\n"
     "Aim approximately at A2-B1 comprehension where practical.\n"
     "Do not broaden, narrow, merge, or drift to another sense.\n"
     "Do not merely repeat or inflect the lemma as the definition.\n"
-    "No dictionary meta-commentary such as 'siehe', 'vgl.', 'Abkürzung', 'Form von', etc.\n"
-    "No etymology, examples, analysis, alternative unrelated senses, or English.\n"
-    "For morphology/inflection senses, describe that exact morphology concisely in German when a simple synonym is not appropriate.\n"  # noqa: E501
+    "Do not add historical, encyclopedic, technical, domain, cultural, usage, etymological, or lexical details that the source does not supply.\n"  # noqa: E501
+    "Do not explain a plural or inflection entry with the lexical meaning of its base lemma unless that lexical meaning appears in the supplied source rows.\n"  # noqa: E501
+    "For a morphology/inflection source, output morphology only, with kind=definition: preserve every supplied person, number, tense, mood, degree, case, gender, and strong/weak/mixed feature exactly.\n"  # noqa: E501
+    "Use grammatical labels, not a semantic paraphrase; for example, 'second-person plural subjunctive I of ertrinken' becomes '2. Person Plural Konjunktiv I von „ertrinken“', never a würde-form.\n"  # noqa: E501
+    "No dictionary meta-commentary such as 'siehe', 'vgl.', or 'Abkürzung'; no examples, analysis, alternative unrelated senses, or English.\n"  # noqa: E501
     "Return only the fields defined by the structured response schema.\n"
     "Prefer brevity well below deterministic maximum bounds."
 )
@@ -2422,7 +2427,29 @@ def de_learner_qa_request_body(item: dict[str, object], candidate_text: str, mod
     lines.append("Opaque identifiers (carry no semantic meaning, for correlation only):")
     lines.append(f"lemma_semantic_ref: {lemma_ref}  # opaque")
     lines.append(f"sense_semantic_ref: {sense_ref}  # opaque")
-    lines.append("Instructions: verify the candidate preserves the exact sense defined by the English meaning(s), is German only, contains no meta-commentary, and follows A2-B1 brevity. Return the corrected meaning if needed, preserving the strict schema.")  # noqa: E501
+    lines.append("QA instructions (SOURCE FIDELITY OVERRIDES style):")
+    lines.append("1. Verify every statement is supported by the supplied English source rows.")
+    lines.append(
+        "2. Remove historical, encyclopedic, technical, domain, cultural, usage, or lexical "
+        "elaboration that the source does not establish; do not repeat it."
+    )
+    lines.append(
+        "3. For morphology, preserve every supplied person, number, tense, mood, degree, "
+        "case, gender, and strong/weak/mixed feature exactly; reject semantic paraphrases "
+        "that change them."
+    )
+    lines.append(
+        "4. Accept kind=synonym only for a truly equivalent synonym, never a broader, "
+        "narrower, associated, or merely similar term; otherwise use kind=definition."
+    )
+    lines.append(
+        "5. Check specifically whether mood, tense, person, case, gender, number, or degree "
+        "changed."
+    )
+    lines.append(
+        "Return the corrected German-only meaning if needed, with the strict schema and no "
+        "meta-commentary."
+    )
     # QA reuses DE schema for correction
     return {
         "model": model,
@@ -3214,6 +3241,119 @@ def _validate_generated_candidate(
             return f"forbidden_Cf_U+{cp:04X}"
     if language == "de" and not re.search(r"[A-Za-zÄÖÜäöüß]", text):
         return "implausible_german"
+    return None
+
+
+# English source feature -> a German label which must survive in a learner
+# morphology description.  This is intentionally a conservative detector: it
+# rejects only when a supplied feature has disappeared or changed, rather than
+# trying to infer grammar that the source did not state.
+_MORPHOLOGY_FEATURE_RULES: Final[tuple[tuple[str, str, str], ...]] = (
+    (r"\bsubjunctive\s+i\b", "subjunctive_i", r"\bkonjunktiv\s*(?:i\b|eins\b)"),
+    (r"\bsubjunctive\s+ii\b", "subjunctive_ii", r"\bkonjunktiv\s*(?:ii\b|zwei\b)"),
+    (r"\bindicative\b", "indicative", r"\bindikativ\b"),
+    (r"\bimperative\b", "imperative", r"\bimperativ\b"),
+    (r"\bpresent\b", "present", r"\bpräsens\b"),
+    (r"\bpreterite\b|\bpast\b", "preterite", r"\bpräteritum\b"),
+    (r"\bperfect\b", "perfect", r"\bperfekt\b"),
+    (
+        r"\bfirst[- ]person\b|\b1st[- ]person\b",
+        "first_person",
+        r"\b(?:1\.?\s*person|erste\s+person)\b",
+    ),
+    (
+        r"\bsecond[- ]person\b|\b2nd[- ]person\b",
+        "second_person",
+        r"\b(?:2\.?\s*person|zweite\s+person)\b",
+    ),
+    (
+        r"\bthird[- ]person\b|\b3rd[- ]person\b",
+        "third_person",
+        r"\b(?:3\.?\s*person|dritte\s+person)\b",
+    ),
+    (r"\bsingular\b", "singular", r"\bsingular\b"),
+    (r"\bplural\b", "plural", r"\bplural\b"),
+    (r"\bnominative\b", "nominative", r"\bnominativ\b"),
+    (r"\baccusative\b", "accusative", r"\bakkusativ\b"),
+    (r"\bdative\b", "dative", r"\bdativ\b"),
+    (r"\bgenitive\b", "genitive", r"\bgenitiv\b"),
+    (r"\bmasculine\b", "masculine", r"\bmaskulin(?:um|e[nmrs]?)?\b"),
+    (r"\bfeminine\b", "feminine", r"\bfeminin(?:um|e[nmrs]?)?\b"),
+    (r"\bneuter\b", "neuter", r"\bneutr(?:um|al(?:e[nmrs]?|en|em|er|es)?)?\b"),
+    (r"\ball[- ]gender\b", "all_gender", r"\balle[nsr]?\s+geschlecht"),
+    (r"\bcomparative(?:\s+degree)?\b", "comparative", r"\bkomparativ\w*\b"),
+    (r"\bsuperlative(?:\s+degree)?\b", "superlative", r"\bsuperlativ\w*\b"),
+    (r"\bstrong\b", "strong", r"\bstark(?:e[nmrs]?|em|er|es)?\b"),
+    (r"\bweak\b", "weak", r"\bschwach(?:e[nmrs]?|em|er|es)?\b"),
+    (r"\bmixed\b", "mixed", r"\bgemischt(?:e[nmrs]?|em|er|es)?\b"),
+)
+
+# Terms which claim a domain or historical context on their own.  We only
+# reject one if the supplied source lacks its corresponding evidence; the
+# prompt and QA remain responsible for all other semantic grounding.
+_UNSUPPORTED_DOMAIN_CUES: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
+    (
+        r"\bcomputer(?:spiel|game)\b|\bvideospiel\b|\bgaming\b",
+        ("computer game", "video game", "gaming", "videogame"),
+    ),
+    (
+        r"\bjüdisch\w*\b|\bnationalsozial\w*\b|\bns[- ]",
+        ("jewish", "national socialist", "nazi", "third reich"),
+    ),
+)
+
+
+def _item_source_text(item: dict[str, object]) -> str:
+    inputs = item.get("derivation_inputs", [])
+    if not isinstance(inputs, list):
+        return ""
+    texts: list[str] = []
+    for row in inputs:
+        if isinstance(row, dict):
+            texts.append(str(row.get("text", "")))
+        else:
+            texts.append(str(row))
+    return "\n".join(texts).casefold()
+
+
+def _morphology_feature_keys(item: dict[str, object]) -> tuple[str, ...]:
+    source = _item_source_text(item)
+    return tuple(
+        key for source_pattern, key, _output_pattern in _MORPHOLOGY_FEATURE_RULES
+        if re.search(source_pattern, source, flags=re.IGNORECASE)
+    )
+
+
+def _validate_de_semantic_contract(item: dict[str, object], text: str, kind: str) -> str | None:
+    """Reject mechanically observable DE semantic-contract violations.
+
+    This deliberately does not pretend to solve general bilingual semantic
+    equivalence.  It protects source-supplied morphology and clear unsupported
+    domain additions; all other source-fidelity and synonym judgements are sent
+    to the independently instructed QA pass.
+    """
+    source = _item_source_text(item)
+    output = text.casefold()
+    features = _morphology_feature_keys(item)
+    if features:
+        if kind != "definition":
+            return "morphology_requires_definition"
+        for source_pattern, key, output_pattern in _MORPHOLOGY_FEATURE_RULES:
+            if key in features and not re.search(output_pattern, output, flags=re.IGNORECASE):
+                return f"morphology_missing_{key}"
+        # Konjunktiv I must not be weakened into a conditional würde-form.
+        if "subjunctive_i" in features and re.search(r"\bwürde(?:st|t|n)?\b", output):
+            return "morphology_subjunctive_i_conditional_drift"
+        # A morphology-only source cannot justify a colon-led lexical gloss.
+        if ":" in text:
+            return "morphology_unsupported_elaboration"
+    if kind == "synonym" and re.search(r"(?:ähnlich|artig|haft)\b", output):
+        return "related_not_exact_synonym"
+    for cue, evidence in _UNSUPPORTED_DOMAIN_CUES:
+        if re.search(cue, output, flags=re.IGNORECASE) and not any(
+            token in source for token in evidence
+        ):
+            return "unsupported_domain_elaboration"
     return None
 
 
@@ -4877,6 +5017,8 @@ def build_stage04(
                 err = _validate_generated_candidate(  # type: ignore[assignment]
                     text, language, kind, lemma_text, existing_texts if existing_texts else None
                 )
+                if err is None and language == "de":
+                    err = _validate_de_semantic_contract(item_by_id[iid], text, kind)
                 if err is not None:
                     rejected_to_record[iid] = {
                         "phase": "bulk",
@@ -4924,22 +5066,20 @@ def build_stage04(
             iid for iid in sorted_ids if iid not in bulk_completed and iid not in bulk_rejected
         ]  # noqa: E501
 
-    # After bulk, check if all bulk done (no pending, no in_flight)
-    # Then proceed to QA selection if needed
-    # QA receives every flagged candidate plus deterministic audit sample
-    # For simplicity, flag all candidates that failed deterministic validation? But those are already rejected.  # noqa: E501
-    # So flagged = empty after validation? Actually validation already rejected invalid; QA should get suspicious rows.  # noqa: E501
-    # For tests, we define flagged as those where text length > 100 or contains suspicious marker
-    # We'll define flagged as none for now, but audit sample deterministic
-
     # Determine QA required set if not already set
     if not qa_state.get("required"):
-        # For demo, flag candidates with text containing "flagged" or length > 50?
+        # Morphology is source-verifiable and high-risk: every such DE item gets
+        # independent QA, in addition to the existing deterministic flags/audit.
         flagged_ids = []
         for iid, val in bulk_completed.items():
             if isinstance(val, dict):
                 txt = str(val.get("text", ""))
-                if len(txt) > 50 or "flag" in txt.lower():
+                item = item_by_id[iid]
+                is_de_morphology = (
+                    str(item.get("language", "")) == "de"
+                    and bool(_morphology_feature_keys(item))
+                )
+                if len(txt) > 50 or "flag" in txt.lower() or is_de_morphology:
                     flagged_ids.append(iid)
         audit_sample = _deterministic_audit_sample(
             sorted(bulk_completed.keys()), queue_sha, audit_sample_size
@@ -5061,6 +5201,8 @@ def build_stage04(
                     continue
                 lemma_text = str(item_by_id[iid].get("lemma_text", ""))
                 err = _validate_generated_candidate(text, language, kind, lemma_text, None)  # type: ignore[assignment]
+                if err is None and language == "de":
+                    err = _validate_de_semantic_contract(item_by_id[iid], text, kind)
                 if err is not None:
                     rejected_qa[iid] = {
                         "phase": "qa",

@@ -1203,3 +1203,73 @@ permitted before that review is accepted.
 **Disposition:** `LIVE_RESPONSES_TRANSPORT_RETRY_COMPLETE`
 
 *No API keys, credential fragments, or private absolute paths recorded.*
+
+---
+
+## German Canary v3 semantic review repair — zero-spend
+
+**Verdict:** The v3 canary was technically successful (50/50 bulk results, 19/19
+QA results, zero provider rejects, ambiguous outcomes, or duplicates; historical
+spend USD 0.0414368) but the independent semantic review was **BLOCKED**. This
+repair changes only German generation/QA quality. No credential was read, no
+provider call was made, and no paid work occurred.
+
+### Blocking evidence and repair
+
+- `ertrinket`: the source `second-person plural subjunctive I of ertrinken` was
+  weakened to `ihr würdet ertrinken`. Generation and QA now require the exact
+  source-supplied grammatical labels; `2. Person Plural Konjunktiv I von
+  „ertrinken“` is the required shape and a würde-form is rejected.
+- `Arisierungen`: a plural-only source was expanded with an unsupported history
+  gloss. Morphology-only sources now require morphology-only definitions;
+  colon-led lexical elaboration is deterministically rejected, and the prompt
+  and QA prohibit base-lemma meaning expansion without same-context evidence.
+- `Mod`: a terse `mod` source was narrowed to a game context. The source-fidelity
+  contract forbids unprovided domain detail, with deterministic checks for
+  unsupported game and historical-domain cues.
+- `sinfonisch`: `orchesterähnlich` was accepted as a synonym despite being only
+  related. `kind=synonym` now requires exact equivalence; related-form outputs
+  are rejected and QA must choose `definition` where equivalence is unavailable.
+
+The prompt makes source fidelity override stylistic naturalness and forbids
+historical, encyclopedic, technical, domain, cultural, usage, or lexical detail
+not entailed by the supplied English source rows. Terra QA independently checks
+support, unsupported additions, every morphology feature, synonym equivalence,
+and mood/tense/person/case/gender/number/degree drift. All detected morphology
+DE items are routed to QA in addition to the deterministic audit sample.
+
+Deterministic morphology checks cover Konjunktiv I/II, indicative, imperative,
+present, preterite, perfect, first/second/third person, singular/plural,
+nominative/accusative/dative/genitive, masculine/feminine/neuter/all-gender,
+comparative/superlative, and strong/weak/mixed. The source-fidelity contract
+changed, so `stage04-bulk-v4` / `stage04-qa-v4` invalidate prior checkpoints;
+the checkpoint format and live transport, ledger, retry, endpoint, and cap
+mechanics are unchanged.
+
+### Regressions and replacement artifacts
+
+- Regression coverage includes Konjunktiv-I preservation/no würde drift,
+  unsupported plural elaboration, terse-source domain grounding, exact-synonym
+  enforcement, and combined strong/mixed, case, gender, number, and degree
+  preservation. QA prompt coverage asserts its independent source-fidelity
+  questions.
+- Frozen selection unchanged: `1ffa5e76c7315467a39a5b7b953e07fba924b37dbc77512130e720adb3ab7475`
+  (50 items).
+- Historical request authorization
+  `5e2f6f92a72e83c3a14e61d78380fbcf5e76233e9133381440de4724ca731f7b`
+  is **INVALIDATED BY REQUEST-BODY CHANGE**.
+- New deterministic request artifact SHA:
+  `185d2a592ef9e391008622b88adcb14a13d81dd615978f3c518925eae1d8f3d5`
+  (144714 bytes).
+- New deterministic Batch-equivalence SHA:
+  `ca9fdc66a5924609cb16eea0385eba6ab223c2046b88af1209282170b60cf2a2`
+  (143914 bytes); all 50 embedded logical bodies equal their synchronous forms.
+- Local `tiktoken` remeasurement of the repaired bodies produced 33646 bulk and
+  31096 QA-bound input tokens. A new cost-plan artifact and explicit owner
+  authorization are therefore required before any provider execution.
+
+**Provider calls:** 0. **Paid spend in this repair session:** USD 0.
+
+**Next authority:** Freeze the repaired 50-item request, obtain explicit owner
+authorization for its new request SHA and a matching new cost-plan SHA, then
+rerun the same 50-item German canary once.

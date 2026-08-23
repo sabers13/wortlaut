@@ -41,6 +41,7 @@ from tools.build_dict import (
     _load_checkpoint,
     _render_canary_receipt,
     _spend_total_usd,
+    _validate_de_semantic_contract,
     _validate_generated_candidate,
     _validate_spend_state,
     _write_canary_selection_manifest,
@@ -220,8 +221,8 @@ def test_fake_bulk_qa_persists_generated_rows_and_derivations(tmp_path: Path) ->
     assert manifest["custom_ids"] == [f"batch:{item_id}" for item_id in manifest["item_ids"]]
     # Verify response schema version is v2
     assert state["identity"]["response_schema_version"] == "openai-responses-json-schema-v2"
-    assert state["identity"]["bulk_pipeline_version"] == "stage04-bulk-v3"
-    assert state["identity"]["qa_pipeline_version"] == "stage04-qa-v3"
+    assert state["identity"]["bulk_pipeline_version"] == "stage04-bulk-v4"
+    assert state["identity"]["qa_pipeline_version"] == "stage04-qa-v4"
 
 
 def test_complete_invalid_result_is_rejected_and_not_resubmitted(tmp_path: Path) -> None:
@@ -502,8 +503,8 @@ def test_checkpoint_compatibility_components_and_fail_closed(tmp_path: Path) -> 
     assert identity["bulk_de_model"] == "gpt-5.6-luna"
     assert identity["bulk_en_model"] == "gpt-5.6-luna"
     assert identity["qa_model"] == "gpt-5.6-terra"
-    assert identity["bulk_pipeline_version"] == "stage04-bulk-v3"
-    assert identity["qa_pipeline_version"] == "stage04-qa-v3"
+    assert identity["bulk_pipeline_version"] == "stage04-bulk-v4"
+    assert identity["qa_pipeline_version"] == "stage04-qa-v4"
     assert identity["response_schema_version"] == "openai-responses-json-schema-v2"
     assert identity["bulk_de_reasoning_effort"] == "none"
     assert identity["bulk_de_max_output_tokens"] == "512"
@@ -1113,6 +1114,75 @@ def test_strict_schema_and_semantic_context_unchanged_with_bounds(tmp_path: Path
     qa_body = de_learner_qa_request_body(de_item, "Kandidat", "gpt-5.6-terra")
     assert qa_body["text"]["format"]["name"] == "de_learner_meaning"
     assert qa_body["text"]["format"]["strict"] is True
+
+
+def _semantic_item(source: str, lemma: str = "Testwort") -> dict[str, object]:
+    return {
+        "language": "de",
+        "lemma_text": lemma,
+        "derivation_inputs": [{"text": source, "language": "en"}],
+    }
+
+
+def test_german_prompt_and_qa_require_source_fidelity(tmp_path: Path) -> None:
+    stage02, queue, items = queue_fixture(tmp_path)
+    item = next(v for v in items.values() if v["language"] == "de")
+    prompt = str(de_learner_meaning_request_body(item, "gpt-5.6-luna")["input"])
+    assert "SOURCE FIDELITY OVERRIDES" in prompt
+    assert "every statement" in prompt
+    assert "historical, encyclopedic, technical, domain, cultural, usage" in prompt
+    assert "unless that lexical meaning appears in the supplied source rows" in prompt
+    assert "broader, narrower, associated, or merely similar" in prompt
+    assert "person, number, tense, mood, degree, case, gender" in prompt
+    qa = str(de_learner_qa_request_body(item, "Kandidat", "gpt-5.6-terra")["input"])
+    for clause in (
+        "every statement is supported",
+        "Remove historical, encyclopedic, technical, domain, cultural, usage",
+        "person, number, tense, mood, degree, case, gender",
+        "truly equivalent synonym",
+        "mood, tense, person, case, gender, number, or degree changed",
+    ):
+        assert clause in qa
+
+
+def test_morphology_contract_preserves_all_explicit_features() -> None:
+    ertrinket = _semantic_item("second-person plural subjunctive I of ertrinken", "ertrinket")
+    assert _validate_de_semantic_contract(
+        ertrinket, "2. Person Plural Konjunktiv I von „ertrinken“", "definition"
+    ) is None
+    assert _validate_de_semantic_contract(ertrinket, "ihr würdet ertrinken", "definition") == (
+        "morphology_missing_subjunctive_i"
+    )
+
+    features = _semantic_item(
+        "strong/mixed nominative/accusative masculine/feminine/neuter singular comparative/superlative degree"
+    )
+    assert _validate_de_semantic_contract(
+        features,
+        "starke/gemischte Nominativ/Akkusativ maskuline/feminine/neutrale Singular Komparativ/Superlativform",
+        "definition",
+    ) is None
+
+
+def test_morphology_and_terse_source_regressions_reject_unsupported_elaboration() -> None:
+    plural = _semantic_item("plural of Arisierung", "Arisierungen")
+    assert _validate_de_semantic_contract(
+        plural,
+        "Plural von „Arisierung“: erzwungene Übertragung jüdischen Eigentums",
+        "definition",
+    ) == "morphology_unsupported_elaboration"
+
+    mod = _semantic_item("mod", "Mod")
+    assert _validate_de_semantic_contract(
+        mod, "Fan-Erweiterung für ein Computerspiel", "definition"
+    ) == "unsupported_domain_elaboration"
+
+
+def test_related_term_cannot_claim_exact_synonym() -> None:
+    symphonic = _semantic_item("symphonic", "sinfonisch")
+    assert _validate_de_semantic_contract(
+        symphonic, "orchesterähnlich", "synonym"
+    ) == "related_not_exact_synonym"
 
 
 def test_reasoning_effort_change_invalidates_checkpoint_compatibility(tmp_path: Path) -> None:
