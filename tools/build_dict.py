@@ -3398,6 +3398,36 @@ def _validate_de_semantic_contract(item: dict[str, object], text: str, kind: str
     return None
 
 
+def _is_morphology_qa_recoverable(
+    item: dict[str, object],
+    language: str,
+    generic_err: str | None,
+    semantic_err: str | None,
+) -> bool:
+    """True when a bulk failure is a QA-recoverable morphology semantic defect.
+
+    This is deliberately narrow: it never widens what ``_validate_de_semantic_
+    contract`` accepts, it only decides whether a failure that contract
+    already produced gets routed to mandatory Terra QA instead of an
+    immediate hard rejection. A defect qualifies only when *all* of the
+    following hold — the target language is German; the item carries at
+    least one source-supplied morphology feature (so the defect is
+    source-verifiable, not a general semantic judgement call); the candidate
+    passed generic structural/schema validation (``generic_err is None``, so
+    the provider response, envelope, and shape were all clean); and the sole
+    remaining failure is a ``morphology_*`` semantic-contract code. Any other
+    failure — structural, provider/envelope, or non-morphology semantic —
+    still hard-rejects, exactly as before.
+    """
+    return (
+        language == "de"
+        and generic_err is None
+        and semantic_err is not None
+        and semantic_err.startswith("morphology_")
+        and bool(_morphology_feature_keys(item))
+    )
+
+
 def _returned_response_rejection_code(cand: dict[str, object]) -> str | None:
     """Fail-closed completion check for a complete returned provider response.
 
@@ -5055,15 +5085,30 @@ def build_stage04(
                     continue
                 lemma_text = str(item_by_id[iid].get("lemma_text", ""))
                 # Missing kind for DE already handled; check strict schema for DE missing kind
-                err = _validate_generated_candidate(  # type: ignore[assignment]
+                generic_err = _validate_generated_candidate(
                     text, language, kind, lemma_text, existing_texts if existing_texts else None
                 )
-                if err is None and language == "de":
-                    err = _validate_de_semantic_contract(item_by_id[iid], text, kind)
-                if err is not None:
+                semantic_err = None
+                if generic_err is None and language == "de":
+                    semantic_err = _validate_de_semantic_contract(item_by_id[iid], text, kind)
+                combined_err: str | None = generic_err if generic_err is not None else semantic_err
+                qa_required_reason: str | None = None
+                if combined_err is not None and _is_morphology_qa_recoverable(
+                    item_by_id[iid], language, generic_err, semantic_err
+                ):
+                    # Genuine bulk semantic gap, not a transport/structural
+                    # failure: persist the exact Luna candidate as a
+                    # PROVISIONAL completion and force it into mandatory
+                    # Terra QA instead of hard-rejecting the paid request.
+                    # The semantic contract itself is not relaxed — QA still
+                    # runs the same strict validator, and provisional text
+                    # can only become final output via a full QA pass.
+                    qa_required_reason = combined_err
+                    combined_err = None
+                if combined_err is not None:
                     rejected_to_record[iid] = {
                         "phase": "bulk",
-                        "error_code": err,
+                        "error_code": combined_err,
                         "attempt_count": int(bulk_rejected.get(iid, {}).get("attempt_count", 0)) + 1
                         if isinstance(bulk_rejected.get(iid), dict)
                         else 1,
@@ -5079,13 +5124,16 @@ def build_stage04(
                         }
                     else:
                         existing_texts.add(text.strip())
-                        valid_to_complete[iid] = {
+                        completed_val: dict[str, object] = {
                             "text": text.strip(),
                             "language": language,
                             "kind": kind,
                             "source": GENERATED_MARKER,
                             "license": generated_license,
                         }
+                        if qa_required_reason is not None:
+                            completed_val["qa_required_reason"] = qa_required_reason
+                        valid_to_complete[iid] = completed_val
             # Atomically persist: update completed/rejected, clear in_flight
             for iid, val in valid_to_complete.items():
                 bulk_completed[iid] = val
@@ -5120,7 +5168,14 @@ def build_stage04(
                     str(item.get("language", "")) == "de"
                     and bool(_morphology_feature_keys(item))
                 )
-                if len(txt) > 50 or "flag" in txt.lower() or is_de_morphology:
+                # A provisional bulk completion (routed to QA because it hit
+                # a morphology_* semantic-contract gap) is source-verifiable
+                # DE morphology by construction, so it is always already
+                # covered by is_de_morphology above; this explicit check is
+                # kept as a belt-and-suspenders invariant — a provisional
+                # item can never fall out of QA routing.
+                is_provisional = "qa_required_reason" in val
+                if len(txt) > 50 or "flag" in txt.lower() or is_de_morphology or is_provisional:
                     flagged_ids.append(iid)
         audit_sample = _deterministic_audit_sample(
             sorted(bulk_completed.keys()), queue_sha, audit_sample_size
@@ -5267,6 +5322,25 @@ def build_stage04(
             _write_checkpoint(ckpt_p, identity, state)
             if rejected_qa:
                 raise BuildDictError(f"QA unit had {len(rejected_qa)} rejected; STOP")
+
+    # Finalization guard: a provisional bulk completion (recorded because a
+    # morphology semantic-contract defect was routed to mandatory QA instead
+    # of a hard rejection) must never reach output.sqlite on its own. Every
+    # such item must be in the QA-required set, have a successful QA
+    # completion, and must not be QA-rejected, before finalization proceeds.
+    # QA-completed text supersedes the provisional bulk text as usual below;
+    # this guard only blocks the fallback for items QA has not yet resolved.
+    for _iid, _val in bulk_completed.items():
+        if isinstance(_val, dict) and "qa_required_reason" in _val:
+            if _iid not in required_qa_ids or _iid in qa_rejected:
+                raise BuildDictError(
+                    f"Provisional bulk item {_iid} failed QA and cannot be finalized; STOP"
+                )
+            if _iid not in qa_completed:
+                raise BuildDictError(
+                    f"Provisional bulk item {_iid} has not completed mandatory QA; "
+                    "STOP before finalization"
+                )
 
     # Now persist generated rows to output DB if bulk completed exists and output not yet created
     # For tests, we always create output after checkpoint is stable

@@ -1596,3 +1596,213 @@ authorized German Canary v4 may resume from this reconciled checkpoint
 without resending the first 23 provider requests. This repair authorizes no
 further paid work by itself; resuming remains a separate owner/orchestrator
 decision.
+
+## German Canary v4 morphology QA-recovery repair — zero-spend
+
+**Status:** local repair + checkpoint reconciliation only. No provider
+credential was read, no provider request was made, no candidate text was
+retransmitted. The live canary had continued past the prior repair (23 → 41
+completed) since the last report entry and stopped again at a 42nd paid
+request; that call is reconciled here.
+
+### Call 42 — genuine comparative precision failure
+
+`queue:v2:ca9a4c04e83f08678564370d2b52d3cf`, lemma
+`nordrhein-westfälischer`, source `comparative degree of
+nordrhein-westfälisch`. Luna returned `Steigerungsform von
+„nordrhein-westfälisch“` (kind `definition`); the bulk validator correctly
+rejected it as `morphology_missing_comparative`. `Steigerungsform`
+("form of increase/degree") is broader than `Komparativ` and can cover
+either comparative or superlative — it is not a valid label for a source
+that specifically requires the comparative degree. **This remains invalid.
+The comparative validator was NOT widened**, and `Steigerungsform` still
+does not satisfy the `comparative` feature after this repair — reverified
+directly: `_validate_de_semantic_contract` on the exact recorded candidate
+still returns `morphology_missing_comparative`; only
+`Komparativform von „nordrhein-westfälisch“` (and other genuine
+`\bkomparativ\w*\b` realizations) passes.
+
+### The actual defect: no route from a genuine bulk semantic gap to QA
+
+The bulk hard-stop treated every `_validate_de_semantic_contract` failure —
+including a source-verifiable, structurally clean `morphology_*` gap — as an
+unrecoverable rejection, with no path to the already-designed Terra QA
+correction stage. A genuine precision miss on a paid, well-formed response
+had no mechanism to be corrected; it could only halt the run.
+
+### Repair: route `morphology_*` bulk gaps through mandatory QA, nothing else
+
+`tools/build_dict.py`:
+
+- Added `_is_morphology_qa_recoverable(item, language, generic_err,
+  semantic_err)`: returns true only when language is `de`, the item carries
+  at least one source-supplied morphology feature
+  (`_morphology_feature_keys`), the candidate passed generic
+  structural/schema validation (`generic_err is None`), and the sole
+  remaining failure is a `morphology_*` semantic-contract code. Any
+  transport/envelope/schema failure, or a non-morphology semantic failure,
+  is unaffected and still hard-rejects exactly as before — this function
+  only reclassifies where an existing failure routes, it never changes
+  what `_validate_de_semantic_contract` or `_validate_generated_candidate`
+  accept.
+- In the bulk DE/EN candidate loop: `generic_err` and `semantic_err` are now
+  computed and inspected separately. When `_is_morphology_qa_recoverable`
+  is true, the failure is not recorded in `rejected_to_record` (so it no
+  longer trips the "STOP before next unit" hard-stop); instead the exact,
+  unmodified Luna candidate is written to `valid_to_complete` with an added
+  `qa_required_reason` field carrying the precise `morphology_*` code.
+  Every other failure path is byte-for-byte unchanged.
+- QA-required-set computation: a completed item carrying
+  `qa_required_reason` is now also explicitly unioned into the flagged set
+  (in addition to the existing length/`flag`/DE-morphology-source checks,
+  which already covered every provisional item by construction — this is a
+  belt-and-suspenders invariant, not new coverage). A provisional item can
+  never fall out of QA routing.
+- QA itself: **unchanged**. `de_learner_qa_request_body`,
+  `_validate_de_semantic_contract`, and the QA candidate loop still apply
+  the same strict validator with no recovery path — `Steigerungsform`
+  submitted again at QA still rejects and still stops the run.
+- Finalization guard: before `output.sqlite` is created, every
+  `bulk.completed` entry carrying `qa_required_reason` must be in
+  `qa.required`, in `qa.completed`, and not in `qa.rejected`, or
+  `build_stage04` raises and creates no output. This closes the fallback
+  that previously (silently, for any future provisional item) would have
+  used the unvalidated bulk text whenever `qa.completed` lacked an entry —
+  QA-completed text still supersedes bulk text exactly as before; this only
+  removes the silent fallback for text QA has not actually passed.
+
+### Regression tests (`tests/test_build_dict_stage04.py`, 8 new)
+
+1. `test_morphology_comparative_gap_is_provisional_not_hard_rejection` — the
+   exact call-42 candidate: provisional, `qa_required_reason =
+   morphology_missing_comparative`, forced into `qa.required`, no output
+   created.
+2. `test_morphology_qa_correction_reaches_final_output` — QA returns
+   `Komparativform von „nordrhein-westfälisch“`: QA passes, and
+   `sense_meaning.text` in the finalized `output.sqlite` is exactly that
+   corrected text.
+3. `test_morphology_qa_noncorrection_stops_before_finalization` — QA
+   resubmits the uncorrected `Steigerungsform` text: QA rejects, the run
+   stops, `output.sqlite` is never created.
+4. `test_finalization_guard_blocks_resumed_output_after_qa_rejection` — a
+   second `build_stage04` call against the checkpoint left by test 3 (no
+   pending bulk or QA work remains for the item) still refuses to
+   finalize, proving the guard — not just the in-run QA rejection — is what
+   blocks the provisional text from ever reaching output on a resume.
+5. `test_morphology_subjunctive_i_drift_is_provisional` — source
+   `second-person plural subjunctive I of ertrinken`, candidate `ihr
+   würdet ertrinken`: provisional, `qa_required_reason =
+   morphology_missing_subjunctive_i`, forced QA.
+6. `test_morphology_unsupported_elaboration_is_provisional` — source
+   `plural of Arisierung`, candidate `Plural von „Arisierung“: erzwungene
+   Übertragung jüdischen Eigentums`: provisional, `qa_required_reason =
+   morphology_unsupported_elaboration`, forced QA.
+7. `test_structural_failure_on_morphology_item_remains_hard_rejection` — a
+   morphology item whose candidate echoes the lemma (`echo_lemma`, a
+   generic/structural failure, not a semantic-contract one) still
+   hard-rejects; never swept into recovery.
+8. `test_non_morphology_semantic_failure_remains_hard_rejection` — a source
+   with no morphology feature at all (`mod`) whose candidate trips
+   `unsupported_domain_elaboration` still hard-rejects; recovery can never
+   apply without a source-supplied morphology feature.
+
+All pre-existing DE semantic-contract/morphology-recognizer tests pass
+unmodified. `pytest -q tests/test_build_dict_stage04.py` — **159 passed**
+(151 + this repair's 8 additions).
+
+### Dry-revalidation of the 41 pre-existing v4 completions (zero-spend)
+
+Reconstructed each item's source and lemma from the frozen, hash-verified
+`tmp/de-canary-v4/de-canary-requests-v4.jsonl` and re-ran the exact
+production validators (`_validate_generated_candidate`,
+`_validate_de_semantic_contract`, `_morphology_feature_keys`) against every
+one of the 41 `bulk.completed` texts already recorded in the live
+checkpoint:
+
+- Total completions: **41**.
+- Ordinary (no source-supplied morphology feature): **18**.
+- Morphology completions: **23**.
+- Candidates that would newly qualify as provisional under the new policy:
+  **0**. Every one of the 41 already passes the complete, unchanged
+  semantic validator outright — provisional status only ever applies to a
+  failure, and none of these 41 is one. No provisional defect was invented
+  for a candidate that already passes.
+
+### Frozen artifacts — re-verified unchanged
+
+- `SELECTION_SHA` `1ffa5e76c7315467a39a5b7b953e07fba924b37dbc77512130e720adb3ab7475` (`tmp/de-canary-v2/de-canary-selection-v2.json`) — **MATCH**.
+- `REQUEST_SHA` `185d2a592ef9e391008622b88adcb14a13d81dd615978f3c518925eae1d8f3d5` (`tmp/de-canary-v4/de-canary-requests-v4.jsonl`) — **MATCH**.
+- `BATCH_SHA` `ca9fdc66a5924609cb16eea0385eba6ab223c2046b88af1209282170b60cf2a2` (`tmp/de-canary-v4/de-canary-batch-manifest-v4.jsonl`) — **MATCH**.
+- `COST_PLAN_SHA` `e716609c93cf9e8e1d60307132486aac65eb869a247670614ab7a61863269a81` (`tmp/de-canary-v4/live-cost-plan-v4.json`) — **MATCH**.
+
+No prompt (Luna or Terra), request body, schema, model, reasoning setting,
+`max_output_tokens`, selection, cost plan, endpoint, price, cap, transport,
+or retry policy was touched. Stage-04 v4 pipeline version
+(`stage04-bulk-v4`/`stage04-qa-v4`) not bumped — the contract is unchanged,
+only its implementation.
+
+### Checkpoint reconciliation (local only — zero provider calls)
+
+Read the live checkpoint as durable evidence. Confirmed directly: exact
+candidate text `Steigerungsform von „nordrhein-westfälisch“`, language `de`,
+kind `definition` (deterministic from the `morphology_missing_comparative`
+control flow — that code is reachable only for `kind == "definition"`), for
+item `queue:v2:ca9a4c04e83f08678564370d2b52d3cf`; associated spend-ledger
+entry (`response_id
+resp_06d7c01ec225bcc7006a8acd79917087d1af5ee8126aaf314c`, `charge_usd
+0.0001612`, `cumulative_usd 0.0068046`, `accounting ACTUAL`) present exactly
+once; 42 total ledger entries, all `ACTUAL`; `bulk.in_flight == []`.
+Independently re-ran `_validate_generated_candidate` (PASS) and
+`_validate_de_semantic_contract` (`morphology_missing_comparative`, matching
+the recorded rejection exactly) against the exact recorded candidate and the
+item's reconstructed source before touching anything.
+
+Reconciled with a one-off script built on the project's own
+`_load_checkpoint`/`_write_checkpoint` facilities — no ad-hoc text
+replacement, no provider transport imported. Moved
+`queue:v2:ca9a4c04e83f08678564370d2b52d3cf` from `bulk.rejected` to
+`bulk.completed` using the exact already-returned text, with
+`qa_required_reason: morphology_missing_comparative` added. No candidate
+was fabricated or altered. The other 41 completed records, the identity
+block, manifests, and the 42-entry spend ledger were verified byte-identical
+before/after against a pre-reconciliation backup (removed after
+verification).
+
+### Reload verification (fresh disk load)
+
+- `bulk.completed == 42`, `bulk.rejected == 0`, `bulk.in_flight == []`.
+- `qa.required == []`, `qa.completed == {}`, `qa.rejected == {}`,
+  `qa.in_flight == []` — QA remains unexecuted, as required (this repair
+  authorizes no QA transmission).
+- Ledger: exactly 42 entries, all `ACTUAL`; cumulative spend `USD
+  0.0068046` (unchanged from the paid receipt).
+- `queue:v2:ca9a4c04e83f08678564370d2b52d3cf` appears exactly once, in
+  `bulk.completed`, carrying `qa_required_reason:
+  morphology_missing_comparative`.
+- Item was **not** retransmitted; **zero** provider calls, **USD 0** paid
+  spend during this repair.
+
+### Executable evidence
+
+- `pytest -q tests/test_build_dict_stage04.py` — **159 passed**.
+- `pytest -q tests/test_build_dict_stage03.py` — **16 passed**.
+- `git diff --check` — PASS.
+- `make gate` — Ruff PASS; mypy --strict PASS (18 source files); pytest
+  **402 passed**; `check_agents.py` R1/R3/R7 PASS.
+
+**Changed paths:** `tools/build_dict.py`, `tests/test_build_dict_stage04.py`,
+`tasks/slice-6.report.md`. Local checkpoint file (outside the repository)
+reconciled in place; not a tracked/pushed artifact.
+
+**Provider calls during repair:** 0. **Paid spend during repair:** USD 0.
+**Historical v4 spend remains:** USD 0.0068046 (unchanged, 42/42
+accounted, 8 items remain pending toward the frozen 50).
+
+**Disposition:** `GERMAN_CANARY_V4_QA_RECOVERY_RECONCILED` — checkpoint now
+reads 42 bulk completed (1 provisional, `qa_required_reason
+morphology_missing_comparative`) / 0 rejected / 0 in-flight; QA required set
+not yet computed/executed. The same authorized German Canary v4 may resume
+from this reconciled checkpoint without resending the first 42 provider
+requests. Item 42 must receive a successful Terra QA pass before its text
+can become final; this repair authorizes no further paid work by itself,
+and resuming — bulk or QA — remains a separate owner/orchestrator decision.

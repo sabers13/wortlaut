@@ -1318,6 +1318,311 @@ def test_related_term_cannot_claim_exact_synonym() -> None:
     ) == "related_not_exact_synonym"
 
 
+# --- QA-recovery repair: morphology semantic gaps route through mandatory QA ---
+#
+# Regression coverage for the German Canary v4 QA-recovery repair (call 42,
+# item queue:v2:ca9a4c04e83f08678564370d2b52d3cf, lemma
+# "nordrhein-westfälischer"). "Steigerungsform" ("form of increase/degree") is
+# broader than "Komparativ" and remains genuinely invalid for a specifically
+# comparative source; the validator is NOT widened to accept it. What changes
+# is only where that failure goes: a bulk candidate that hits a source-
+# verifiable morphology_* semantic-contract gap, and only that, is no longer
+# a hard rejection — it is persisted as a PROVISIONAL bulk completion (the
+# exact Luna candidate, untouched) tagged with `qa_required_reason`, and
+# forced into mandatory Terra QA. QA itself runs the same strict validator
+# unchanged; provisional text can only reach output.sqlite via a full QA
+# pass.
+
+
+def _de_morphology_fixture(
+    tmp_path: Path, prefix: str, source_text: str
+) -> tuple[Path, Path, str, dict[str, dict[str, object]]]:
+    """A single DE item whose source carries a morphology feature.
+
+    Reuses the ordinary single-lemma stage02/stage03 fixture and only
+    overwrites the derivation source text (the item's own
+    ``derivation_source_ids`` still point at its own EN meaning row, so this
+    does not trip the cross-sense guard) to the exact morphology source under
+    test. Returns (stage02_path, queue_path, item_id, items).
+    """
+    db, queue, _items = make_stage02_with_n(tmp_path, 1, prefix=prefix)
+    payload = json.loads(queue.read_text(encoding="utf-8"))
+    item = payload["items"][0]
+    item["derivation_inputs"][0]["text"] = source_text
+    queue.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    items = {str(x["item_id"]): x for x in payload["items"]}
+    return db, queue, str(item["item_id"]), items
+
+
+class _BulkOnlyTransport:
+    """A transport that can only run the bulk phase (no ``send_qa``).
+
+    Used to observe bulk-phase-only behavior in isolation: with a single
+    pending QA-required item and no QA capability, ``build_stage04`` writes
+    the checkpoint and then fails closed with "No local deterministic Stage
+    04 QA transport configured" — the checkpoint state at that point is
+    exactly the bulk-phase outcome under test.
+    """
+
+    def __init__(self, items: dict[str, dict[str, object]], bulk_text: str, kind: str = "definition") -> None:
+        self.items = items
+        self.bulk_submitted: list[str] = []
+        self._bulk_text = bulk_text
+        self._kind = kind
+
+    def send_bulk(self, item_ids: list[str]) -> dict[str, dict[str, str]]:
+        self.bulk_submitted.extend(item_ids)
+        return {iid: {"meaning": self._bulk_text, "kind": self._kind} for iid in item_ids}
+
+
+class _SingleTextTransport(FakeTransport):
+    """FakeTransport with a fixed bulk candidate and a fixed QA candidate."""
+
+    def __init__(
+        self, items: dict[str, dict[str, object]], bulk_text: str, qa_text: str
+    ) -> None:
+        super().__init__()
+        self.items = items
+        self._bulk_text = bulk_text
+        self._qa_text = qa_text
+
+    def send_bulk(self, item_ids: list[str]) -> dict[str, dict[str, str]]:
+        self.bulk_submitted.extend(item_ids)
+        return {iid: {"meaning": self._bulk_text, "kind": "definition"} for iid in item_ids}
+
+    def send_qa(self, item_ids: list[str]) -> dict[str, dict[str, str]]:
+        self.qa_submitted.extend(item_ids)
+        return {iid: {"meaning": self._qa_text, "kind": "definition"} for iid in item_ids}
+
+
+def test_morphology_comparative_gap_is_provisional_not_hard_rejection(tmp_path: Path) -> None:
+    """Regression 1: the exact call-42 comparative gap is provisional, not rejected."""
+    db, queue, item_id, items = _de_morphology_fixture(
+        tmp_path, "comparative-gap", "comparative degree of nordrhein-westfälisch"
+    )
+    transport = _BulkOnlyTransport(items, "Steigerungsform von „nordrhein-westfälisch“")
+    checkpoint = tmp_path / "checkpoint.json"
+    with pytest.raises(BuildDictError, match="No local deterministic Stage 04 QA transport"):
+        build_stage04(
+            queue,
+            db,
+            tmp_path / "out.sqlite",
+            checkpoint,
+            "TEST_SYNTHETIC_LICENSE_v1",
+            transport=transport,
+            batch_size=1,
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert item_id not in state["bulk"]["rejected"]
+    completed = state["bulk"]["completed"][item_id]
+    assert completed["text"] == "Steigerungsform von „nordrhein-westfälisch“"
+    assert completed["qa_required_reason"] == "morphology_missing_comparative"
+    assert item_id in state["qa"]["required"]
+    assert not state["bulk"]["in_flight"]
+    assert not (tmp_path / "out.sqlite").exists()
+
+
+def test_morphology_qa_correction_reaches_final_output(tmp_path: Path) -> None:
+    """Regression 2: a corrected QA candidate becomes the final output text."""
+    db, queue, item_id, items = _de_morphology_fixture(
+        tmp_path, "comparative-corrected", "comparative degree of nordrhein-westfälisch"
+    )
+    transport = _SingleTextTransport(
+        items,
+        bulk_text="Steigerungsform von „nordrhein-westfälisch“",
+        qa_text="Komparativform von „nordrhein-westfälisch“",
+    )
+    out = tmp_path / "out.sqlite"
+    checkpoint = tmp_path / "checkpoint.json"
+    build_stage04(
+        queue, db, out, checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=transport, batch_size=1
+    )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert state["bulk"]["completed"][item_id]["qa_required_reason"] == "morphology_missing_comparative"
+    assert state["bulk"]["completed"][item_id]["text"] == "Steigerungsform von „nordrhein-westfälisch“"
+    assert state["qa"]["completed"][item_id]["text"] == "Komparativform von „nordrhein-westfälisch“"
+    assert item_id not in state["qa"]["rejected"]
+    conn = sqlite3.connect(out)
+    row = conn.execute(
+        "SELECT text FROM sense_meaning WHERE source=? AND language='de'", (GENERATED_MARKER,)
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == "Komparativform von „nordrhein-westfälisch“"
+
+
+def test_morphology_qa_noncorrection_stops_before_finalization(tmp_path: Path) -> None:
+    """Regression 3: an uncorrected QA candidate rejects and blocks output."""
+    db, queue, item_id, items = _de_morphology_fixture(
+        tmp_path, "comparative-uncorrected", "comparative degree of nordrhein-westfälisch"
+    )
+    transport = _SingleTextTransport(
+        items,
+        bulk_text="Steigerungsform von „nordrhein-westfälisch“",
+        qa_text="Steigerungsform von „nordrhein-westfälisch“",  # Terra fails to correct it
+    )
+    out = tmp_path / "out.sqlite"
+    checkpoint = tmp_path / "checkpoint.json"
+    with pytest.raises(BuildDictError, match="QA unit had 1 rejected; STOP"):
+        build_stage04(
+            queue, db, out, checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=transport, batch_size=1
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert item_id in state["qa"]["rejected"]
+    assert item_id not in state["qa"]["completed"]
+    assert not out.exists()
+
+
+def test_finalization_guard_blocks_resumed_output_after_qa_rejection(tmp_path: Path) -> None:
+    """Resuming after a QA rejection must never fall back to provisional text.
+
+    Once a provisional item is QA-rejected and the run stops (regression 3
+    above), a later call against the same checkpoint has no pending bulk or
+    QA work left to do for that item — the finalization guard is the only
+    thing standing between that resumed call and silently writing the
+    unvalidated Luna candidate to output.sqlite.
+    """
+    db, queue, item_id, items = _de_morphology_fixture(
+        tmp_path, "guard-resume", "comparative degree of nordrhein-westfälisch"
+    )
+    steigerungsform = "Steigerungsform von „nordrhein-westfälisch“"
+    checkpoint = tmp_path / "checkpoint.json"
+    with pytest.raises(BuildDictError, match="QA unit had 1 rejected; STOP"):
+        build_stage04(
+            queue,
+            db,
+            tmp_path / "out1.sqlite",
+            checkpoint,
+            "TEST_SYNTHETIC_LICENSE_v1",
+            transport=_SingleTextTransport(items, steigerungsform, steigerungsform),
+            batch_size=1,
+        )
+    assert not (tmp_path / "out1.sqlite").exists()
+    with pytest.raises(BuildDictError, match="cannot be finalized"):
+        build_stage04(
+            queue,
+            db,
+            tmp_path / "out2.sqlite",
+            checkpoint,
+            "TEST_SYNTHETIC_LICENSE_v1",
+            transport=_SingleTextTransport(items, steigerungsform, steigerungsform),
+            batch_size=1,
+        )
+    assert not (tmp_path / "out2.sqlite").exists()
+    assert item_id in json.loads(checkpoint.read_text(encoding="utf-8"))["bulk"]["completed"]
+
+
+def test_morphology_subjunctive_i_drift_is_provisional(tmp_path: Path) -> None:
+    """Regression 4: a würde-conditional drift on a Konjunktiv-I source is provisional."""
+    db, queue, item_id, items = _de_morphology_fixture(
+        tmp_path, "subjunctive-drift", "second-person plural subjunctive I of ertrinken"
+    )
+    transport = _BulkOnlyTransport(items, "ihr würdet ertrinken")
+    checkpoint = tmp_path / "checkpoint.json"
+    with pytest.raises(BuildDictError, match="No local deterministic Stage 04 QA transport"):
+        build_stage04(
+            queue,
+            db,
+            tmp_path / "out.sqlite",
+            checkpoint,
+            "TEST_SYNTHETIC_LICENSE_v1",
+            transport=transport,
+            batch_size=1,
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert item_id not in state["bulk"]["rejected"]
+    completed = state["bulk"]["completed"][item_id]
+    assert completed["text"] == "ihr würdet ertrinken"
+    assert completed["qa_required_reason"] == "morphology_missing_subjunctive_i"
+    assert item_id in state["qa"]["required"]
+
+
+def test_morphology_unsupported_elaboration_is_provisional(tmp_path: Path) -> None:
+    """Regression 5: a plural source's unsupported lexical elaboration is provisional."""
+    db, queue, item_id, items = _de_morphology_fixture(
+        tmp_path, "unsupported-elaboration", "plural of Arisierung"
+    )
+    transport = _BulkOnlyTransport(
+        items, "Plural von „Arisierung“: erzwungene Übertragung jüdischen Eigentums"
+    )
+    checkpoint = tmp_path / "checkpoint.json"
+    with pytest.raises(BuildDictError, match="No local deterministic Stage 04 QA transport"):
+        build_stage04(
+            queue,
+            db,
+            tmp_path / "out.sqlite",
+            checkpoint,
+            "TEST_SYNTHETIC_LICENSE_v1",
+            transport=transport,
+            batch_size=1,
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert item_id not in state["bulk"]["rejected"]
+    completed = state["bulk"]["completed"][item_id]
+    assert completed["qa_required_reason"] == "morphology_unsupported_elaboration"
+    assert item_id in state["qa"]["required"]
+
+
+def test_structural_failure_on_morphology_item_remains_hard_rejection(tmp_path: Path) -> None:
+    """Regression 6: a generic/structural failure is never swept into recovery.
+
+    Even though this item carries a source-supplied morphology feature
+    (plural), a candidate that echoes the lemma fails generic structural
+    validation (``echo_lemma``, from ``_validate_generated_candidate``, not
+    the semantic contract) — it must hard-reject exactly as before.
+    """
+    db, queue, item_id, items = _de_morphology_fixture(
+        tmp_path, "structural-hard", "plural of Testwort"
+    )
+    lemma_text = str(items[item_id]["lemma_text"])
+    transport = _BulkOnlyTransport(items, lemma_text)
+    checkpoint = tmp_path / "checkpoint.json"
+    with pytest.raises(BuildDictError, match="rejected"):
+        build_stage04(
+            queue,
+            db,
+            tmp_path / "out.sqlite",
+            checkpoint,
+            "TEST_SYNTHETIC_LICENSE_v1",
+            transport=transport,
+            batch_size=1,
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert state["bulk"]["rejected"][item_id]["error_code"] == "echo_lemma"
+    assert item_id not in state["bulk"]["completed"]
+
+
+def test_non_morphology_semantic_failure_remains_hard_rejection(tmp_path: Path) -> None:
+    """Regression 7: a semantic failure with no morphology feature stays hard.
+
+    The source ("mod") carries no morphology feature at all, so
+    ``_is_morphology_qa_recoverable`` can never apply regardless of which
+    ``_validate_de_semantic_contract`` code fires — this is the same
+    unsupported-domain-elaboration failure covered directly against the
+    validator in ``test_morphology_and_terse_source_regressions_reject_unsupported_elaboration``,
+    exercised here end-to-end through ``build_stage04``.
+    """
+    db, queue, item_id, items = _de_morphology_fixture(tmp_path, "domain-hard", "mod")
+    transport = _BulkOnlyTransport(items, "Fan-Erweiterung für ein Computerspiel")
+    checkpoint = tmp_path / "checkpoint.json"
+    with pytest.raises(BuildDictError, match="rejected"):
+        build_stage04(
+            queue,
+            db,
+            tmp_path / "out.sqlite",
+            checkpoint,
+            "TEST_SYNTHETIC_LICENSE_v1",
+            transport=transport,
+            batch_size=1,
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert state["bulk"]["rejected"][item_id]["error_code"] == "unsupported_domain_elaboration"
+    assert item_id not in state["bulk"]["completed"]
+
+
 def test_reasoning_effort_change_invalidates_checkpoint_compatibility(tmp_path: Path) -> None:
     stage02, queue, items = queue_fixture(tmp_path)
     checkpoint = tmp_path / "ckpt.json"
