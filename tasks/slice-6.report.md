@@ -1056,3 +1056,150 @@ committed preflight).
 **Disposition:** `LIVE_RESPONSES_TRANSPORT_IMPLEMENTATION_COMPLETE`
 
 *No API keys, credential fragments, or private absolute paths recorded.*
+
+## ADR-0007 Live Responses transport activation — Attempt 2
+
+**Status:** ZERO-SPEND repair of the single blocking defect found by the mandatory
+independent T3 auth-security full-diff review of Attempt 1. Attempt-1 historical
+evidence above is preserved unchanged; the restart-persistence claims made in that
+section are **superseded by the Attempt-2 evidence below**.
+
+**Provider calls:** `0`. **Paid spend this attempt:** `USD 0`.
+No credential was read, validated, or transmitted; no canary ran. The owner's
+German Canary v3 authorization remains RECORDED but SUSPENDED pending fresh
+independent auth-security re-review.
+
+### Review outcome that triggered this attempt
+
+The independent reviewer (opus-5 / T3 / high) returned
+`AUTH_SECURITY_FULL_DIFF_REVIEW_BLOCKED` over range
+`033085cc..dbee7bc0` with two blockers:
+
+- **B1 — stale spend-ledger object.** `execute_stage04_live` loaded the checkpoint
+  and handed spend-ledger object *A* to `OpenAILiveResponsesTransport`.
+  `build_stage04` then reloaded the same checkpoint, producing an independent
+  ledger object *B*. The pre-existing re-alias `state["spend"] = spend_state` ran
+  only when no `spend` key existed, so on any **restarted** run the transport
+  mutated *A* while every `_write_checkpoint` serialized *B*. Paid requests were
+  transmitted whose worst-case reservations and ACTUAL charges never reached
+  durable state, breaking durable-reservation-before-transmission, restart
+  cumulative-spend preservation, and hard-cap enforcement across restarts.
+  The reviewer reproduced it with a fake provider: run 1 persisted 2 entries /
+  USD 0.000136; after restart, 50 transmissions occurred and 49 bulk items
+  completed while the persisted ledger still showed 2 entries / USD 0.000136.
+- **B2 — report claim invalidated.** The Attempt-1 section asserted "restarts
+  preserve cumulative spend" and that an admitted request "persists its worst-case
+  reservation together with `in_flight` atomically before transmission". Both were
+  false for any run resuming an existing checkpoint.
+
+### Exact remedy (B1 — RESOLVED)
+
+Single narrow change in `build_stage04`, at the checkpoint-load site:
+
+- when a persisted ledger exists, its validated contents are moved **into the
+  caller-supplied ledger dict** (`spend_state.clear()` + `spend_state.update(...)`,
+  guarded by an identity check) instead of rebinding a local name;
+- `state["spend"] = spend_state` now executes on **both** branches.
+
+Result: exactly **one authoritative mutable spend-ledger object** exists per live
+Stage-04 execution — the same dict the live transport mutates, the same dict
+`build_stage04`'s `state` references, and the same dict `_write_checkpoint`
+serializes, on fresh runs and restarts alike. The transport was not redesigned;
+no other behavior changed.
+
+### Durability invariant now holds after restart
+
+For every live paid request, including after restart: authoritative ledger loaded →
+worst-case reservation appended → `in_flight` + updated ledger durably checkpointed
+→ only then HTTP transmission → completed response with valid usage converts the
+reservation to ACTUAL → missing/malformed usage retains `WORST_CASE_RESERVED` →
+ambiguous outcome retains `in_flight` and the reservation → restart reloads the
+cumulative ledger and continues from that exact value. No restart resets, forks, or
+stops persistence of cumulative spend.
+
+### End-to-end restart regression (the boundary Attempt 1 missed)
+
+`test_execute_stage04_live_restart_persists_new_spend_end_to_end` drives **three
+consecutive real `execute_stage04_live` invocations against one checkpoint**,
+discarding every in-memory object between them (fake opener, injected test
+credential, zero network). It crosses the exact
+`execute_stage04_live → build_stage04` boundary that caused B1:
+
+- **Run 1** — 2 paid transmissions; item 0 completes with usage, item 1 returns
+  `incomplete` → STOP. Persisted: **2 entries, both ACTUAL, USD 0.000136**,
+  `in_flight == []`.
+- **Run 2 (restart)** — 1 further paid transmission to
+  `https://api.openai.com/v1/responses`, response carries no `usage` →
+  `WORST_CASE_RESERVED` stands, durable rejection `provider_usage_unavailable`.
+  Checkpoint re-read from disk: **3 entries, USD 0.0009424** — the prior two
+  entries preserved verbatim, the new entry carrying the run-2 reservation
+  (`charge_usd == 0.0008064`) with a valid cumulative chain. Persisted ledger
+  equals the accounting the second run actually used.
+- **Run 3 (restart)** — the next request's worst case plus the cumulative spend
+  from **both** prior runs exceeds the cap: `Stage04PretransmissionBlocked`
+  raised with **zero HTTP calls**, `in_flight == []`, ledger unchanged.
+- The test also asserts the counterfactual that makes it meaningful: the *same*
+  cap would have **admitted** that run-3 request had the ledger reset to zero
+  (`stage04_pretransmission_guard_blocks_decimal(0, cap, w) is False` while
+  `(total_after_two_runs, cap, w) is True`).
+
+`test_live_spend_ledger_object_is_shared_with_checkpoint_state` additionally
+asserts object identity directly on both a fresh run and a restart: the
+transport's `_spend_state` **is** the dict passed to `_write_checkpoint`.
+
+Both new tests were confirmed to **fail against the Attempt-1 code**
+("restart spend must persist (Attempt-1 B1)" / "transport ledger and serialized
+checkpoint ledger diverged") and pass after the remedy.
+
+### Preserved Attempt-1 security properties (unchanged)
+
+Explicit live opt-in; credential read only after the full authorization preflight;
+fixed `https://api.openai.com/v1/responses`; redirects declined; env proxies
+emptied; zero automatic retries; finite timeout; frozen 50-item selection fence;
+request-SHA fence; Batch-SHA fence; cost-plan fence; Decimal cap arithmetic;
+combined bulk+QA USD 0.45 cap; ambiguous `in_flight` STOP; response parsing;
+reasoning content never persisted; usage accounting; missing-usage worst-case
+reservation; legacy Persian checkpoint untouched. No request-body semantics,
+governance, ADR, Stage-03, Stage-05, dependency, or Docker file was touched.
+
+### Frozen request invariance (re-verified, zero spend)
+
+The committed preflight was re-executed end-to-end against the **real** accepted
+queue (`114dd20f…`, 334605426 bytes, 480221 items) and the **real** frozen
+50-item selection (`1ffa5e76c7…`), via `prepare_stage04_live` only, in a process
+with `OPENAI_API_KEY` removed from the environment:
+
+- `LIVE_PREFLIGHT_OK selection=1ffa5e76c731 request_sha=5e2f6f92a72e
+  batch_equiv_ok cost_plan_ok`
+- Regenerated synchronous request artifact SHA:
+  `5e2f6f92a72e83c3a14e61d78380fbcf5e76233e9133381440de4724ca731f7b` — **EXACT MATCH**
+- Regenerated Batch-equivalence bytes SHA:
+  `ad9cb8c10a479155015b1fa97a552bf129a129268231ecd8e1e73c39d203d6d6` — **EXACT MATCH**
+- 50 selected items, 50 unique; no checkpoint file created; nothing transmitted.
+
+REQUEST_SHA UNCHANGED / BATCH_SHA UNCHANGED: **PASS**.
+
+### Executable evidence
+
+- Stage-04 targeted: `pytest -q tests/test_build_dict_stage04.py` — **89 passed**
+  (87 from Attempt 1 + 2 new restart-persistence regressions)
+- Stage-03 targeted: `pytest -q tests/test_build_dict_stage03.py` — **16 passed**
+- Full gate: `make gate` — Ruff PASS; mypy --strict PASS (18 source files);
+  pytest **332 passed**; check_agents R1/R3/R7 PASS — PASS (single final run)
+- `git diff --check`: PASS
+
+**Changed paths:** `tools/build_dict.py`, `tests/test_build_dict_stage04.py`,
+`tasks/slice-6.report.md`
+
+**Branch/push:** Base `slice/6`
+`dbee7bc04481247487efd921a89b57e1fa40933e`; base `main`
+`2f2486a5021465842ada8e5cc3d43e9a030e6955` unchanged. Final HEAD recorded in the
+return receipt after push.
+
+**Work left undone / next authority:** Fresh independent T3 auth-security
+full-diff review of the final live transport implementation. No paid call is
+permitted before that review is accepted.
+
+**Disposition:** `LIVE_RESPONSES_TRANSPORT_RETRY_COMPLETE`
+
+*No API keys, credential fragments, or private absolute paths recorded.*

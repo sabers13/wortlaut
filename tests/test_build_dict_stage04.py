@@ -2366,6 +2366,164 @@ def test_restart_preserves_cumulative_spend_and_constrains_cap(tmp_path: Path) -
     assert restarted_admissible < empty_admissible
 
 
+def test_execute_stage04_live_restart_persists_new_spend_end_to_end(tmp_path: Path) -> None:
+    """Attempt-2 B1 regression: cross the execute_stage04_live -> build_stage04 boundary.
+
+    Attempt 1 held two distinct spend-ledger dicts: the live transport mutated the
+    one built by execute_stage04_live while _write_checkpoint serialized a second
+    one reloaded inside build_stage04. Every restarted run therefore transmitted
+    paid requests whose reservations/charges never reached durable state. This
+    test drives three consecutive real execute_stage04_live invocations against a
+    single checkpoint, discarding all in-memory objects between them.
+    """
+    fx = _build_live_fixture(tmp_path)
+    sel_ids = fx["sel_ids"]
+    ckpt = tmp_path / "b1-checkpoint.json"
+
+    actual_charge = (Decimal(100) * Decimal("0.20") + Decimal(40) * Decimal("1.20")) / Decimal(
+        1000000
+    )
+    worst_case = stage04_worst_case_request_cost_usd_decimal(
+        int(fx["bulk_ests"][sel_ids[2]]),
+        STAGE04_MAX_OUTPUT_TOKENS,
+        Decimal("0.20"),
+        Decimal("1.20"),
+        Decimal("2"),
+    )
+    # Admits exactly: two bulk requests in run 1, one in run 2, none in run 3.
+    cap = (actual_charge * 2) + worst_case + (worst_case / 2)
+
+    def invoke(tag: str, outcomes: list[object]) -> FakeLiveOpener:
+        """One process-style live execution; caller keeps no objects from it."""
+        plan = _prepare_live(
+            fx,
+            tmp_path,
+            "b1",
+            checkpoint_path=ckpt,
+            subset_queue_path=tmp_path / f"b1-{tag}-subset.json",
+            hard_spend_cap_usd=_decimal_to_wire(cap),
+        )
+        opener = FakeLiveOpener(outcomes)
+        with pytest.raises(BuildDictError):
+            _execute_live(plan, fx, opener)
+        return opener
+
+    # ---- Run 1: item0 completes with usage; item1 returns incomplete -> STOP. ----
+    opener1 = invoke(
+        "run1",
+        [
+            FakeLiveResponse(env=_completed_env(meaning="bedeutung eins")),
+            FakeLiveResponse(
+                env=_completed_env(status="incomplete", incomplete={"reason": "max_output_tokens"})
+            ),
+        ],
+    )
+    assert len(opener1.calls) == 2, "run 1 must actually transmit two paid requests"
+
+    state1 = _read_state(ckpt)
+    assert state1["bulk"]["in_flight"] == []
+    spend1 = _validate_spend_state(state1["spend"])
+    entries1 = spend1["entries"]
+    # (A) first execution created persisted spend entries
+    assert len(entries1) == 2
+    assert [e["accounting"] for e in entries1] == ["ACTUAL", "ACTUAL"]
+    total1 = _spend_total_usd(spend1)
+    assert total1 == actual_charge * 2
+
+    # ---- (B) Run 2: restart. Nothing from run 1 survives except the checkpoint. ----
+    opener2 = invoke("run2", [FakeLiveResponse(env=_completed_env(usage=None))])
+    # (C) the restarted run really transmitted a further paid request
+    assert len(opener2.calls) == 1
+    assert opener2.calls[0]["url"] == STAGE04_LIVE_RESPONSES_URL
+
+    # (D) re-read the checkpoint from disk after the second invocation
+    state2 = _read_state(ckpt)
+    spend2 = _validate_spend_state(state2["spend"])
+    entries2 = spend2["entries"]
+    total2 = _spend_total_usd(spend2)
+
+    # (E) persisted entry count and cumulative amount increased correctly
+    assert len(entries2) == len(entries1) + 1, "restart spend must persist (Attempt-1 B1)"
+    assert total2 == total1 + worst_case
+    assert total2 > total1
+
+    # (F) the persisted ledger is exactly the accounting the second run used:
+    #     run 2's response carried no usage, so its worst-case reservation stands.
+    new_entry = entries2[-1]
+    assert new_entry["item_id"] == sel_ids[2]
+    assert new_entry["phase"] == "bulk"
+    assert new_entry["accounting"] == "WORST_CASE_RESERVED"
+    assert Decimal(new_entry["charge_usd"]) == worst_case
+    assert Decimal(new_entry["cumulative_usd"]) == total2
+    assert entries2[:2] == entries1, "prior persisted entries must be preserved verbatim"
+    assert state2["bulk"]["rejected"][sel_ids[2]]["error_code"] == "provider_usage_unavailable"
+
+    # ---- (G) Run 3: remaining-cap enforcement uses cumulative spend from BOTH runs. ----
+    opener3 = invoke("run3", [AssertionError("run 3 must block before any transmission")])
+    assert len(opener3.calls) == 0, "over-cap request must never reach HTTP"
+
+    state3 = _read_state(ckpt)
+    assert state3["bulk"]["in_flight"] == [], "blocked request leaves no in_flight side effect"
+    assert _spend_total_usd(_validate_spend_state(state3["spend"])) == total2
+
+    # (H) the same cap would have ADMITTED that request had the ledger reset to zero.
+    next_worst_case = stage04_worst_case_request_cost_usd_decimal(
+        int(fx["bulk_ests"][sel_ids[3]]),
+        STAGE04_MAX_OUTPUT_TOKENS,
+        Decimal("0.20"),
+        Decimal("1.20"),
+        Decimal("2"),
+    )
+    assert bd.stage04_pretransmission_guard_blocks_decimal(total2, cap, next_worst_case) is True
+    assert (
+        bd.stage04_pretransmission_guard_blocks_decimal(Decimal(0), cap, next_worst_case) is False
+    ), "test is only meaningful if a reset ledger would have admitted this request"
+
+
+def test_live_spend_ledger_object_is_shared_with_checkpoint_state(tmp_path: Path) -> None:
+    """The transport's ledger and the dict build_stage04 serializes are ONE object."""
+    fx = _build_live_fixture(tmp_path)
+    ckpt = tmp_path / "shared-checkpoint.json"
+    seen: dict[str, object] = {}
+    real_write = bd._write_checkpoint
+
+    def spy(path: Path, identity: dict[str, str], state: dict[str, object]) -> None:
+        seen["spend"] = state.get("spend")
+        real_write(path, identity, state)
+
+    for tag, outcomes in (
+        ("fresh", [FakeLiveResponse(env=_completed_env(usage=None))]),
+        ("restart", [FakeLiveResponse(env=_completed_env(usage=None))]),
+    ):
+        plan = _prepare_live(
+            fx,
+            tmp_path,
+            "shared",
+            checkpoint_path=ckpt,
+            subset_queue_path=tmp_path / f"shared-{tag}-subset.json",
+        )
+        transports: list[object] = []
+        real_transport_cls = bd.OpenAILiveResponsesTransport
+
+        def capture(*args: object, **kwargs: object) -> object:
+            t = real_transport_cls(*args, **kwargs)  # type: ignore[arg-type]
+            transports.append(t)
+            return t
+
+        bd.OpenAILiveResponsesTransport = capture  # type: ignore[assignment,misc]
+        bd._write_checkpoint = spy  # type: ignore[assignment]
+        try:
+            with pytest.raises(BuildDictError):
+                _execute_live(plan, fx, FakeLiveOpener(outcomes))
+        finally:
+            bd.OpenAILiveResponsesTransport = real_transport_cls  # type: ignore[misc]
+            bd._write_checkpoint = real_write  # type: ignore[assignment]
+        assert len(transports) == 1
+        assert transports[0]._spend_state is seen["spend"], (
+            f"{tag}: transport ledger and serialized checkpoint ledger diverged"
+        )
+
+
 def test_bulk_and_qa_share_the_same_hard_cap(tmp_path: Path) -> None:
     fx = _build_live_fixture(tmp_path)
     first_id = fx["sel_ids"][0]  # type: ignore[index]

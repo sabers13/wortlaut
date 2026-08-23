@@ -4585,9 +4585,19 @@ def build_stage04(
     if spend_state is not None:
         existing_spend = state.get("spend")
         if existing_spend is not None:
-            spend_state = _validate_spend_state(existing_spend)
-        else:
-            state["spend"] = spend_state
+            validated = _validate_spend_state(existing_spend)
+            if validated is not spend_state:
+                # Restart: adopt the persisted ledger INTO the caller-supplied dict.
+                # A live transport captured `spend_state` before this call, so the
+                # loaded contents must be moved into that exact object rather than
+                # rebinding a local name — otherwise the transport would mutate one
+                # ledger while _write_checkpoint serialized another, and paid spend
+                # incurred after a restart would never persist.
+                spend_state.clear()
+                spend_state.update(validated)
+        # Exactly ONE authoritative mutable ledger object for this execution: the
+        # transport mutates it and every checkpoint write below serializes it.
+        state["spend"] = spend_state
     # Ensure manifests exist based on current provider limits - but preserve existing manifests if compatible?  # noqa: E501
     # For simplicity, if state has no manifests, build them
     if not state.get("manifests"):
