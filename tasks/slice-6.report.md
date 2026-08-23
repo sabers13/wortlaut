@@ -1806,3 +1806,216 @@ from this reconciled checkpoint without resending the first 42 provider
 requests. Item 42 must receive a successful Terra QA pass before its text
 can become final; this repair authorizes no further paid work by itself,
 and resuming — bulk or QA — remains a separate owner/orchestrator decision.
+
+## German Canary v4 past-participle source-classifier repair — zero-spend
+
+**Status:** local repair + checkpoint reconciliation only. No provider
+credential was read, no provider request was made, no candidate text was
+retransmitted.
+
+### Live resume 3 (out of band — real paid execution, not part of this repair)
+
+Since the prior report entry, the live v4 canary was resumed to completion of
+bulk (42 → 50) plus the deterministic 36-item QA set: 8 new bulk calls + 34
+QA calls, 42 new provider calls, real paid spend, all real. That run stopped
+fail-closed on 1 QA rejection with 2 QA items never attempted (no cost). This
+repair is entirely local reconciliation of that already-paid state — it does
+not touch, retry, or extend that execution.
+
+### Rejected QA response — a second deterministic validator false positive
+
+`queue:v2:efc8334ad5993e20c3b5e1298ef46dc9`, lemma `vorbereitet`, source
+`past participle of vorbereiten`. Both Luna (bulk) and Terra (QA)
+independently returned `Partizip II von „vorbereiten“` (kind `definition`) —
+semantically correct: `Partizip II` / `Partizip Perfekt` is exactly the
+German term for "past participle". The validator rejected it twice as
+`morphology_missing_preterite`. **Confirmed root cause:** the `preterite`
+source rule's `\bpreterite\b|\bpast\b` pattern matched the literal word
+`past` inside the two-word phrase `past participle` — a distinct,
+non-finite verb form, not the preterite/simple-past tense — and wrongly
+demanded `Präteritum` in the output.
+
+### Root-cause repair — source-side only, output validation NOT weakened
+
+`tools/build_dict.py`, `_MORPHOLOGY_FEATURE_RULES`:
+
+- Added two new, independent features: `past_participle` (source
+  `\b(?:past|perfect)\s+participles?\b`, output
+  `\bpartizip[\s-]*(?:ii|2|perfekt){FORM_SUFFIX}\b` — accepts `Partizip II`,
+  `Partizip 2`, `Partizip II-Form`, `Partizip-II-Form`, `Partizip Perfekt`)
+  and `present_participle` (source `\bpresent\s+participles?\b`, output
+  `\bpartizip[\s-]*(?:i|1|präsens){FORM_SUFFIX}\b` — accepts `Partizip I`,
+  `Partizip 1`, `Partizip Präsens`). The `ii`/`i` alternation is the same
+  bounded technique already used for Konjunktiv-I/II: `Partizip I` cannot
+  satisfy the `past_participle` pattern and `Partizip II` cannot satisfy
+  `present_participle`, verified by test.
+- The `present`, `preterite`, and `perfect` source rules each gained a
+  negative lookahead — `\bpresent\b(?!\s+participles?)`,
+  `\bpreterite\b|\bsimple\s+past\b|\bpast\b(?!\s+participles?)`,
+  `\bperfect\b(?!\s+participles?)` — so a source phrase already claimed by a
+  participle feature can never *also* trigger the unrelated tense feature
+  (which would otherwise demand two contradictory German labels from one
+  candidate). A bare, non-participle `past` remains valid preterite evidence
+  exactly as before — confirmed live in the accepted queue (`past of
+  singen`) — nothing was deleted, only the participle collision excluded.
+- Output-side patterns for `present`/`preterite`/`perfect` are **unchanged**.
+  This is a source-classification repair only; `_validate_de_semantic_
+  contract`'s acceptance criteria for existing features were not touched, and
+  `Partizip II` still does not satisfy `preterite`, `Präteritum` still does
+  not satisfy `past_participle` — reverified directly by test.
+
+### Source-feature collision audit (offline, zero-spend)
+
+Scanned all 577,141 DE `derivation_inputs` rows in the accepted, hash-verified
+Stage-03 queue (`/tmp/flashcard-stage03-v2.json`, SHA
+`114dd20f1e071708ca43ff433284ce1be0e9662763db5a589930a8f5a045cf2a`, matching
+`authorized_queue_sha256`) for the phrase families named in the audit
+request:
+
+- `past participle`: **5,777** occurrences — real, common source phrasing,
+  not an edge case. Fixed (new `past_participle` feature).
+- `present participle`: **5,629** occurrences — the same collision class on
+  the `present` rule. Fixed (new `present_participle` feature). One of the
+  50 frozen canary items uses this exact phrasing
+  (`queue:v2:4a6c8cb9...`, lemma `alternd`) and was already QA-completed
+  with text `Partizip Präsens von „altern“`, which happens to also satisfy
+  the old, over-broad `present` pattern — it was never visibly rejected, but
+  was misclassified; reverified to still pass under the fixed rule.
+- `perfect participle`: **569** occurrences, essentially all of the form
+  `perfect participle of X`. This is a real, third English-grammar synonym
+  for "past participle" (used in perfect-tense constructions) naming the
+  identical German form — **a directly analogous latent collision on the
+  `perfect` rule**, not previously reported. Fixed: `perfect participle`
+  now resolves to `past_participle`, not the unrelated `perfect` tense.
+  None of the 50 frozen canary items use this phrasing (confirmed by scan),
+  so this was a latent defect for the current canary, not a live blocker.
+- Bare, non-participle `perfect`: 33 occurrences, none of the form
+  `perfect of X`; ordinary vocabulary content or composite-tense names
+  (`future perfect`, `past perfect`/`pluperfect`, `conditional perfect`) that
+  are themselves outside this repair's scope — **reported, not fixed**: none
+  of the 50 frozen canary items use any of these phrasings (confirmed by
+  scan), the existing `perfect` rule's plain-word behavior is otherwise
+  unchanged, and building out a full composite-tense taxonomy
+  (Plusquamperfekt/Futur II/Konditional Perfekt) is a distinct,
+  unrequested scope expansion beyond the reported defect class.
+- Bare, non-participle `past`: 98 occurrences, including 5 real `past of X`
+  formulations (`past of singen`, `past of besingen`, `past of genießen`,
+  `past of sitzen`, `past of fliegen`) — confirmed still recognized as
+  `preterite` evidence after the repair (not deleted).
+- `comparative`/`superlative`, `singular`/`plural`, `subjunctive I`/`II`:
+  no collision — already distinct words, or (subjunctive) already protected
+  by a trailing `\b` boundary that a longer suffix like `ii` cannot satisfy
+  when only `i` is claimed. No change.
+
+### Regression tests (`tests/test_build_dict_stage04.py`)
+
+- 21 new rows added to `test_morphology_feature_recognizer_truth_table`
+  covering past/present/perfect participle acceptance, the participle vs.
+  bare-tense independence, and the preserved bare-`past` case.
+- `test_past_participle_and_preterite_are_independent_features` — the exact
+  call-42-analogous scenario: `past participle of vorbereiten` detects only
+  `past_participle` (never `preterite`), `Partizip II` passes,
+  `Präteritum` is rejected as `morphology_missing_past_participle`; and the
+  converse for a genuine `preterite` source.
+- `test_present_participle_does_not_activate_present_tense` — the exact
+  `alternd` item: detects only `present_participle`; the already-accepted
+  live text `Partizip Präsens von „altern“` still passes, `Partizip I` also
+  passes, plain `Präsens` is rejected.
+- `test_past_participle_morphology_gap_remains_qa_routed` — a genuine
+  `past_participle` gap (wrong candidate) is still provisional + forced QA
+  under the existing, unmodified morphology QA-recovery policy from the
+  prior repair — proving the new feature composes with that policy with no
+  policy change.
+
+All prior regressions pass unmodified. `pytest -q tests/test_build_dict_stage04.py` —
+**198 passed** (175 + 23 additions).
+
+### Dry-revalidation against already-paid evidence (zero-spend)
+
+Re-ran the fixed validators against every already-paid v4 candidate before
+touching the checkpoint:
+
+- All 50 `bulk.completed` candidates: **49/50 now pass outright**; the sole
+  remaining failure is item 42 (`morphology_missing_comparative`,
+  `Steigerungsform`), an unrelated, already-known, already-provisional,
+  genuinely-still-invalid candidate — unaffected by this repair.
+- All 34 already-transmitted QA responses (33 previously completed + the 1
+  rejected response): **34/34 now pass**, including the exact recorded
+  Terra text for `efc8334...` (`Partizip II von „vorbereiten“` — confirmed
+  `FIXED_VALIDATOR_RESULT: PASS`) and the `alternd` present-participle item
+  reconfirmed unchanged.
+- No previously-accepted result became invalid under the fixed rules.
+
+### Checkpoint reconciliation (local only — zero provider calls)
+
+Read the live checkpoint as durable evidence. Confirmed directly: exact QA
+candidate text `Partizip II von „vorbereiten“`, associated ledger entry
+(`response_id resp_07f1209f58de8147006a8ad70f34c487d1a68a4479d7fea3bf`,
+`charge_usd 0.001152`, `cumulative_usd 0.0692788`, `accounting ACTUAL`,
+`phase qa`) present exactly once; 84 total ledger entries, all `ACTUAL`,
+all unique response IDs; `qa.in_flight == []`.
+
+Reconciled with a one-off script built on the project's own
+`_load_checkpoint`/`_write_checkpoint` facilities — no ad-hoc text
+replacement, no provider transport imported, no ledger entry added or
+modified. Moved `queue:v2:efc8334ad5993e20c3b5e1298ef46dc9` from
+`qa.rejected` to `qa.completed` using the exact already-returned Terra text,
+in the standard shape (`kind: "definition"`, `source: "llm_generated_v1"`,
+`license: "CC BY-SA"`). No candidate was fabricated.
+
+Per instruction, the bulk-completed record's historical
+`qa_required_reason: "morphology_missing_preterite"` marker was **retained
+unchanged** rather than cleared: it is now an obsolete classification (the
+item in fact never needed QA routing under the fixed rule — dry-revalidation
+confirms its original bulk candidate passes outright), but the marker
+remains accurate as an audit trail of *why the item was historically routed
+to QA*, and does not claim that reason was semantically valid. The
+finalization guard added in the prior repair only checks that a
+`qa_required_reason`-carrying item is in `qa.required`/`qa.completed`/not in
+`qa.rejected` — it does not interpret the reason string — so retaining the
+historical marker does not block finalization once QA is (as it now is)
+successfully completed. Bulk state, `qa.required`, `qa.in_flight`, identity,
+manifests, and the 84-entry spend ledger were verified byte-identical
+before/after against a pre-reconciliation backup (removed after
+verification).
+
+### Reload verification (fresh disk load)
+
+- `bulk.completed == 50`, `bulk.rejected == 0`, `bulk.in_flight == []`
+  (unchanged).
+- `qa.required == 36`, `qa.completed == 34`, `qa.rejected == 0`,
+  `qa.in_flight == []`.
+- Exactly 2 QA-required items remain never-attempted:
+  `queue:v2:f6582244316e30bd5a98f46d1e7a5b51`,
+  `queue:v2:fcf0b3676408cbf42fec29c3547b8bcd`.
+- Ledger: exactly 84 entries, all `ACTUAL`, all 84 response IDs unique;
+  cumulative spend `USD 0.0692788` (byte-identical to the paid receipt).
+- `queue:v2:efc8334ad5993e20c3b5e1298ef46dc9` appears exactly once, in
+  `qa.completed`; no longer in `qa.rejected`.
+- Item was **not** retransmitted; **zero** provider calls, **USD 0** paid
+  spend during this repair.
+- `output.sqlite` was **not** created (2 QA items remain unattempted; the
+  finalization guard remains correctly blocking).
+
+### Executable evidence
+
+- `pytest -q tests/test_build_dict_stage04.py` — **198 passed**.
+- `pytest -q tests/test_build_dict_stage03.py` — **16 passed**.
+- `git diff --check` — PASS.
+- `make gate` — Ruff PASS; mypy --strict PASS; pytest PASS;
+  `check_agents.py` R1/R3/R7 PASS.
+
+**Changed paths:** `tools/build_dict.py`, `tests/test_build_dict_stage04.py`,
+`tasks/slice-6.report.md`. Local checkpoint file (outside the repository)
+reconciled in place; not a tracked/pushed artifact.
+
+**Provider calls during repair:** 0. **Paid spend during repair:** USD 0.
+**Cumulative v4 spend remains:** USD 0.0692788 (unchanged; 84/84 paid calls
+accounted, 2 QA requests remain pending toward the frozen 50-item/36-QA
+canary).
+
+**Disposition:** `GERMAN_CANARY_V4_PARTICIPLE_CLASSIFIER_RECONCILED` —
+checkpoint now reads 50 bulk completed / 0 rejected; 36 QA required, 34
+completed, 0 rejected, 2 pending. `output.sqlite` remains correctly
+unfinalized. This repair authorizes no further paid work by itself; resuming
+the final 2 QA requests remains a separate owner/orchestrator decision.

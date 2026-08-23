@@ -39,6 +39,7 @@ from tools.build_dict import (
     _deterministic_audit_sample,
     _empty_spend_state,
     _load_checkpoint,
+    _morphology_feature_keys,
     _render_canary_receipt,
     _spend_total_usd,
     _validate_de_semantic_contract,
@@ -1302,6 +1303,44 @@ def test_morphology_dative_form_compound_and_grosser_regression() -> None:
         ("second-person", "2.-Person-Form", None),
         ("third-person", "3. Person", None),
         ("third-person", "3.-Person-Form", None),
+        # PARTICIPLES vs TENSE: "past participle"/"present participle" (and
+        # the synonymous English grammar term "perfect participle", which
+        # names the identical German form as "past participle") must not
+        # collide with the bare "past"/"present"/"perfect" tense words they
+        # contain. Regression for German Canary v4 live resume-3 (item
+        # queue:v2:efc8334ad5993e20c3b5e1298ef46dc9, lemma "vorbereitet"):
+        # source "past participle of vorbereiten" was misdetected as the
+        # `preterite` feature via the bare `\bpast\b` alternative, wrongly
+        # demanding "Präteritum" for a candidate ("Partizip II") that was
+        # already correct.
+        ("past participle", "Partizip II", None),
+        ("past participle", "Partizip 2", None),
+        ("past participle", "Partizip-II-Form", None),
+        ("past participle", "Partizip II-Form", None),
+        ("past participle", "Partizip Perfekt", None),
+        ("past participle", "Präteritum", "morphology_missing_past_participle"),
+        # A bare, non-participle "past" is still legitimate preterite
+        # evidence (confirmed live in the accepted Stage-03 queue, e.g. "past
+        # of singen") and must keep working exactly as before.
+        ("past", "Präteritum", None),
+        ("past", "Partizip II", "morphology_missing_preterite"),
+        ("preterite", "Präteritum", None),
+        ("preterite", "Partizip II", "morphology_missing_preterite"),
+        ("present participle", "Partizip I", None),
+        ("present participle", "Partizip 1", None),
+        ("present participle", "Partizip Präsens", None),
+        ("present participle", "Präsens", "morphology_missing_present_participle"),
+        # A bare, non-participle "present" is unaffected.
+        ("present", "Präsens", None),
+        ("present", "Partizip I", "morphology_missing_present"),
+        # "perfect participle" is a real, common English-grammar synonym of
+        # "past participle" (569 occurrences in the accepted Stage-03 queue)
+        # naming the identical German form; it must resolve to the same
+        # `past_participle` feature, not the unrelated `perfect` tense.
+        ("perfect participle", "Partizip II", None),
+        ("perfect participle", "Perfekt", "morphology_missing_past_participle"),
+        ("perfect", "Perfekt", None),
+        ("perfect", "Partizip II", "morphology_missing_perfect"),
     ],
 )
 def test_morphology_feature_recognizer_truth_table(
@@ -1309,6 +1348,85 @@ def test_morphology_feature_recognizer_truth_table(
 ) -> None:
     item = _semantic_item(source, "Testwort")
     assert _validate_de_semantic_contract(item, candidate, "definition") == expected
+
+
+def test_past_participle_and_preterite_are_independent_features() -> None:
+    """A "past participle" source must never simultaneously require Präteritum.
+
+    Exact call from German Canary v4 live resume-3: source "past participle
+    of vorbereiten", both the Luna bulk candidate and the (uncorrected) Terra
+    QA candidate were "Partizip II von „vorbereiten“" — semantically correct
+    — but the old `\\bpast\\b` alternative on the `preterite` rule
+    misclassified the source as requiring "Präteritum" instead.
+    """
+    vorbereitet = _semantic_item("past participle of vorbereiten", "vorbereitet")
+    assert _morphology_feature_keys(vorbereitet) == ("past_participle",)
+    assert _validate_de_semantic_contract(
+        vorbereitet, "Partizip II von „vorbereiten“", "definition"
+    ) is None
+    assert _validate_de_semantic_contract(
+        vorbereitet, "Präteritum von „vorbereiten“", "definition"
+    ) == "morphology_missing_past_participle"
+
+    preterite_source = _semantic_item("preterite of vorbereiten", "vorbereitet")
+    assert _morphology_feature_keys(preterite_source) == ("preterite",)
+    assert _validate_de_semantic_contract(
+        preterite_source, "Präteritum von „vorbereiten“", "definition"
+    ) is None
+    assert _validate_de_semantic_contract(
+        preterite_source, "Partizip II von „vorbereiten“", "definition"
+    ) == "morphology_missing_preterite"
+
+
+def test_present_participle_does_not_activate_present_tense() -> None:
+    """Regression for the analogous present/present-participle collision.
+
+    Exact call from German Canary v4 (item queue:v2:4a6c8cb9..., lemma
+    "alternd"): its already-accepted QA text happens to satisfy the old
+    (over-broad) `present` rule too, so it was never visibly rejected, but
+    the source was still misclassified. This proves the correct feature
+    (`present_participle`, not `present`) is detected, and every previously
+    accepted realization for this exact item still passes.
+    """
+    alternd = _semantic_item("present participle of altern", "alternd")
+    assert _morphology_feature_keys(alternd) == ("present_participle",)
+    assert _validate_de_semantic_contract(
+        alternd, "Partizip Präsens von „altern“", "definition"
+    ) is None  # the exact already-accepted live QA text
+    assert _validate_de_semantic_contract(
+        alternd, "Partizip I von „altern“", "definition"
+    ) is None
+    assert _validate_de_semantic_contract(
+        alternd, "Präsens von „altern“", "definition"
+    ) == "morphology_missing_present_participle"
+
+
+def test_past_participle_morphology_gap_remains_qa_routed(tmp_path: Path) -> None:
+    """Regression 'F': a genuine past_participle gap is still QA-recoverable,
+    not a hard rejection — proving the new feature integrates with the
+    existing morphology QA-recovery policy without any change to that policy.
+    """
+    db, queue, item_id, items = _de_morphology_fixture(
+        tmp_path, "past-participle-gap", "past participle of vorbereiten"
+    )
+    transport = _BulkOnlyTransport(items, "Präteritum von „vorbereiten“")
+    checkpoint = tmp_path / "checkpoint.json"
+    with pytest.raises(BuildDictError, match="No local deterministic Stage 04 QA transport"):
+        build_stage04(
+            queue,
+            db,
+            tmp_path / "out.sqlite",
+            checkpoint,
+            "TEST_SYNTHETIC_LICENSE_v1",
+            transport=transport,
+            batch_size=1,
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert item_id not in state["bulk"]["rejected"]
+    completed = state["bulk"]["completed"][item_id]
+    assert completed["text"] == "Präteritum von „vorbereiten“"
+    assert completed["qa_required_reason"] == "morphology_missing_past_participle"
+    assert item_id in state["qa"]["required"]
 
 
 def test_related_term_cannot_claim_exact_synonym() -> None:

@@ -3281,9 +3281,39 @@ _MORPHOLOGY_FEATURE_RULES: Final[tuple[tuple[str, str, str], ...]] = (
     ),
     (r"\bindicative\b", "indicative", rf"\bindikativ{_DE_FORM_SUFFIX}\b"),
     (r"\bimperative\b", "imperative", rf"\bimperativ{_DE_FORM_SUFFIX}\b"),
-    (r"\bpresent\b", "present", rf"\bpräsens{_DE_FORM_SUFFIX}\b"),
-    (r"\bpreterite\b|\bpast\b", "preterite", rf"\bpräteritum{_DE_FORM_SUFFIX}\b"),
-    (r"\bperfect\b", "perfect", rf"\bperfekt{_DE_FORM_SUFFIX}\b"),
+    # "present"/"preterite"/"perfect" each collide with a same-headword English
+    # participle name ("present participle", "past participle", "perfect
+    # participle" — the last two are synonymous English grammar terms for the
+    # identical German form) that is a wholly distinct source-verifiable
+    # feature, not a tense. A bare corpus audit of the accepted Stage-03 queue
+    # (577141 DE derivation-input rows) found "past participle" 5777 times and
+    # "present participle" 5629 times — real, common source phrasing, not an
+    # edge case — plus "perfect participle" 569 times (a real synonym of "past
+    # participle" in English grammar terminology; German target is identical:
+    # Partizip II / Partizip Perfekt). Each tense rule's source pattern excludes
+    # its own participle phrase via a negative lookahead so the two features
+    # are never simultaneously (and contradictorily) required from one output;
+    # the participle rules below are the only ones that claim that phrasing.
+    # A bare "past" not part of "past participle(s)" remains legitimate
+    # preterite evidence (confirmed live in the queue, e.g. "past of singen")
+    # and is deliberately still matched.
+    (r"\bpresent\b(?!\s+participles?)", "present", rf"\bpräsens{_DE_FORM_SUFFIX}\b"),
+    (
+        r"\bpreterite\b|\bsimple\s+past\b|\bpast\b(?!\s+participles?)",
+        "preterite",
+        rf"\bpräteritum{_DE_FORM_SUFFIX}\b",
+    ),
+    (r"\bperfect\b(?!\s+participles?)", "perfect", rf"\bperfekt{_DE_FORM_SUFFIX}\b"),
+    (
+        r"\bpresent\s+participles?\b",
+        "present_participle",
+        rf"\bpartizip[\s-]*(?:i|1|präsens){_DE_FORM_SUFFIX_HYPHENATED}\b",
+    ),
+    (
+        r"\b(?:past|perfect)\s+participles?\b",
+        "past_participle",
+        rf"\bpartizip[\s-]*(?:ii|2|perfekt){_DE_FORM_SUFFIX_HYPHENATED}\b",
+    ),
     (
         r"\bfirst[- ]person\b|\b1st[- ]person\b",
         "first_person",
