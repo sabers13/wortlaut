@@ -1209,6 +1209,108 @@ def test_morphology_plural_and_singular_form_compounds() -> None:
     ) == "morphology_missing_plural"
 
 
+def test_morphology_dative_form_compound_and_grosser_regression() -> None:
+    """Regression for the second German Canary v4 validator false positive.
+
+    The same closed-compound/word-boundary defect class first found on
+    "Pluralform" recurred on "Dativform": ``\\bdativ\\b`` cannot match inside
+    the single token "Dativform". This is the exact candidate returned live
+    for queue:v2:45bd0bd1611b6a1f2df543fb0107a7c1 (lemma "grosser").
+    """
+    strong_gen_dat = _semantic_item(
+        "strong genitive/dative feminine singular", "grosser"
+    )
+    assert _validate_de_semantic_contract(
+        strong_gen_dat,
+        "starke Genitiv- und Dativform Feminin Singular von",
+        "definition",
+    ) is None
+    dative = _semantic_item("dative", "Testwort")
+    assert _validate_de_semantic_contract(dative, "Dativform", "definition") is None
+    assert _validate_de_semantic_contract(dative, "Dativformen", "definition") is None
+    # "Dativobjekt" ("dative object") merely starts with the same character
+    # sequence as "Dativ" and must not satisfy the feature.
+    assert _validate_de_semantic_contract(
+        dative, "Dativobjekt", "definition"
+    ) == "morphology_missing_dative"
+
+
+@pytest.mark.parametrize(
+    ("source", "candidate", "expected"),
+    [
+        # CASE: bare stem, "...form", and "...formen" all pass; an unrelated
+        # lookalike word that merely starts with the same stem does not.
+        ("nominative", "Nominativ", None),
+        ("nominative", "Nominativform", None),
+        ("nominative", "Nominativformen", None),
+        ("nominative", "Nominativsatz", "morphology_missing_nominative"),
+        ("accusative", "Akkusativ", None),
+        ("accusative", "Akkusativform", None),
+        ("accusative", "Akkusativformen", None),
+        ("dative", "Dativ", None),
+        ("dative", "Dativform", None),
+        ("dative", "Dativformen", None),
+        ("dative", "Dativobjekt", "morphology_missing_dative"),
+        ("genitive", "Genitiv", None),
+        ("genitive", "Genitivform", None),
+        ("genitive", "Genitivformen", None),
+        ("genitive", "Genitivus", "morphology_missing_genitive"),
+        # NUMBER
+        ("singular", "Singular", None),
+        ("singular", "Singularform", None),
+        ("singular", "Singularformen", None),
+        ("plural", "Plural", None),
+        ("plural", "Pluralform", None),
+        ("plural", "Pluralformen", None),
+        ("plural", "Pluralismus", "morphology_missing_plural"),
+        # MOOD / TENSE, including reasonable hyphenation
+        ("subjunctive I", "Konjunktiv I", None),
+        ("subjunctive I", "Konjunktiv-I-Form", None),
+        ("subjunctive I", "Konjunktiv-I-Formen", None),
+        ("subjunctive II", "Konjunktiv II", None),
+        ("subjunctive II", "Konjunktiv-II-Form", None),
+        # a Konjunktiv-I pattern must never match a Konjunktiv-II compound
+        ("subjunctive I", "Konjunktiv-II-Form", "morphology_missing_subjunctive_i"),
+        ("subjunctive II", "Konjunktiv-I-Form", "morphology_missing_subjunctive_ii"),
+        ("indicative", "Indikativ", None),
+        ("indicative", "Indikativform", None),
+        ("imperative", "Imperativ", None),
+        ("imperative", "Imperativform", None),
+        ("present", "Präsens", None),
+        ("present", "Präsensform", None),
+        ("preterite", "Präteritum", None),
+        ("preterite", "Präteritumform", None),
+        ("perfect", "Perfekt", None),
+        ("perfect", "Perfektform", None),
+        # DEGREE (already handled by the pre-existing \w* patterns)
+        ("comparative degree", "Komparativ", None),
+        ("comparative degree", "Komparativform", None),
+        ("superlative degree", "Superlativ", None),
+        ("superlative degree", "Superlativform", None),
+        # GENDER
+        ("masculine", "Maskulin", None),
+        ("masculine", "Maskulinum", None),
+        ("masculine", "Maskulinform", None),
+        ("feminine", "Feminin", None),
+        ("feminine", "Femininform", None),
+        ("neuter", "Neutrum", None),
+        ("neuter", "Neutrumform", None),
+        # PERSON, including reasonable hyphenation
+        ("first-person", "1. Person", None),
+        ("first-person", "1.-Person-Form", None),
+        ("second-person", "2. Person", None),
+        ("second-person", "2.-Person-Form", None),
+        ("third-person", "3. Person", None),
+        ("third-person", "3.-Person-Form", None),
+    ],
+)
+def test_morphology_feature_recognizer_truth_table(
+    source: str, candidate: str, expected: str | None
+) -> None:
+    item = _semantic_item(source, "Testwort")
+    assert _validate_de_semantic_contract(item, candidate, "definition") == expected
+
+
 def test_related_term_cannot_claim_exact_synonym() -> None:
     symphonic = _semantic_item("symphonic", "sinfonisch")
     assert _validate_de_semantic_contract(

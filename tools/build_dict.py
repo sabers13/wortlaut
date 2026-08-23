@@ -3244,49 +3244,84 @@ def _validate_generated_candidate(
     return None
 
 
+# A single legitimate German suffix, "form"/"formen" ("form"/"forms"),
+# commonly compounds directly onto a bare grammatical stem to name that form
+# explicitly as a solid noun compound with no separator (e.g. "Dativ" ->
+# "Dativform", "Plural" -> "Pluralformen"). This constant is a closed,
+# explicit suffix spliced into the output patterns below immediately after
+# the stem; it never turns a rule into a substring test, so an unrelated
+# word that merely contains the stem as a character sequence (e.g.
+# "Dativobjekt", "Pluralismus", "Genitivus") still does not match — the only
+# text allowed immediately after the stem is nothing, or exactly
+# "form"/"formen", and the whole pattern remains \b-bounded like every other
+# rule.
+_DE_FORM_SUFFIX: Final[str] = r"(?:form(?:en)?)?"
+# Konjunktiv I/II and the ordinal person labels are also legitimately
+# rendered with a hyphen or space around the numeral/ordinal and before the
+# closed "form"/"formen" suffix (e.g. "Konjunktiv-I-Form", "1.-Person-Form").
+# This variant additionally tolerates that separator; the fixed literal
+# content required (i, ii, eins, zwei, 1./erste, 2./zweite, 3./dritte,
+# form/formen) is unchanged, so the same bounded-vocabulary guarantee holds.
+_DE_FORM_SUFFIX_HYPHENATED: Final[str] = r"(?:[\s-]*form(?:en)?)?"
+
 # English source feature -> a German label which must survive in a learner
 # morphology description.  This is intentionally a conservative detector: it
 # rejects only when a supplied feature has disappeared or changed, rather than
 # trying to infer grammar that the source did not state.
 _MORPHOLOGY_FEATURE_RULES: Final[tuple[tuple[str, str, str], ...]] = (
-    (r"\bsubjunctive\s+i\b", "subjunctive_i", r"\bkonjunktiv\s*(?:i\b|eins\b)"),
-    (r"\bsubjunctive\s+ii\b", "subjunctive_ii", r"\bkonjunktiv\s*(?:ii\b|zwei\b)"),
-    (r"\bindicative\b", "indicative", r"\bindikativ\b"),
-    (r"\bimperative\b", "imperative", r"\bimperativ\b"),
-    (r"\bpresent\b", "present", r"\bpräsens\b"),
-    (r"\bpreterite\b|\bpast\b", "preterite", r"\bpräteritum\b"),
-    (r"\bperfect\b", "perfect", r"\bperfekt\b"),
+    (
+        r"\bsubjunctive\s+i\b",
+        "subjunctive_i",
+        rf"\bkonjunktiv[\s-]*(?:i{_DE_FORM_SUFFIX_HYPHENATED}\b|eins{_DE_FORM_SUFFIX_HYPHENATED}\b)",
+    ),
+    (
+        r"\bsubjunctive\s+ii\b",
+        "subjunctive_ii",
+        rf"\bkonjunktiv[\s-]*(?:ii{_DE_FORM_SUFFIX_HYPHENATED}\b|zwei{_DE_FORM_SUFFIX_HYPHENATED}\b)",
+    ),
+    (r"\bindicative\b", "indicative", rf"\bindikativ{_DE_FORM_SUFFIX}\b"),
+    (r"\bimperative\b", "imperative", rf"\bimperativ{_DE_FORM_SUFFIX}\b"),
+    (r"\bpresent\b", "present", rf"\bpräsens{_DE_FORM_SUFFIX}\b"),
+    (r"\bpreterite\b|\bpast\b", "preterite", rf"\bpräteritum{_DE_FORM_SUFFIX}\b"),
+    (r"\bperfect\b", "perfect", rf"\bperfekt{_DE_FORM_SUFFIX}\b"),
     (
         r"\bfirst[- ]person\b|\b1st[- ]person\b",
         "first_person",
-        r"\b(?:1\.?\s*person|erste\s+person)\b",
+        rf"\b(?:1\.?[\s-]*person|erste[\s-]+person){_DE_FORM_SUFFIX_HYPHENATED}\b",
     ),
     (
         r"\bsecond[- ]person\b|\b2nd[- ]person\b",
         "second_person",
-        r"\b(?:2\.?\s*person|zweite\s+person)\b",
+        rf"\b(?:2\.?[\s-]*person|zweite[\s-]+person){_DE_FORM_SUFFIX_HYPHENATED}\b",
     ),
     (
         r"\bthird[- ]person\b|\b3rd[- ]person\b",
         "third_person",
-        r"\b(?:3\.?\s*person|dritte\s+person)\b",
+        rf"\b(?:3\.?[\s-]*person|dritte[\s-]+person){_DE_FORM_SUFFIX_HYPHENATED}\b",
     ),
-    # "Singular"/"Plural" also legitimately surface as the bounded German
-    # compounds "Singularform(en)"/"Pluralform(en)" ("singular/plural form(s)");
-    # matching only the bare word rejected those correct realizations. The
-    # suffix set is an explicit closed vocabulary, not a generic substring
-    # match, so unrelated words that merely contain "singular"/"plural" as a
-    # substring (e.g. "Pluralismus") still do not satisfy the feature.
-    (r"\bsingular\b", "singular", r"\bsingular(?:form(?:en)?)?\b"),
-    (r"\bplural\b", "plural", r"\bplural(?:form(?:en)?)?\b"),
-    (r"\bnominative\b", "nominative", r"\bnominativ\b"),
-    (r"\baccusative\b", "accusative", r"\bakkusativ\b"),
-    (r"\bdative\b", "dative", r"\bdativ\b"),
-    (r"\bgenitive\b", "genitive", r"\bgenitiv\b"),
-    (r"\bmasculine\b", "masculine", r"\bmaskulin(?:um|e[nmrs]?)?\b"),
-    (r"\bfeminine\b", "feminine", r"\bfeminin(?:um|e[nmrs]?)?\b"),
-    (r"\bneuter\b", "neuter", r"\bneutr(?:um|al(?:e[nmrs]?|en|em|er|es)?)?\b"),
+    # "Singular"/"Plural"/"Nominativ"/"Akkusativ"/"Dativ"/"Genitiv" also
+    # legitimately surface as the bounded German compounds
+    # "Singularform(en)", "Pluralform(en)", "Nominativform(en)",
+    # "Akkusativform(en)", "Dativform(en)", "Genitivform(en)"; matching only
+    # the bare word rejected those correct realizations (the same defect
+    # class first found on "Pluralform", then again on "Dativform").
+    (r"\bsingular\b", "singular", rf"\bsingular{_DE_FORM_SUFFIX}\b"),
+    (r"\bplural\b", "plural", rf"\bplural{_DE_FORM_SUFFIX}\b"),
+    (r"\bnominative\b", "nominative", rf"\bnominativ{_DE_FORM_SUFFIX}\b"),
+    (r"\baccusative\b", "accusative", rf"\bakkusativ{_DE_FORM_SUFFIX}\b"),
+    (r"\bdative\b", "dative", rf"\bdativ{_DE_FORM_SUFFIX}\b"),
+    (r"\bgenitive\b", "genitive", rf"\bgenitiv{_DE_FORM_SUFFIX}\b"),
+    (r"\bmasculine\b", "masculine", r"\bmaskulin(?:um|e[nmrs]?|form(?:en)?)?\b"),
+    (r"\bfeminine\b", "feminine", r"\bfeminin(?:um|e[nmrs]?|form(?:en)?)?\b"),
+    (
+        r"\bneuter\b",
+        "neuter",
+        r"\bneutr(?:um(?:form(?:en)?)?|al(?:e[nmrs]?|en|em|er|es)?)?\b",
+    ),
     (r"\ball[- ]gender\b", "all_gender", r"\balle[nsr]?\s+geschlecht"),
+    # Comparative/superlative already accept a compound: \w* after the stem
+    # matches any trailing word characters (including "form"/"formen"), so
+    # "Komparativform"/"Superlativform" already pass unmodified.
     (r"\bcomparative(?:\s+degree)?\b", "comparative", r"\bkomparativ\w*\b"),
     (r"\bsuperlative(?:\s+degree)?\b", "superlative", r"\bsuperlativ\w*\b"),
     (r"\bstrong\b", "strong", r"\bstark(?:e[nmrs]?|em|er|es)?\b"),

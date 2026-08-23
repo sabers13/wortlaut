@@ -1413,3 +1413,186 @@ reads 9 completed / 0 rejected / 0 in-flight. The same authorized German
 Canary v4 may resume from this reconciled checkpoint without resending the
 first nine provider requests. This repair authorizes no further paid work by
 itself; resuming the canary remains a separate owner/orchestrator decision.
+
+---
+
+## German Canary v4 comprehensive morphology recognizer repair — zero-spend
+
+**Verdict:** The owner-authorized live resume of German Canary v4 correctly
+transmitted 14 new bulk requests (completing 13, bringing `bulk.completed`
+from 9 to 22) and then stopped fail-closed on provider call 23 exactly as
+designed, before any further paid work: bulk unit
+`queue:v2:45bd0bd1611b6a1f2df543fb0107a7c1` (lemma `grosser`, sense `strong
+genitive/dative feminine singular`) returned candidate `starke Genitiv- und
+Dativform Feminin Singular von` and was rejected `morphology_missing_dative`.
+Independent inspection confirmed this was the **same recognizer defect
+class** as the `Pluralform` false positive, now recurring on `Dativform`:
+`_MORPHOLOGY_FEATURE_RULES`'s output pattern for `dative` was the bare-word
+`\bdativ\b`, which cannot match inside the single token `Dativform` (no word
+boundary between `v` and `f`). The prior repair fixed only `plural`/
+`singular`; this repair audits and repairs the whole recognizer family.
+
+### Comprehensive audit and fix
+
+`tools/build_dict.py` — `_MORPHOLOGY_FEATURE_RULES`: introduced two shared,
+documented suffix constants and spliced them into every affected rule,
+rather than special-casing pairs of features one at a time:
+
+- `_DE_FORM_SUFFIX = r"(?:form(?:en)?)?"` — a closed, solid-compound suffix
+  (no separator) appended directly after a bare stem: `nominative`,
+  `accusative`, `dative`, `genitive`, `singular`, `plural`, `indicative`,
+  `imperative`, `present`, `preterite`, `perfect`.
+- `_DE_FORM_SUFFIX_HYPHENATED = r"(?:[\s-]*form(?:en)?)?"` — the same closed
+  suffix, but tolerating a hyphen or space before it (and, for
+  `subjunctive_i`/`subjunctive_ii`, also between `Konjunktiv` and the
+  roman-numeral/word), for the constructions `Konjunktiv-I-Form`,
+  `Konjunktiv-II-Form`, and the ordinal person labels `1.-Person-Form`,
+  `2.-Person-Form`, `3.-Person-Form`.
+- `masculine`/`feminine` gained `form(?:en)?` as an additional alternative
+  inside their existing case-ending alternation (`Maskulinform`,
+  `Femininform`); `neuter` gained it on its `um` branch only
+  (`Neutrumform`, not a fabricated `Neutralform`).
+- `comparative`/`superlative` needed **no code change**: their existing
+  `\bkomparativ\w*\b`/`\bsuperlativ\w*\b` patterns already accept any
+  trailing word characters, so `Komparativform`/`Superlativform` already
+  passed; this was confirmed by test, not assumed.
+- `all_gender`, and the `strong`/`weak`/`mixed` declension-ending patterns,
+  were left unchanged — they are not solid noun compounds of this kind and
+  were not implicated by either false positive.
+
+Every new/changed pattern keeps the same bounded-vocabulary guarantee as the
+original `plural`/`singular` fix: the only text accepted immediately after a
+stem is nothing, or the fixed literal suffix (`form`/`formen`, optionally
+separated for the hyphenated set). An unrelated word that merely starts with
+the same character sequence — `Dativobjekt`, `Genitivus`, `Pluralismus`,
+`Nominativsatz` — still does not match, because the boundary/optional-suffix
+composition forces an exact stop after the stem or after the closed suffix,
+never a partial one. Verified explicitly for the Konjunktiv-I/II case: the
+`subjunctive_i` pattern does not match `Konjunktiv-II-Form` and vice versa.
+
+### Systematic truth-table regressions
+
+`tests/test_build_dict_stage04.py`:
+
+- `test_morphology_dative_form_compound_and_grosser_regression` — the exact
+  live-recorded `grosser`/`Dativform` candidate now passes; `Dativform`/
+  `Dativformen` pass; `Dativobjekt` still fails `morphology_missing_dative`.
+- `test_morphology_feature_recognizer_truth_table` — a parametrized table of
+  61 cases across every feature family (case, number, mood/tense including
+  hyphenated Konjunktiv-I/II, degree, gender, person including hyphenated
+  ordinal-person forms), each asserting bare-stem PASS, `...form`/`...formen`
+  PASS where legitimate, cross-feature non-match (a Konjunktiv-I pattern
+  never matches a Konjunktiv-II compound and vice versa), and an unrelated
+  lookalike word (`Nominativsatz`, `Dativobjekt`, `Genitivus`, `Pluralismus`)
+  still rejected.
+
+All prior v4 regressions (Konjunktiv-I preservation/no würde drift,
+unsupported elaboration, terse-source grounding, exact-synonym rule, the
+original combined case/gender/number/degree test, strong/weak/mixed, and the
+first `Pluralform`/`Singularform` regression) remain passing unmodified.
+`pytest -q tests/test_build_dict_stage04.py` — **151 passed** (94 + this
+repair's additions).
+
+### Dry-revalidation against already-paid evidence (zero-spend, no provider calls)
+
+Ran the fixed validator against every locally available already-paid v4/v3
+candidate before touching the checkpoint:
+
+- All 22 currently `bulk.completed` v4 candidates: **0 newly invalidated.**
+- The 1 currently `bulk.rejected` v4 candidate (`grosser`): **now passes.**
+- All 50 completed v3 canary candidates (`slice-6-de-canary-v3/checkpoint.json`,
+  same frozen 50-item selection/queue, prior `stage04-bulk-v3` prompt): 3
+  rejections are the already-documented, intentional v3→v4 semantic-fidelity
+  tightening (`Arisierungen` unsupported elaboration, `sinfonisch`
+  related-not-synonym, `Mod` domain elaboration — unchanged by this repair).
+  18 more are `morphology_missing_*`/`morphology_requires_definition`
+  rejections; each was individually reviewed and found to be a **genuine**
+  rejection under the v4 exact-technical-label contract — a paraphrase
+  instead of the required label (`Mehrzahl` instead of `Plural`,
+  `Steigerungsform` instead of `Komparativ`/`Superlativ`, `männliche`/
+  `sächliche` instead of `Maskulin`/`Neutrum`, a pronoun (`sie`/`wir`)
+  instead of an explicit person label), a genuinely absent required feature,
+  or an outright wrong grammatical form (`Partizip II` returned where the
+  source required `preterite`). **None** of the 18 are instances of the
+  closed-compound/word-boundary defect class this repair targets, so no
+  further code change follows from this evidence. Latent false positives
+  found beyond the already-known `Dativform` case: **none.**
+
+Per instruction, no semantic rule was loosened to make any of those 18
+genuinely-nonconforming v3 candidates pass; only the recognizer's
+compound-form vocabulary was widened.
+
+### Frozen artifacts — unchanged (re-verified, not merely asserted)
+
+`_MORPHOLOGY_FEATURE_RULES` is read solely by
+`_morphology_feature_keys`/`_validate_de_semantic_contract` — never by
+request-body, Batch-manifest, canary-selection, or cost-plan generation.
+Re-hashed the on-disk frozen artifacts after the code change:
+
+- `SELECTION_SHA` `1ffa5e76c7315467a39a5b7b953e07fba924b37dbc77512130e720adb3ab7475` (`de-canary-selection-v2.json`, 40385 bytes) — **MATCH**.
+- `REQUEST_SHA` `185d2a592ef9e391008622b88adcb14a13d81dd615978f3c518925eae1d8f3d5` (`de-canary-requests-v4.jsonl`, 144714 bytes) — **MATCH**.
+- `BATCH_SHA` `ca9fdc66a5924609cb16eea0385eba6ab223c2046b88af1209282170b60cf2a2` (`de-canary-batch-manifest-v4.jsonl`, 143914 bytes) — **MATCH**.
+- `COST_PLAN_SHA` `e716609c93cf9e8e1d60307132486aac65eb869a247670614ab7a61863269a81` (`live-cost-plan-v4.json`, 5800 bytes) — **MATCH**.
+
+Stage-04 v4 pipeline version (`stage04-bulk-v4`/`stage04-qa-v4`) **not**
+bumped — the intended contract is unchanged, only its implementation.
+
+### Checkpoint reconciliation (local only — zero provider calls)
+
+Read the live checkpoint as durable evidence, not the pasted receipt.
+Confirmed directly: exact candidate text `starke Genitiv- und Dativform
+Feminin Singular von`, language `de`, source `strong genitive/dative
+feminine singular` for lemma `grosser`, associated spend-ledger entry
+(`response_id resp_06185e706afe9b91006a8ac82befb087d1a8da40f50d777971`,
+`charge_usd 0.000166`, `cumulative_usd 0.0036922`, `accounting ACTUAL`), 23
+total ledger entries (all `ACTUAL`), `bulk.in_flight == []`. `kind` is not
+persisted in rejected-evidence, but is deterministically `"definition"` from
+the recorded `morphology_missing_dative` code (same control-flow argument as
+item 9's reconciliation).
+
+Ran the fixed validator against the exact recorded candidate:
+`VALIDATOR_RESULT: PASS`.
+
+Reconciled the checkpoint with a one-off script on the project's own
+`_load_checkpoint`/`_write_checkpoint` facilities — no ad-hoc text
+replacement, no provider transport imported. Moved
+`queue:v2:45bd0bd1611b6a1f2df543fb0107a7c1` from `bulk.rejected` to
+`bulk.completed` using the exact already-returned text, in the standard
+shape (`kind: "definition"`, `source: "llm_generated_v1"`,
+`license: "CC BY-SA"`). No candidate was fabricated. The other 22 completed
+records, the 23-entry spend ledger, manifests, and checkpoint identity were
+verified byte-identical before/after against a pre-reconciliation backup.
+
+### Reload verification (fresh disk load)
+
+- `bulk.completed == 23`, `bulk.rejected == 0`, `bulk.in_flight == []`.
+- ledger: exactly 23 entries, all `ACTUAL`; running-sum chain valid;
+  cumulative spend `USD 0.0036922` (unchanged from the paid receipt).
+- `queue:v2:45bd0bd1611b6a1f2df543fb0107a7c1` appears exactly once, in
+  `bulk.completed`.
+- QA state untouched/not advanced.
+- item was **not** retransmitted; **zero** provider calls, **USD 0** paid
+  spend during this repair.
+
+### Executable evidence
+
+- `pytest -q tests/test_build_dict_stage04.py` — **151 passed**.
+- `pytest -q tests/test_build_dict_stage03.py` — **16 passed**.
+- `git diff --check` — PASS.
+- `make gate` — Ruff PASS; mypy --strict PASS (18 source files); pytest
+  **394 passed**; `check_agents.py` R1/R3/R7 PASS.
+
+**Changed paths:** `tools/build_dict.py`, `tests/test_build_dict_stage04.py`,
+`tasks/slice-6.report.md`. Local checkpoint file (outside the repository)
+reconciled in place; not a tracked/pushed artifact.
+
+**Provider calls during repair:** 0. **Paid spend during repair:** USD 0.
+**Historical v4 spend remains:** USD 0.0036922 (unchanged, 23/23 accounted,
+27 items remain pending toward the frozen 50).
+
+**Disposition:** `GERMAN_CANARY_V4_MORPHOLOGY_RECOGNIZER_RECONCILED` —
+checkpoint now reads 23 completed / 0 rejected / 0 in-flight. The same
+authorized German Canary v4 may resume from this reconciled checkpoint
+without resending the first 23 provider requests. This repair authorizes no
+further paid work by itself; resuming remains a separate owner/orchestrator
+decision.
