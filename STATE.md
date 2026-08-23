@@ -1,150 +1,104 @@
 # STATE
 
 Single entry point for any new session. One screen, maintained by deletion.
-Updated only at session CLOSE, only from repository/gate evidence — never from
-memory of a conversation.
+Updated only at session CLOSE from repository/gate evidence.
 
 ## What landed
 
-* **slice-0 through slice-5 are accepted, merged and closed.** slice-0
-  established the repository/gate skeleton; slice-1 landed the canonical
-  resolver/read-only dictionary boundary and R3 scaffold; slice-2 locked Gate 1;
-  slice-3 landed deterministic Stage-01 Wiktextract construction plus accepted
-  ADR-0004 PART-A alignment; slice-4 completed Gate 2; slice-5 completed
-  deterministic Stage-02 Tatoeba example indexing.
-* **Gate 2 remains passed at its final accepted decision point.** The real
-  textbook baseline measured **189/200 = 94.50%**, triggering the one authorized
-  deterministic lexical-piece remedy. Its single rerun measured
-  **198/200 = 99.00% → CONTINUE**. No further Gate-2 remedy cycle exists.
-* **The accepted Stage-01 asset remains the Stage-02 parent.** Its SHA-256 is
-  `06c98d098691f7cdfff7d87d11d802fee2b73933f4e7e3e9e332a95aca997547`;
-  it has 1118636 lemma rows, 480221 sense rows and 577141 sense_meaning rows
-  under the accepted ADR-0004 PART-A stable semantic-reference contract.
-* **Stage-02 real-data execution is accepted.** The repaired deterministic
-  cache MISS and exact-key HIT produced byte-identical SQLite assets with
-  SHA-256
+* **slice-0 through slice-6 are accepted, merged and closed.**
+  - slice-0 established repository/gate governance.
+  - slice-1 landed the canonical resolver/read-only dictionary boundary.
+  - slice-2 locked Gate 1.
+  - slice-3 landed deterministic Stage-01 plus ADR-0004 PART-A alignment.
+  - slice-4 completed Gate 2 at **198/200 = 99.00% → CONTINUE** after the one authorized deterministic remedy.
+  - slice-5 completed deterministic Stage-02 Tatoeba indexing.
+  - slice-6 completed the maintainer-side Stage-03/04/05 infrastructure and Piper/Docker build prerequisite.
+
+* **Accepted Stage-02 remains the source-backed runtime dictionary baseline.**
+  SHA-256:
   `75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97`
-  and size `945410048` bytes. The accepted asset contains 777295 persisted
-  Tatoeba examples, 6504849 `example_lemma` associations, 99537 distinct indexed
-  lemmas, and token-count sum 7292286. Attribution defects and orphan
-  associations are both zero.
-* **The Stage-02 resolver-containment repair is accepted.** `app/resolve.py`
-  remains the single canonical resolver. Stage-02 uses an ephemeral disk-backed
-  indexed lookup accelerator to preserve runtime Dictionary lookup semantics
-  without per-token full scans of the real Stage-01 tables. The accepted
-  resolver SHA-256 is
-  `0e7663bf351d177bbc3ac176f1508c549e396bed67e5c3c0928f8d8ad3cbda08`.
-* **The deterministic Stage-02 acceptance sanity probe passed.** First/middle/last
-  source-ref ordered sample: 90 examples, 745 expected associations, 745 actual,
-  0 mismatches, 0 missing expected IDs, 0 unexpected persisted IDs. The
-  punctuation and AUX-`haben` forensic cases pass and runtime/Stage-02
-  token-by-token parity passes.
-* **ADR-0004 remains ACCEPTED / FROZEN.** Cold review #3 was the FINAL
-  CONVERGENCE REVIEW; there is no ADR-0004 review #4.
-* **ADR-0005 is ACCEPTED / FROZEN.** Cold review #2 — FOCUSED REMEDY
-  VERIFICATION — approved the O1–O5 remedies. O1–O5 and their resolution history
-  remain preserved. Slice-6 owns only the Piper image-build/runtime
-  prerequisite; slice-7 owns runtime pronunciation; slice-8 owns pronunciation
-  E2E smoke.
-* **ADR-0006 is ACCEPTED / FROZEN.** Cold Review #2 — FOCUSED REMEDY
-  VERIFICATION — verified O1–O7 remedies, checked their direct knock-on
-  contradictions, and found no qualifying blocker. Its §10 supersession of the
-  listed ADR-0004 provisions is active; ADR-0004 remains frozen and binding
-  elsewhere. Direct canonical English-edition FA evidence is primary,
-  German-Wiktionary is optional/fail-closed fallback, FA sets are deterministic,
-  DE eligibility is conservative, Batch manifests are bounded/correlated, and
-  owner source acceptance remains a hard gate. ADR acceptance itself authorizes
-  no paid production work.
-* **ADR-0007 is ACCEPTED / FROZEN.** Cold Review #2 — FOCUSED REMEDY
-  VERIFICATION — verified the O1–O3 remedies and found no qualifying direct
-  knock-on blocker. Its §11 supersession record is active. Active v1
-  learner-meaning languages are strictly `{de, en}` at build/API boundaries
-  while physical SQLite language columns remain open `TEXT`; unsupported `fa`
-  is HTTP 422 with zero writes. Historical Persian investigation/canary evidence
-  remains preserved, including known cumulative paid spend USD 0.0008764 across
-  four returned generation results before STOP. No further Persian provider
-  spending is authorized. ADR acceptance itself authorizes no paid DE/EN
-  production run.
-* **Two-authority workflow remains binding.** Local Git/terminal is authoritative
-  for working-tree/runtime/gate/local-asset facts; private `origin` is the
-  persistent authoritative mirror for committed and pushed state.
+  with 777295 examples and 6504849 `example_lemma` associations.
+  It remains immutable source-backed input for later work.
+
+* **Slice-6 Stage-03/04/05 infrastructure is accepted.**
+  Deterministic queue construction, offline-only structured generation tooling,
+  validation/QA, checkpoint/resume, spend fencing, Batch manifest/correlation,
+  fail-closed recovery, Stage-05 packaging machinery, and the pinned Piper
+  image-build prerequisite are implemented and gate-tested.
+  Runtime LLM usage remains forbidden.
+
+* **German Canary v4 is accepted as historical validation evidence.**
+  Final independent semantic result after two explicit manual adjudications:
+  **48 PASS / 2 MINOR / 0 MATERIAL — PASS_WITH_2_MINOR**.
+  The two manual adjudications were:
+  - `Marmarameer` → `Marmarameer`
+  - `Mod` → `Mod`
+  Historical German v4 provider spend is **USD 0.0716368**.
+  Manual rows remain explicitly distinguished from provider-generated rows.
+
+* **Full paid Stage-04 German production is deliberately deferred from v1.**
+  Production planning proved full-coverage LLM enrichment economically and
+  operationally disproportionate for v1. No full production Batch was executed
+  and no production authorization exists.
+  Paid enrichment remains optional future maintainer work, not a prerequisite
+  for the standalone v1 application.
+
+* **v1 proceeds source-first and permits incomplete German learner-meaning coverage.**
+  Existing source-backed data, deterministic grammar/morphology, existing English
+  meanings, and suitable source-backed German meanings are used when available.
+  Missing German learner meanings remain unavailable/partial under ADR-0004 D43;
+  they are never invented or generated at runtime.
+
+* **ADR-0004, ADR-0005, ADR-0006 and ADR-0007 remain ACCEPTED / FROZEN.**
+  Persian remains deferred from active v1 scope under ADR-0007.
+  Active meaning languages are `{de, en}`.
+
+* **Two-authority workflow remains binding.**
+  Local Git/terminal is authoritative for working-tree/runtime/gate/local-asset
+  facts. Private `origin` is the persistent authoritative mirror for committed
+  and pushed state.
 
 ## Gate
 
-* **Accepted slice-5 final evidence — PASS:**
-  - real Stage-02 cache MISS: PASS / exit 0;
-  - exact-key cache HIT: PASS / exit 0;
-  - MISS/HIT SHA-256:
-    `75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97`;
-  - MISS/HIT byte identity: PASS;
-  - MISS/HIT logical equality: PASS;
-  - 90-example acceptance sanity: 0 mismatches;
-  - Stage-02 targeted tests: **54 passed**;
-  - resolver tests: **25 passed**;
-  - Stage-01 regression tests: **46 passed**;
-  - full accepted pre-closure `make gate`: **223 pytest tests passed**;
-  - AGENTS executable checks: **R1, R3, R7 PASS**;
-  - `git diff --check`: PASS.
-* The slice-6 brief persistence worker reran `make gate` successfully before
-  committing `tasks/slice-6.md`.
-* **ADR-0006 Cold Review #2 governance persistence uses fresh local gate
-  evidence.** Its acceptance commit is valid only with the supervised worker's
-  pre-mutation, pre-commit and post-commit `make gate` PASS evidence plus
-  clean-tree/push equality returned in the review receipt; the GitHub mirror is
-  not substituted for local execution evidence.
-* **ADR-0007 Cold Review #2 approval persistence:** a fresh local `make gate`
-  PASS is mandatory before the approval/activation commit; the approval is valid
-  only with clean-tree, push-equality, and unchanged `origin/slice/6` evidence in
-  the final persistence receipt.
+* Slice-6 pre-closure preparation reported `make gate` PASS at accepted
+  `slice/6 = 09384cd1fd23ee01a4bcf2f0d0ee791361e5f4a4`.
+* Slice-6 is `Risk: none`; no WORKFLOW §6 risk full-diff review is required.
+* Closure must run a fresh final `make gate` on merged `main`; authoritative
+  stdout/stderr is stored in `handoff/main-gate.txt`.
 
 ## Escalation status
 
-* **none active.** Historical slice-5 execution is fully closed:
-  original Attempt 1 = T2 Failure 1 (infrastructure interruption);
-  original Attempt 2 = T2 Failure 2 (systemd-oomd);
-  original Attempt 3 = T3 ceiling failure discovered during acceptance because
-  resolver/surface parity produced pathological cross-POS associations.
-  The resulting design reset then had Design-reset Attempt 1 = Failure 1 when
-  correct lookup semantics proved operationally non-executable through repeated
-  full SQLite scans. Design-reset Attempt 2 repaired the Stage-02-only lookup
-  complexity, passed its bounded preflight, then passed real MISS/HIT and final
-  acceptance. There is no remaining retry or escalation.
+* **none active.**
+* Historical Slice-6 provider/canary stops and design repairs are preserved in
+  `tasks/slice-6.report.md`; no retry or paid execution remains pending.
+* Full paid Stage-04 production is a deferred optional capability, not an active
+  escalation or blocker.
 
 ## Sessions since last audit
 
-* 6    <!-- non-slice ADR cold review does not increment this counter -->
+* 7
 
 ## Blocked
 
-* **ADR-0004 PART-B/runtime schema remains intentionally deferred to slice-7.**
-  Remaining work includes note-local multilingual meaning state (for DE/EN),
-  durable dictionary bindings, active dictionary version+SHA state and D47
-  runtime activation/relink semantics.
-* **ADR-0002 D27 / ADR-0003 D27 share one identifier.** Both accepted decisions
-  remain valid; repair remains parked naming debt.
-* **`reference/smoke_test.py` remains path-broken/excluded.** slice-8 owns its
-  repair plus D47 replacement/stale-picker smoke verification.
-* **Compose integration remains independently blocked** by the lecture app's
-  Phase-4 decomposition and required donor evidence; slice-9 owns that boundary.
-* **Build Stage 04 remains time-bound to mid-September 2026.** API credit
-  expires mid-September 2026; paid canary and production work for DE/EN proceeds
-  only under explicit owner gates.
-* **Non-blocking slice-3 review debt remains in `docs/backlog.md`.** T3 N1 is the
-  synthetic fixture `genitive_sg` bind defect; T3 N2 is future fallback
-  fingerprint hardening for potentially volatile upstream numeric bookkeeping.
+* **ADR-0004 PART-B/runtime work is owned by slice-7.**
+  This includes DE/EN meaning selection and D43 availability, note-local user
+  meanings, durable semantic dictionary bindings, active dictionary version/SHA,
+  D47 activation/relink semantics, stale-picker handling, and runtime rendering.
+
+* **`reference/smoke_test.py` repair remains owned by slice-8.**
+
+* **Compose integration remains blocked** by the lecture app's Phase-4
+  decomposition and required donor evidence; slice-9 owns that boundary.
+
+* **ADR-0002 D27 / ADR-0003 D27 identifier collision** remains naming debt only.
 
 ## Next three actions
 
-1. Open the separate Slice-6 implementation/design-reset orchestration against
-   accepted/frozen ADR-0007 and the preserved `slice/6` historical branch; remove
-   the retired Persian implementation path and realign Slice-6 to the active
-   DE/EN-only contract. Governance approval itself performs no implementation
-   and authorizes no provider calls.
-2. Execute Slice-6 Phase A under the accepted brief: deterministic local Stage-03
-   DE/EN queue measurement, fake-transport Stage-04 verification, fixture
-   Stage-05 packaging, Docker/Piper prerequisite verification, and fresh gate
-   evidence.
-3. Any paid DE/EN canary or production execution remains a later explicit
-   owner/orchestrator decision under ADR-0007 D79 after its measured queue,
-   canary/QA, Batch capability, manifest and current-cost prerequisites are
-   satisfied.
+1. Open a fresh Slice-7 orchestrator against the final merged `main`; formally
+   verify startup and `Depends: slice-6`.
+2. Execute `tasks/slice-7.md`. Full paid Stage-04 generation is explicitly NOT
+   an entry condition; partial/absent DE learner-meaning coverage must work
+   according to D43 and no runtime LLM is permitted.
+3. Because Slice-7 is risk-labeled `migration, auth-security, public-api,
+   data-loss`, perform its required T3 full-diff risk review before Slice-7 merge
+   and closure.
