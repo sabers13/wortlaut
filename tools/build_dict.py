@@ -3271,8 +3271,14 @@ _MORPHOLOGY_FEATURE_RULES: Final[tuple[tuple[str, str, str], ...]] = (
         "third_person",
         r"\b(?:3\.?\s*person|dritte\s+person)\b",
     ),
-    (r"\bsingular\b", "singular", r"\bsingular\b"),
-    (r"\bplural\b", "plural", r"\bplural\b"),
+    # "Singular"/"Plural" also legitimately surface as the bounded German
+    # compounds "Singularform(en)"/"Pluralform(en)" ("singular/plural form(s)");
+    # matching only the bare word rejected those correct realizations. The
+    # suffix set is an explicit closed vocabulary, not a generic substring
+    # match, so unrelated words that merely contain "singular"/"plural" as a
+    # substring (e.g. "Pluralismus") still do not satisfy the feature.
+    (r"\bsingular\b", "singular", r"\bsingular(?:form(?:en)?)?\b"),
+    (r"\bplural\b", "plural", r"\bplural(?:form(?:en)?)?\b"),
     (r"\bnominative\b", "nominative", r"\bnominativ\b"),
     (r"\baccusative\b", "accusative", r"\bakkusativ\b"),
     (r"\bdative\b", "dative", r"\bdativ\b"),

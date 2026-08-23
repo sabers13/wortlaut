@@ -1273,3 +1273,143 @@ mechanics are unchanged.
 **Next authority:** Freeze the repaired 50-item request, obtain explicit owner
 authorization for its new request SHA and a matching new cost-plan SHA, then
 rerun the same 50-item German canary once.
+
+---
+
+## German Canary v4 validator false-positive repair + checkpoint reconciliation — zero-spend
+
+**Verdict:** German Canary v4 stopped correctly and safely on provider call 9,
+exactly as designed: bulk unit `queue:v2:198fbee5ba3f6dafe7ccaf247bee1337`
+(lemma `hochverräterische`, sense `strong nominative/accusative plural`)
+returned candidate `starke Nominativ- oder Akkusativ-Pluralform` and the
+deterministic validator rejected it as `morphology_missing_plural` before
+requesting unit 10. Independent inspection confirmed this was a validator
+false positive, not a model or source-data defect: `Pluralform` ("plural
+form") is a legitimate bounded German noun compound that expresses the
+supplied `plural` feature exactly as `Plural` alone does; `_MORPHOLOGY_FEATURE_RULES`'
+output pattern for `plural` was the bare-word `\bplural\b`, which cannot match
+inside the single token `Pluralform` because there is no word boundary
+between `l` and `f`. The same defect applied symmetrically to `singular` vs.
+`Singularform`.
+
+### Repair
+
+`tools/build_dict.py` — `_MORPHOLOGY_FEATURE_RULES`: the `singular` and
+`plural` output patterns now accept the closed, explicit compound suffix set
+`form`/`formen` in addition to the bare word:
+
+- `plural`: `\bplural\b` → `\bplural(?:form(?:en)?)?\b`
+- `singular`: `\bsingular\b` → `\bsingular(?:form(?:en)?)?\b`
+
+This is a bounded vocabulary extension, not a generic substring match: an
+unrelated word that merely contains `plural`/`singular` as a character
+sequence (e.g. `Pluralismus`) still does not satisfy the feature, because the
+suffix alternation only accepts `form`/`formen` immediately after the root,
+under the same `\b`-bounded word match as every other rule. No other feature
+rule, and no other function, was touched. `_validate_de_semantic_contract`'s
+control flow, error-code taxonomy, colon/elaboration check, würde-drift
+check, synonym check, and domain-cue check are unchanged.
+
+### Regressions (`tests/test_build_dict_stage04.py::test_morphology_plural_and_singular_form_compounds`)
+
+- A. source `strong nominative/accusative plural`, candidate `starke
+  Nominativ- oder Akkusativ-Pluralform` (the exact live-recorded candidate)
+  → PASS.
+- B. same source, candidate with no plural information → still
+  `morphology_missing_plural`.
+- C. source `singular`, candidate `Singularform` → PASS.
+- D. source `plural`, unrelated candidate containing `Pluralismus` (similar
+  character sequence, unrelated word) → still `morphology_missing_plural`.
+
+All prior v4 semantic regressions (Konjunktiv-I preservation / no würde
+drift, unsupported elaboration, terse-source grounding, exact-synonym rule,
+combined case/gender/number/degree, strong/weak/mixed) remain passing
+unmodified.
+
+### Frozen artifacts — unchanged (verified, not merely asserted)
+
+The fix touches only `_MORPHOLOGY_FEATURE_RULES`, which is read solely by
+`_morphology_feature_keys`/`_validate_de_semantic_contract` (accept-time
+validation); it is not read by request-body, Batch-manifest, canary-selection,
+or cost-plan generation. Reverified by re-hashing the on-disk frozen v4
+artifacts after the code change:
+
+- `SELECTION_SHA` `1ffa5e76c7315467a39a5b7b953e07fba924b37dbc77512130e720adb3ab7475` — unchanged (selection artifact untouched by this repair).
+- `REQUEST_SHA` `185d2a592ef9e391008622b88adcb14a13d81dd615978f3c518925eae1d8f3d5` — re-hashed `de-canary-requests-v4.jsonl` (144714 bytes) — **MATCH**.
+- `BATCH_SHA` `ca9fdc66a5924609cb16eea0385eba6ab223c2046b88af1209282170b60cf2a2` — re-hashed `de-canary-batch-manifest-v4.jsonl` (143914 bytes) — **MATCH**.
+- `COST_PLAN_SHA` `e716609c93cf9e8e1d60307132486aac65eb869a247670614ab7a61863269a81`, `COST_PLAN_BYTES` `5800` — re-hashed `live-cost-plan-v4.json` — **MATCH**.
+
+The Stage-04 v4 pipeline version (`stage04-bulk-v4` / `stage04-qa-v4`) was
+**not** bumped: the intended v4 semantic contract is unchanged, only its
+implementation defect is corrected.
+
+### Checkpoint reconciliation (local only — zero provider calls)
+
+Read the existing v4 checkpoint
+(`~/.cache/flashcard/stage04-runs/slice-6-de-canary-v4/checkpoint.json`) as
+durable evidence, not the pasted receipt. Confirmed directly from the
+checkpoint and its paired `live-subset-queue.json`: exact candidate text
+`starke Nominativ- oder Akkusativ-Pluralform`, language `de`, source sense
+text `strong nominative/accusative plural` for lemma `hochverräterische`,
+associated spend-ledger entry (`response_id`
+`resp_0aae34153b92ae55006a8ac2f7bdcc87d1b70b1945e78fdf21` for item 9,
+`charge_usd 0.000159`, `cumulative_usd 0.0014308`, `accounting ACTUAL`), 9
+total ledger entries, `bulk.in_flight == []`, and
+rejection code `morphology_missing_plural`. The rejected-evidence record does
+not persist `kind`, but the recorded error code deterministically implies
+`kind == "definition"`: `_validate_de_semantic_contract` only reaches a
+`morphology_missing_*` code when `kind == "definition"` (any other kind
+short-circuits to `morphology_requires_definition` first) — this is derived
+from the validator's own control flow, not fabricated.
+
+Ran the fixed deterministic validator against the exact recorded candidate:
+`VALIDATOR_RESULT: PASS`.
+
+Reconciled the checkpoint locally with a one-off script built on the
+project's own checkpoint facilities (`_load_checkpoint`, `_write_checkpoint`,
+`_checkpoint_identity`, `_validate_de_semantic_contract`) — no ad-hoc text
+replacement, no provider transport imported. Moved
+`queue:v2:198fbee5ba3f6dafe7ccaf247bee1337` from `bulk.rejected` to
+`bulk.completed` using the exact already-returned candidate text, in the
+standard accepted-result shape: `{"text": "starke Nominativ- oder
+Akkusativ-Pluralform", "language": "de", "kind": "definition", "source":
+"llm_generated_v1", "license": "CC BY-SA"}`. No candidate was fabricated. The
+other eight completed records, the spend ledger (9 entries, unchanged), the
+manifests, and the checkpoint identity were verified byte-identical
+before/after against a pre-reconciliation backup copy.
+
+### Reload verification (fresh disk load, in-memory state discarded)
+
+- checkpoint format `flashcard-stage04-checkpoint-v3`, identity valid — PASS.
+- `bulk.completed == 9`, `bulk.rejected == 0`, `bulk.in_flight == []`.
+- ledger: exactly 9 entries, all `accounting: ACTUAL`; running-sum chain
+  valid; cumulative spend `USD 0.0014308` (unchanged from the paid receipt).
+- `WORST_CASE_RESERVED == 0`.
+- `queue:v2:198fbee5ba3f6dafe7ccaf247bee1337` appears exactly once, in
+  `bulk.completed`, and zero times in `bulk.rejected`.
+- QA state untouched/not advanced (`required/completed/rejected/in_flight`
+  all empty, as before).
+- item was **not** retransmitted; **zero** provider calls occurred during
+  this repair; **USD 0** paid spend during this repair.
+
+### Executable evidence
+
+- `pytest -q tests/test_build_dict_stage04.py` — **94 passed**.
+- `pytest -q tests/test_build_dict_stage03.py` — **16 passed**.
+- `git diff --check` — PASS.
+- `make gate` — Ruff PASS; mypy --strict PASS (18 source files); pytest
+  **337 passed**; `check_agents.py` R1/R3/R7 PASS.
+
+**Changed paths:** `tools/build_dict.py`, `tests/test_build_dict_stage04.py`,
+`tasks/slice-6.report.md`. Local checkpoint file
+(`~/.cache/flashcard/stage04-runs/slice-6-de-canary-v4/checkpoint.json`,
+outside the repository) reconciled in place; not a tracked/pushed artifact.
+
+**Provider calls during repair:** 0. **Paid spend during repair:** USD 0.
+**Historical v4 spend remains:** USD 0.0014308 (unchanged, 9/9 accounted).
+
+**Disposition:** `GERMAN_CANARY_V4_VALIDATOR_RECONCILED` — checkpoint now
+reads 9 completed / 0 rejected / 0 in-flight. The same authorized German
+Canary v4 may resume from this reconciled checkpoint without resending the
+first nine provider requests. This repair authorizes no further paid work by
+itself; resuming the canary remains a separate owner/orchestrator decision.

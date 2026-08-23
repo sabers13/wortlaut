@@ -1178,6 +1178,37 @@ def test_morphology_and_terse_source_regressions_reject_unsupported_elaboration(
     ) == "unsupported_domain_elaboration"
 
 
+def test_morphology_plural_and_singular_form_compounds() -> None:
+    """Regression for the German Canary v4 validator false positive.
+
+    ``_MORPHOLOGY_FEATURE_RULES`` matched only the bare words "singular"/
+    "plural"; it rejected the legitimate bounded German compounds
+    "Singularform(en)"/"Pluralform(en)" ("singular/plural form(s)"), including
+    the exact candidate returned live for queue:v2:198fbee5ba3f6dafe7ccaf247bee1337
+    (lemma "hochverräterische").
+    """
+    strong_plural = _semantic_item("strong nominative/accusative plural", "hochverräterische")
+    # A — the exact recorded live candidate must now pass.
+    assert _validate_de_semantic_contract(
+        strong_plural, "starke Nominativ- oder Akkusativ-Pluralform", "definition"
+    ) is None
+    # B — genuinely missing plural information is still rejected.
+    assert _validate_de_semantic_contract(
+        strong_plural, "starke Nominativ- oder Akkusativform", "definition"
+    ) == "morphology_missing_plural"
+
+    singular = _semantic_item("singular", "Testwort")
+    # C — the analogous legitimate "Singularform" compound must pass.
+    assert _validate_de_semantic_contract(singular, "Singularform", "definition") is None
+
+    plural = _semantic_item("plural", "Testwort")
+    # D — an unrelated word that merely contains "plural" as a substring
+    # ("Pluralismus" = pluralism) must not satisfy the plural feature.
+    assert _validate_de_semantic_contract(
+        plural, "typisch für den politischen Pluralismus", "definition"
+    ) == "morphology_missing_plural"
+
+
 def test_related_term_cannot_claim_exact_synonym() -> None:
     symphonic = _semantic_item("symphonic", "sinfonisch")
     assert _validate_de_semantic_contract(
