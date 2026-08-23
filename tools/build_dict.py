@@ -3307,13 +3307,66 @@ _MORPHOLOGY_FEATURE_RULES: Final[tuple[tuple[str, str, str], ...]] = (
     # A bare "past" not part of "past participle(s)" remains legitimate
     # preterite evidence (confirmed live in the queue, e.g. "past of singen")
     # and is deliberately still matched.
-    (r"\bpresent\b(?!\s+participles?)", "present", rf"\bpräsens{_DE_FORM_SUFFIX}\b"),
+    # "present"/"past" also each additionally exclude their own composite
+    # "present perfect"/"past perfect" tense phrasing (see the dedicated
+    # `perfect_tense_composite` feature below) via the same negative-
+    # lookahead technique already used to exclude the participle phrasing —
+    # a corpus audit found real rows combining both ("forms the present
+    # perfect and past perfect tenses of certain verbs") that would otherwise
+    # simultaneously (and wrongly) demand both "Präsens"/"Präteritum" AND
+    # trigger the always-unsupported composite classification.
     (
-        r"\bpreterite\b|\bsimple\s+past\b|\bpast\b(?!\s+participles?)",
+        r"\bpresent\b(?!\s+participles?)(?!\s+perfect\b)",
+        "present",
+        rf"\bpräsens{_DE_FORM_SUFFIX}\b",
+    ),
+    (
+        r"\bpreterite\b|\bsimple\s+past\b|\bpast\b(?!\s+participles?)(?!\s+perfect\b)",
         "preterite",
         rf"\bpräteritum{_DE_FORM_SUFFIX}\b",
     ),
-    (r"\bperfect\b(?!\s+participles?)", "perfect", rf"\bperfekt{_DE_FORM_SUFFIX}\b"),
+    # Bare "perfect" is ambiguous in real Stage-03 source data: a corpus audit
+    # of every accepted DE-target row containing the token "perfect" (602
+    # rows) found the overwhelming majority (24 of the 31 non-participle,
+    # non-composite-tense rows) use "perfect" as an ordinary English
+    # adjective/verb ("a perfect wedding", "flawless, perfect, immaculate",
+    # "to perfect", "perfect fifth" [a music interval], "practice makes
+    # perfect") with no tense meaning at all — forcing a "Perfekt" tense
+    # marker into their German rendering would itself be a semantic-contract
+    # violation, not a fix. Only two real rows ("forms the perfect aspect
+    # (have)", "forms the perfect with sein") are genuine ordinary-Perfekt-
+    # tense grammar notes. This pattern is therefore deliberately narrowed to
+    # that closed, corpus-observed grammatical phrasing instead of the bare
+    # word; anything not matching it (including every adjectival/idiomatic
+    # use above) correctly carries no morphology feature at all, exactly like
+    # any other ordinary lexical source text. See `_MORPHOLOGY_COMPOSITE_
+    # PERFECT_PATTERN` immediately below for the separate, always-unsupported
+    # composite-tense phrasing ("present/past/future/conditional perfect",
+    # "pluperfect") this must not collide with.
+    (
+        r"\bperfect\s+aspect\b|\bforms?\s+the\s+perfect\b|\bperfect\s+with\s+(?:sein|haben)\b",
+        "perfect",
+        rf"\bperfekt{_DE_FORM_SUFFIX}\b",
+    ),
+    # A composite English tense phrase built on "perfect" (present perfect,
+    # past perfect / pluperfect, future perfect, conditional perfect) names a
+    # distinct German construction (e.g. Futur II, Konjunktiv II Perfekt) that
+    # the current semantic contract has no verified output pattern for. The
+    # corpus audit found 6 distinct real rows using this phrasing. Rather than
+    # silently reducing any of them to the ordinary `perfect` (-> "Perfekt")
+    # feature above and accepting an under-specified rendering, this is a
+    # dedicated feature key whose contract check (in
+    # `_validate_de_semantic_contract`) always fails closed with a distinct
+    # `morphology_unsupported_composite_tense` code — never a translation
+    # this module was never told how to verify. The output pattern here is
+    # deliberately unmatchable; it is never consulted (the dedicated check
+    # returns before the generic per-feature loop reaches it) and exists only
+    # so `_morphology_feature_keys` reports this key like any other.
+    (
+        r"\b(?:present|past|future|conditional)\s+perfect\b|\bpluperfect\b",
+        "perfect_tense_composite",
+        r"(?!)",
+    ),
     (
         r"\bpresent\s+participles?\b",
         "present_participle",
@@ -3369,12 +3422,27 @@ _MORPHOLOGY_FEATURE_RULES: Final[tuple[tuple[str, str, str], ...]] = (
     (r"\bmixed\b", "mixed", r"\bgemischt(?:e[nmrs]?|em|er|es)?\b"),
 )
 
+# Bounded German noun-inflection suffix family for a closed compound stem
+# ("Computerspiel"/"Videospiel"): nominative/accusative singular (no suffix),
+# plural ("-e"), dative plural ("-en"), and genitive singular ("-s"). This is
+# the same closed-suffix strategy as `_DE_FORM_SUFFIX` above, not an arbitrary
+# substring test — it still requires the exact literal stem immediately
+# followed by nothing or exactly one of these three endings, then a word
+# boundary, so an unrelated compound that merely starts with the same stem
+# (e.g. "Computerspielzeug"/"computer toy", "Computerspielindustrie") does not
+# match. Canary evidence (Mod: source "mod", bad provider output "eine
+# Person, die Computerspiele verändert") showed the plural inflected form
+# escaping the old bare-word cue entirely.
+_DE_SPIEL_INFLECTION_SUFFIX: Final[str] = r"(?:e|en|s)?"
+
 # Terms which claim a domain or historical context on their own.  We only
 # reject one if the supplied source lacks its corresponding evidence; the
 # prompt and QA remain responsible for all other semantic grounding.
 _UNSUPPORTED_DOMAIN_CUES: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
     (
-        r"\bcomputer(?:spiel|game)\b|\bvideospiel\b|\bgaming\b",
+        rf"\bcomputer(?:spiel{_DE_SPIEL_INFLECTION_SUFFIX}|game)\b"
+        rf"|\bvideospiel{_DE_SPIEL_INFLECTION_SUFFIX}\b"
+        r"|\bgaming\b",
         ("computer game", "video game", "gaming", "videogame"),
     ),
     (
@@ -3382,6 +3450,67 @@ _UNSUPPORTED_DOMAIN_CUES: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
         ("jewish", "national socialist", "nazi", "third reich"),
     ),
 )
+
+# A closed, small set of unambiguous English function words. On their own
+# these prove nothing; combined with "the candidate reproduces a multi-token
+# source phrase essentially unchanged" (see `_is_english_source_echo` below)
+# their presence in that phrase is sufficient structural evidence that the
+# phrase's grammar is still English, without needing a general-purpose
+# language detector. Deliberately excludes anything that is itself a
+# plausible German word/cognate (e.g. "in", "an", "am", "man") so a shared
+# short particle can never contribute to a false positive on its own.
+_ENGLISH_ECHO_FUNCTION_WORDS: Final[frozenset[str]] = frozenset(
+    {
+        "the", "a", "an", "of", "and", "or", "to", "for", "with", "from",
+        "by", "is", "are", "was", "were", "this", "that", "these", "those",
+        "as", "than", "into", "onto", "about", "its", "not", "but", "which",
+        "who", "whose",
+    }
+)
+
+
+def _normalize_echo_text(text: str) -> str:
+    """Casefold + collapse whitespace, for echo comparison purposes only."""
+    return re.sub(r"\s+", " ", text.casefold()).strip()
+
+
+def _is_english_source_echo(item: dict[str, object], text: str) -> bool:
+    """True when a DE candidate is an unchanged/near-unchanged English source.
+
+    Deliberately bounded, not a general language detector: a candidate is
+    only flagged when (a) it is multi-token — a single identical token
+    (acronym, code, symbol, name, or an ordinary legitimate cognate) is never
+    rejected by equality alone — and (b) it exactly reproduces (modulo
+    whitespace/case) one of the item's English `derivation_inputs` source
+    rows, and (c) that source row itself contains an unambiguous English
+    function word as a whole token, so the reproduced phrase's structure is
+    clearly still English (e.g. "Sea of Marmara") rather than a proper noun
+    or acronym that legitimately carries over unchanged (e.g. a two-word
+    place name with no function word, or a shared identical proper noun).
+    """
+    inputs = item.get("derivation_inputs", [])
+    if not isinstance(inputs, list):
+        return False
+    candidate_norm = _normalize_echo_text(text)
+    candidate_tokens = candidate_norm.split(" ")
+    if len(candidate_tokens) < 2:
+        return False
+    for row in inputs:
+        if isinstance(row, dict):
+            row_lang = str(row.get("language", ""))
+            row_text = str(row.get("text", ""))
+        else:
+            row_lang = ""
+            row_text = str(row)
+        if row_lang and row_lang != "en":
+            continue
+        source_norm = _normalize_echo_text(row_text)
+        if source_norm != candidate_norm:
+            continue
+        source_tokens = set(source_norm.split(" "))
+        if source_tokens & _ENGLISH_ECHO_FUNCTION_WORDS:
+            return True
+    return False
 
 
 def _item_source_text(item: dict[str, object]) -> str:
@@ -3415,10 +3544,20 @@ def _validate_de_semantic_contract(item: dict[str, object], text: str, kind: str
     """
     source = _item_source_text(item)
     output = text.casefold()
+    if _is_english_source_echo(item, text):
+        return "english_source_echo"
     features = _morphology_feature_keys(item)
     if features:
         if kind != "definition":
             return "morphology_requires_definition"
+        # A composite English tense built on "perfect" (present/past/future/
+        # conditional perfect, pluperfect) names a German construction this
+        # contract has no verified output pattern for. Fail closed with a
+        # distinct code instead of silently falling through to the ordinary
+        # `perfect` (-> "Perfekt") feature check below, or inventing a
+        # translation for an unsupported grammar class.
+        if "perfect_tense_composite" in features:
+            return "morphology_unsupported_composite_tense"
         for source_pattern, key, output_pattern in _MORPHOLOGY_FEATURE_RULES:
             if key in features and not re.search(output_pattern, output, flags=re.IGNORECASE):
                 return f"morphology_missing_{key}"
@@ -3438,34 +3577,52 @@ def _validate_de_semantic_contract(item: dict[str, object], text: str, kind: str
     return None
 
 
-def _is_morphology_qa_recoverable(
+# Explicit, closed allowlist of DE semantic-contract error classes that a
+# bulk failure may be provisionally completed and routed to mandatory Terra
+# QA for, rather than hard-rejected. Adding a class here is a deliberate
+# product decision requiring its own audit and regression trail (as this task
+# did for `english_source_echo` and `unsupported_domain_elaboration`) — it is
+# never a general escape hatch for arbitrary semantic-contract errors.
+# `morphology_*` is handled separately below (it is a whole prefix family,
+# not a fixed set of exact codes).
+_QA_RECOVERABLE_SEMANTIC_ERRORS: Final[frozenset[str]] = frozenset(
+    {
+        "english_source_echo",
+        "unsupported_domain_elaboration",
+    }
+)
+
+
+def _is_semantic_error_qa_recoverable(
     item: dict[str, object],
     language: str,
     generic_err: str | None,
     semantic_err: str | None,
 ) -> bool:
-    """True when a bulk failure is a QA-recoverable morphology semantic defect.
+    """True when a bulk failure is a QA-recoverable DE semantic defect.
 
     This is deliberately narrow: it never widens what ``_validate_de_semantic_
     contract`` accepts, it only decides whether a failure that contract
     already produced gets routed to mandatory Terra QA instead of an
     immediate hard rejection. A defect qualifies only when *all* of the
-    following hold — the target language is German; the item carries at
-    least one source-supplied morphology feature (so the defect is
-    source-verifiable, not a general semantic judgement call); the candidate
-    passed generic structural/schema validation (``generic_err is None``, so
-    the provider response, envelope, and shape were all clean); and the sole
-    remaining failure is a ``morphology_*`` semantic-contract code. Any other
-    failure — structural, provider/envelope, or non-morphology semantic —
-    still hard-rejects, exactly as before.
+    following hold — the target language is German; the candidate passed
+    generic structural/schema validation (``generic_err is None``, so the
+    provider response, envelope, and shape were all clean); and the sole
+    remaining failure is one of the explicitly approved recoverable classes:
+    a ``morphology_*`` code (further gated on the item actually carrying a
+    source-supplied morphology feature, so that family stays source-
+    verifiable rather than a general judgement call), or an exact code in
+    ``_QA_RECOVERABLE_SEMANTIC_ERRORS`` (``english_source_echo``,
+    ``unsupported_domain_elaboration`` — each already only fires from its own
+    narrow, source-checked structural condition). Any other failure —
+    structural, provider/envelope, or a non-approved semantic code — still
+    hard-rejects, exactly as before.
     """
-    return (
-        language == "de"
-        and generic_err is None
-        and semantic_err is not None
-        and semantic_err.startswith("morphology_")
-        and bool(_morphology_feature_keys(item))
-    )
+    if language != "de" or generic_err is not None or semantic_err is None:
+        return False
+    if semantic_err.startswith("morphology_"):
+        return bool(_morphology_feature_keys(item))
+    return semantic_err in _QA_RECOVERABLE_SEMANTIC_ERRORS
 
 
 def _returned_response_rejection_code(cand: dict[str, object]) -> str | None:
@@ -5241,7 +5398,7 @@ def build_stage04(
                     semantic_err = _validate_de_semantic_contract(item_by_id[iid], text, kind)
                 combined_err: str | None = generic_err if generic_err is not None else semantic_err
                 qa_required_reason: str | None = None
-                if combined_err is not None and _is_morphology_qa_recoverable(
+                if combined_err is not None and _is_semantic_error_qa_recoverable(
                     item_by_id[iid], language, generic_err, semantic_err
                 ):
                     # Genuine bulk semantic gap, not a transport/structural

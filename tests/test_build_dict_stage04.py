@@ -1342,8 +1342,15 @@ def test_morphology_dative_form_compound_and_grosser_regression() -> None:
         # `past_participle` feature, not the unrelated `perfect` tense.
         ("perfect participle", "Partizip II", None),
         ("perfect participle", "Perfekt", "morphology_missing_past_participle"),
+        # A bare, unqualified "perfect" is no longer treated as ordinary-
+        # Perfekt-tense evidence on its own: a corpus audit of the accepted
+        # Stage-03 queue found 24 of the 31 non-participle, non-composite
+        # "perfect" rows use it as an ordinary English adjective/verb, not a
+        # tense marker (see `test_perfect_source_classifier_corpus_truth_
+        # table` below for the full real-phrase audit and the closed
+        # grammatical-context patterns that now gate this feature).
         ("perfect", "Perfekt", None),
-        ("perfect", "Partizip II", "morphology_missing_perfect"),
+        ("perfect", "Partizip II", None),
     ],
 )
 def test_morphology_feature_recognizer_truth_table(
@@ -1351,6 +1358,116 @@ def test_morphology_feature_recognizer_truth_table(
 ) -> None:
     item = _semantic_item(source, "Testwort")
     assert _validate_de_semantic_contract(item, candidate, "definition") == expected
+
+
+# --- Hardening C: `perfect` source-classifier corpus audit and resolution ---
+#
+# A full offline audit of every accepted Stage-03 DE-target row whose English
+# derivation source contains the token "perfect" (602 rows out of 480221
+# items / 577141 source rows) found: 571 "past participle"/"perfect
+# participle" rows (already an independent, correctly handled feature — see
+# the participle tests above); 24 bare non-grammatical adjective/verb/idiom
+# uses; 2 genuine ordinary-Perfekt-tense grammar notes; and 6 distinct
+# composite-tense phrasings this contract has no verified output pattern for.
+# Every distinct real phrase found is covered below, using the exact corpus
+# text.
+
+_PERFECT_CORPUS_FEATURE_CASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # Genuine ordinary Perfekt-tense grammar notes (2 real rows).
+    ("forms the perfect aspect (have)", ("perfect",)),
+    ("forms the perfect with sein", ("perfect",)),
+    # Bare/adjectival/idiomatic non-grammatical uses (real corpus phrases;
+    # sample of the 24) now correctly carry NO morphology feature at all.
+    ("perfect", ()),
+    ("perfect, impeccable", ()),
+    ("flawless, perfect, immaculate", ()),
+    ("exemplary, perfect, impeccable", ()),
+    ("practice makes perfect", ()),
+    ("perfect is the enemy of good", ()),
+    ("dream wedding (a perfect wedding)", ()),
+    ("to bring to perfection, to perfect", ()),
+    ("A fourth; an interval of 5 semitones (perfect fourth).", ()),
+    # Composite English tense phrases (all 6 distinct real rows): a different
+    # German construction than ordinary Perfekt, unsupported by this
+    # contract, and must never collide with the ordinary `perfect` feature.
+    ("present perfect", ("perfect_tense_composite",)),
+    ("past perfect", ("perfect_tense_composite",)),
+    ("future perfect", ("perfect_tense_composite",)),
+    ("conditional perfect", ("perfect_tense_composite",)),
+    ("pluperfect", ("perfect_tense_composite",)),
+    ("past perfect, pluperfect", ("perfect_tense_composite",)),
+    ("the future perfect tense", ("perfect_tense_composite",)),
+    (
+        "forms the present perfect and past perfect tenses of certain verbs",
+        ("perfect_tense_composite",),
+    ),
+    # Participle phrasing (already covered elsewhere) must still never gain
+    # the ordinary `perfect` or the new `perfect_tense_composite` feature.
+    ("perfect participle of vorsetzen", ("past_participle",)),
+)
+
+
+@pytest.mark.parametrize(("source", "expected_features"), _PERFECT_CORPUS_FEATURE_CASES)
+def test_perfect_source_classifier_corpus_truth_table(
+    source: str, expected_features: tuple[str, ...]
+) -> None:
+    item = _semantic_item(source, "Testwort")
+    assert _morphology_feature_keys(item) == expected_features
+
+
+def test_ordinary_perfect_tense_grammar_note_contract() -> None:
+    """The 2 genuine ordinary-Perfekt-tense rows behave like any other feature."""
+    sein_form = _semantic_item("forms the perfect with sein", "Testwort")
+    assert _validate_de_semantic_contract(sein_form, "Perfekt", "definition") is None
+    assert _validate_de_semantic_contract(
+        sein_form, "Präteritum", "definition"
+    ) == "morphology_missing_perfect"
+
+
+def test_bare_adjectival_perfect_no_longer_forces_perfekt_tense() -> None:
+    """Regression: bare adjectival "perfect" must not demand German "Perfekt".
+
+    Before this fix, "dream wedding (a perfect wedding)" (a real corpus row)
+    would have been misclassified as requiring the "Perfekt" tense marker in
+    the output, and any correct, ordinary German definition of the phrase
+    would have hard-failed. It must now pass like any other lexical source.
+    """
+    wedding = _semantic_item("dream wedding (a perfect wedding)", "Traumhochzeit")
+    assert _validate_de_semantic_contract(wedding, "Traumhochzeit", "definition") is None
+    assert _validate_de_semantic_contract(wedding, "ideale Hochzeit", "definition") is None
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "present perfect",
+        "past perfect",
+        "future perfect",
+        "conditional perfect",
+        "pluperfect",
+    ],
+)
+def test_composite_perfect_tense_fails_closed_regardless_of_output(source: str) -> None:
+    """A composite tense must never be silently reduced to ordinary Perfekt.
+
+    This fails closed with a distinct code even when the candidate already
+    contains a plausible/correct German rendering (e.g. "Plusquamperfekt" for
+    "pluperfect") — the current contract has no verified way to check it, and
+    per policy this module must not invent a translation for an unsupported
+    grammar class. The item stays `morphology_*`-prefixed, so it is still
+    routed to mandatory Terra QA rather than an immediate hard bulk
+    rejection (`_is_semantic_error_qa_recoverable`); QA runs the identical
+    check, so this classification can never be satisfied by text content
+    alone — it is unblocked only by a future contract extension or an
+    explicit owner manual adjudication, exactly like any other case this
+    module was never told how to verify.
+    """
+    item = _semantic_item(source, "Testwort")
+    for candidate in ("Perfekt", "Präteritum", "Futur II", "Plusquamperfekt", "Konjunktiv II Perfekt"):
+        assert (
+            _validate_de_semantic_contract(item, candidate, "definition")
+            == "morphology_unsupported_composite_tense"
+        )
 
 
 def test_past_participle_and_preterite_are_independent_features() -> None:
@@ -1437,6 +1554,141 @@ def test_related_term_cannot_claim_exact_synonym() -> None:
     assert _validate_de_semantic_contract(
         symphonic, "orchesterähnlich", "synonym"
     ) == "related_not_exact_synonym"
+
+
+# --- Hardening A: German-target English-source-echo detection ---
+#
+# Regression coverage for German Canary v4's MATERIAL finding A
+# (`queue:v2:3a99e45482575743acf4789f24789062`, lemma `Marmarameer`, source
+# `Sea of Marmara`): the bulk/final text was the English source copied
+# verbatim, not a German learner meaning, and was NOT caught as a semantic
+# failure at the time (it was only caught by independent human review). The
+# detector is deliberately bounded — see `_is_english_source_echo` — not a
+# general-purpose language detector.
+
+
+def test_english_source_echo_rejects_unchanged_english_source() -> None:
+    """Required regression 1: exact Canary v4 Marmarameer source/candidate."""
+    marmarameer = _semantic_item("Sea of Marmara", "Marmarameer")
+    assert _validate_de_semantic_contract(
+        marmarameer, "Sea of Marmara", "synonym"
+    ) == "english_source_echo"
+
+
+def test_english_source_echo_true_german_translation_passes() -> None:
+    """Required regression 2: the real German name is not an echo."""
+    marmarameer = _semantic_item("Sea of Marmara", "Marmarameer")
+    assert _validate_de_semantic_contract(marmarameer, "Marmarameer", "synonym") is None
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        "New York",  # a two-token proper noun with no English function word
+        "NATO",  # a language-neutral acronym
+        "E. coli",  # a language-neutral scientific code/name
+    ],
+)
+def test_english_source_echo_does_not_flag_neutral_names_and_acronyms(candidate: str) -> None:
+    """Required regression 3: legitimate acronym/name cases do not false-positive.
+
+    Sharing a proper noun or acronym verbatim between source and candidate is
+    legitimate (many proper nouns and all acronyms/codes are unchanged in
+    German); only a source phrase whose structure is unambiguously English
+    (an explicit function word present) triggers the detector.
+    """
+    item = _semantic_item(candidate, "Testwort")
+    assert _validate_de_semantic_contract(item, candidate, "synonym") is None
+
+
+def test_english_source_echo_does_not_flag_identical_single_token() -> None:
+    """Required regression 4: identical single tokens are never rejected by
+    equality alone, regardless of whether they also happen to be an English
+    word (e.g. a name, code, or legitimate identical cognate)."""
+    item = _semantic_item("Yoga", "Testwort")
+    assert _validate_de_semantic_contract(item, "Yoga", "synonym") is None
+
+
+def test_english_source_echo_ignores_non_english_derivation_rows() -> None:
+    """A row explicitly tagged as non-English source text is never echo-matched."""
+    item = {
+        "language": "de",
+        "lemma_text": "Testwort",
+        "derivation_inputs": [{"text": "Sea of Marmara", "language": "de"}],
+    }
+    assert _validate_de_semantic_contract(item, "Sea of Marmara", "synonym") is None
+
+
+# --- Hardening B: unsupported-domain inflected-form recognition ---
+#
+# Regression coverage for German Canary v4's MATERIAL finding B
+# (`queue:v2:fca20836b82737bbbe7083358ad66f93`, lemma `Mod`, source `mod`):
+# the bulk/final text `eine Person, die Computerspiele verändert` invented a
+# person interpretation and a computer-game domain the single-word source
+# does not support, and the *plural* inflected form `Computerspiele` escaped
+# the old bare-word `_UNSUPPORTED_DOMAIN_CUES` cue entirely (`\bcomputer
+# spiel\b` requires a word boundary immediately after "spiel", which the "e"
+# plural suffix breaks).
+
+
+@pytest.mark.parametrize(
+    "form",
+    ["Computerspiel", "Computerspiele", "Computerspielen", "Computerspiels"],
+)
+def test_unsupported_domain_recognizes_all_computerspiel_inflections(form: str) -> None:
+    mod = _semantic_item("mod", "Mod")
+    assert _validate_de_semantic_contract(
+        mod, f"eine Person, die {form} verändert", "definition"
+    ) == "unsupported_domain_elaboration"
+
+
+@pytest.mark.parametrize(
+    "form",
+    ["Videospiel", "Videospiele", "Videospielen", "Videospiels"],
+)
+def test_unsupported_domain_recognizes_all_videospiel_inflections(form: str) -> None:
+    mod = _semantic_item("mod", "Mod")
+    assert _validate_de_semantic_contract(
+        mod, f"eine Modifikation für ein {form}", "definition"
+    ) == "unsupported_domain_elaboration"
+
+
+def test_unsupported_domain_recognizes_exact_canary_mod_candidate() -> None:
+    """Required regression: the exact Canary v4 Mod bad provider output."""
+    mod = _semantic_item("mod", "Mod")
+    assert _validate_de_semantic_contract(
+        mod, "eine Person, die Computerspiele verändert", "definition"
+    ) == "unsupported_domain_elaboration"
+
+
+def test_unsupported_domain_source_with_evidence_is_not_rejected() -> None:
+    """Required regression: source-supported domain language passes."""
+    supported = _semantic_item(
+        "mod, a modification for a computer game", "Mod"
+    )
+    assert _validate_de_semantic_contract(
+        supported, "eine Modifikation für ein Computerspiel", "definition"
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "lookalike",
+    [
+        "Computerspielzeug",  # "computer toy" — shares only the stem prefix
+        "Computerspielindustrie",  # "computer game industry" compound
+        "Videospielkonsole",  # "video game console" compound
+    ],
+)
+def test_unsupported_domain_does_not_flag_substring_lookalikes(lookalike: str) -> None:
+    """Required regression: arbitrary lexical substring lookalikes do not trigger.
+
+    The closed inflection suffix (nothing, "-e", "-en", "-s") is followed by
+    a mandatory word boundary, so a compound that merely starts with the same
+    stem does not match — this is a bounded, linguistically closed strategy,
+    not a substring test.
+    """
+    mod = _semantic_item("mod", "Mod")
+    assert _validate_de_semantic_contract(mod, lookalike, "definition") is None
 
 
 # --- QA-recovery repair: morphology semantic gaps route through mandatory QA ---
@@ -1716,18 +1968,19 @@ def test_structural_failure_on_morphology_item_remains_hard_rejection(tmp_path: 
     assert item_id not in state["bulk"]["completed"]
 
 
-def test_non_morphology_semantic_failure_remains_hard_rejection(tmp_path: Path) -> None:
-    """Regression 7: a semantic failure with no morphology feature stays hard.
+def test_non_recoverable_semantic_failure_remains_hard_rejection(tmp_path: Path) -> None:
+    """Regression 7: a semantic failure outside the QA-recoverable allowlist stays hard.
 
-    The source ("mod") carries no morphology feature at all, so
-    ``_is_morphology_qa_recoverable`` can never apply regardless of which
-    ``_validate_de_semantic_contract`` code fires — this is the same
-    unsupported-domain-elaboration failure covered directly against the
-    validator in ``test_morphology_and_terse_source_regressions_reject_unsupported_elaboration``,
-    exercised here end-to-end through ``build_stage04``.
+    ``related_not_exact_synonym`` is a real ``_validate_de_semantic_contract``
+    code that is deliberately NOT in ``_QA_RECOVERABLE_SEMANTIC_ERRORS`` and
+    carries no morphology feature — it must still hard-reject exactly as
+    before this task. This is the regression required by policy: not every
+    semantic-contract error becomes QA-recoverable, only the explicitly
+    approved classes (``morphology_*``, ``english_source_echo``,
+    ``unsupported_domain_elaboration``).
     """
-    db, queue, item_id, items = _de_morphology_fixture(tmp_path, "domain-hard", "mod")
-    transport = _BulkOnlyTransport(items, "Fan-Erweiterung für ein Computerspiel")
+    db, queue, item_id, items = _de_morphology_fixture(tmp_path, "nonrecoverable-hard", "symphonic")
+    transport = _BulkOnlyTransport(items, "orchesterähnlich", kind="synonym")
     checkpoint = tmp_path / "checkpoint.json"
     with pytest.raises(BuildDictError, match="rejected"):
         build_stage04(
@@ -1740,8 +1993,129 @@ def test_non_morphology_semantic_failure_remains_hard_rejection(tmp_path: Path) 
             batch_size=1,
         )
     state = json.loads(checkpoint.read_text(encoding="utf-8"))
-    assert state["bulk"]["rejected"][item_id]["error_code"] == "unsupported_domain_elaboration"
+    assert state["bulk"]["rejected"][item_id]["error_code"] == "related_not_exact_synonym"
     assert item_id not in state["bulk"]["completed"]
+
+
+def test_english_source_echo_is_provisional_not_hard_rejection(tmp_path: Path) -> None:
+    """The exact Canary v4 Marmarameer bad output is now QA-recoverable, not
+    an immediate hard rejection — proving `english_source_echo` integrates
+    with the QA-recoverable policy exactly like `morphology_*`."""
+    db, queue, item_id, items = _de_morphology_fixture(
+        tmp_path, "echo-provisional", "Sea of Marmara"
+    )
+    transport = _BulkOnlyTransport(items, "Sea of Marmara", kind="synonym")
+    checkpoint = tmp_path / "checkpoint.json"
+    with pytest.raises(BuildDictError, match="No local deterministic Stage 04 QA transport"):
+        build_stage04(
+            queue,
+            db,
+            tmp_path / "out.sqlite",
+            checkpoint,
+            "TEST_SYNTHETIC_LICENSE_v1",
+            transport=transport,
+            batch_size=1,
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert item_id not in state["bulk"]["rejected"]
+    completed = state["bulk"]["completed"][item_id]
+    assert completed["text"] == "Sea of Marmara"
+    assert completed["qa_required_reason"] == "english_source_echo"
+    assert item_id in state["qa"]["required"]
+    assert not (tmp_path / "out.sqlite").exists()
+
+
+def test_english_source_echo_qa_correction_reaches_final_output(tmp_path: Path) -> None:
+    """A QA-corrected German rendering of the echoed source becomes final."""
+    db, queue, item_id, items = _de_morphology_fixture(
+        tmp_path, "echo-corrected", "Sea of Marmara"
+    )
+    transport = _SingleTextTransport(items, bulk_text="Sea of Marmara", qa_text="Marmarameer")
+    out = tmp_path / "out.sqlite"
+    checkpoint = tmp_path / "checkpoint.json"
+    build_stage04(
+        queue, db, out, checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=transport, batch_size=1
+    )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert state["bulk"]["completed"][item_id]["qa_required_reason"] == "english_source_echo"
+    assert state["qa"]["completed"][item_id]["text"] == "Marmarameer"
+    conn = sqlite3.connect(out)
+    row = conn.execute(
+        "SELECT text FROM sense_meaning WHERE source=? AND language='de'", (GENERATED_MARKER,)
+    ).fetchone()
+    conn.close()
+    assert row is not None and row[0] == "Marmarameer"
+
+
+def test_english_source_echo_qa_noncorrection_stops_before_finalization(tmp_path: Path) -> None:
+    """An uncorrected QA candidate (still the raw English source) hard-rejects."""
+    db, queue, item_id, items = _de_morphology_fixture(
+        tmp_path, "echo-uncorrected", "Sea of Marmara"
+    )
+    transport = _SingleTextTransport(items, bulk_text="Sea of Marmara", qa_text="Sea of Marmara")
+    out = tmp_path / "out.sqlite"
+    checkpoint = tmp_path / "checkpoint.json"
+    with pytest.raises(BuildDictError, match="QA unit had 1 rejected; STOP"):
+        build_stage04(
+            queue, db, out, checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=transport, batch_size=1
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert item_id in state["qa"]["rejected"]
+    assert item_id not in state["qa"]["completed"]
+    assert not out.exists()
+
+
+def test_unsupported_domain_elaboration_is_provisional_not_hard_rejection(tmp_path: Path) -> None:
+    """The exact Canary v4 Mod bad output is now QA-recoverable, not an
+    immediate hard rejection — proving `unsupported_domain_elaboration`
+    integrates with the QA-recoverable policy exactly like `morphology_*`.
+    """
+    db, queue, item_id, items = _de_morphology_fixture(tmp_path, "domain-provisional", "mod")
+    transport = _BulkOnlyTransport(items, "eine Person, die Computerspiele verändert")
+    checkpoint = tmp_path / "checkpoint.json"
+    with pytest.raises(BuildDictError, match="No local deterministic Stage 04 QA transport"):
+        build_stage04(
+            queue,
+            db,
+            tmp_path / "out.sqlite",
+            checkpoint,
+            "TEST_SYNTHETIC_LICENSE_v1",
+            transport=transport,
+            batch_size=1,
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert item_id not in state["bulk"]["rejected"]
+    completed = state["bulk"]["completed"][item_id]
+    assert completed["text"] == "eine Person, die Computerspiele verändert"
+    assert completed["qa_required_reason"] == "unsupported_domain_elaboration"
+    assert item_id in state["qa"]["required"]
+    assert not (tmp_path / "out.sqlite").exists()
+
+
+def test_unsupported_domain_elaboration_qa_correction_reaches_final_output(tmp_path: Path) -> None:
+    """A QA-corrected, source-grounded rendering becomes the final output."""
+    db, queue, item_id, items = _de_morphology_fixture(tmp_path, "domain-corrected", "mod")
+    transport = _SingleTextTransport(
+        items,
+        bulk_text="eine Person, die Computerspiele verändert",
+        qa_text="Mod",
+    )
+    out = tmp_path / "out.sqlite"
+    checkpoint = tmp_path / "checkpoint.json"
+    build_stage04(
+        queue, db, out, checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=transport, batch_size=1
+    )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert (
+        state["bulk"]["completed"][item_id]["qa_required_reason"] == "unsupported_domain_elaboration"
+    )
+    assert state["qa"]["completed"][item_id]["text"] == "Mod"
+    conn = sqlite3.connect(out)
+    row = conn.execute(
+        "SELECT text FROM sense_meaning WHERE source=? AND language='de'", (GENERATED_MARKER,)
+    ).fetchone()
+    conn.close()
+    assert row is not None and row[0] == "Mod"
 
 
 # --- Manual adjudication infrastructure ---
@@ -1940,6 +2314,58 @@ def test_manual_adjudication_second_call_rejected(tmp_path: Path) -> None:
         )
     state = json.loads(checkpoint.read_text(encoding="utf-8"))
     assert state["manual_adjudications"][item_id]["text"] == "Erste"
+
+
+def test_normal_stage04_execution_never_creates_manual_adjudication_on_its_own(
+    tmp_path: Path,
+) -> None:
+    """Manual adjudication safety: `build_stage04` never self-adjudicates.
+
+    Runs a mix of an ordinary clean completion, an `english_source_echo`
+    provisional item successfully corrected by QA, and a hard-rejected
+    non-recoverable semantic failure — every path a normal run can take —
+    and asserts the checkpoint's `manual_adjudications` section is never
+    populated by any of them. `apply_manual_adjudication` is the sole writer
+    (see the dedicated infrastructure tests above); it requires an explicit
+    external/owner call naming the exact item, text, and reason, and is never
+    invoked from inside `build_stage04` itself.
+    """
+    db, queue, item_id, items = _de_morphology_fixture(
+        tmp_path, "no-auto-manual", "Sea of Marmara"
+    )
+    transport = _SingleTextTransport(items, bulk_text="Sea of Marmara", qa_text="Marmarameer")
+    checkpoint = tmp_path / "checkpoint.json"
+    build_stage04(
+        queue,
+        db,
+        tmp_path / "out.sqlite",
+        checkpoint,
+        "TEST_SYNTHETIC_LICENSE_v1",
+        transport=transport,
+        batch_size=1,
+    )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert item_id in state["qa"]["completed"]
+    assert not state.get("manual_adjudications")
+
+    stage02b, queueb, item_id_b, items_b = _de_morphology_fixture(
+        tmp_path, "no-auto-manual-hard", "symphonic"
+    )
+    hard_transport = _BulkOnlyTransport(items_b, "orchesterähnlich", kind="synonym")
+    checkpoint_b = tmp_path / "checkpoint-hard.json"
+    with pytest.raises(BuildDictError, match="rejected"):
+        build_stage04(
+            queueb,
+            stage02b,
+            tmp_path / "out-hard.sqlite",
+            checkpoint_b,
+            "TEST_SYNTHETIC_LICENSE_v1",
+            transport=hard_transport,
+            batch_size=1,
+        )
+    state_b = json.loads(checkpoint_b.read_text(encoding="utf-8"))
+    assert item_id_b in state_b["bulk"]["rejected"]
+    assert not state_b.get("manual_adjudications")
 
 
 def test_reasoning_effort_change_invalidates_checkpoint_compatibility(tmp_path: Path) -> None:
@@ -3553,3 +3979,177 @@ def test_no_real_provider_calls_in_entire_live_flow(
     assert summary["bulk_completed"] == 50
     assert probes["urlopen"] == 0
     assert probes["socket"] == 0
+
+
+# --- German Canary v4 full accepted-evidence deterministic re-validation ---
+#
+# The complete real German Canary v4 accepted evidence (50/50 bulk, 36/36 QA,
+# `PASS_WITH_2_MINOR`, 0 MATERIAL after owner manual adjudication). Embedded
+# verbatim from the durable local canary checkpoint/review-bundle evidence
+# (`~/.cache/flashcard/stage04-runs/slice-6-de-canary-v4/`, outside the
+# repository — see `tasks/slice-6.report.md`), so this regression is fully
+# deterministic and self-contained without depending on that external path.
+# This is a read-only re-validation of already-recorded evidence: it makes
+# no provider call and does not re-run or reopen the canary.
+_CANARY_V4_ACCEPTED_ITEMS: tuple[dict[str, object], ...] = (  # noqa: E501
+    {"item_id": 'queue:v2:0454e6de50cde17d5973b8f79bd5b803', "lemma": 'Feldspinnen', "english_source": ('plural of Feldspinne',), "final_kind": 'definition', "final_text": 'Plural von „Feldspinne“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Plural von „Feldspinne“'},  # noqa: E501
+    {"item_id": 'queue:v2:04c9516f9c4b7980c380cad7db415dc6', "lemma": 'Bild', "english_source": ('depiction, image, picture', 'digital image', 'digital photograph'), "final_kind": 'synonym', "final_text": 'Abbildung', "manual_adjudicated": False, "bulk_kind": 'synonym', "bulk_text": 'Abbildung'},  # noqa: E501
+    {"item_id": 'queue:v2:07a524827befc76aac587d9f44ec244b', "lemma": 'Kassel', "english_source": ('a rural district of Hesse, surrounding but not including the city of Kassel, which nevertheless serves as its administrative seat',), "final_kind": 'definition', "final_text": 'Ein ländlicher Landkreis in Hessen, der die Stadt Kassel umgibt, sie aber nicht einschließt und dessen Verwaltungssitz die Stadt Kassel ist.', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Ein ländlicher Landkreis in Hessen, der die Stadt Kassel umgibt, sie aber nicht einschließt und dessen Verwaltungssitz die Stadt Kassel ist.'},  # noqa: E501
+    {"item_id": 'queue:v2:07ea377e6aa22fd4f720af37f78a0606', "lemma": 'Leitungsschutzschalter', "english_source": ('line circuit breaker, miniature circuit breaker',), "final_kind": 'synonym', "final_text": 'Sicherungsautomat', "manual_adjudicated": False, "bulk_kind": 'synonym', "bulk_text": 'Sicherungsautomat'},  # noqa: E501
+    {"item_id": 'queue:v2:16145a5e3e3fd95c08fc85f5a1b705fa', "lemma": '-phobie', "english_source": ('-phobia',), "final_kind": 'definition', "final_text": 'Bezeichnung für eine starke Angst vor etwas', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Bezeichnung für eine starke Angst vor etwas'},  # noqa: E501
+    {"item_id": 'queue:v2:16b49cf9fbb1e176322ec68dd8d5b3be', "lemma": 'so sicher wie das Amen im Gebet', "english_source": ('absolutely certain; undoubtable',), "final_kind": 'synonym', "final_text": 'absolut sicher', "manual_adjudicated": False, "bulk_kind": 'synonym', "bulk_text": 'absolut sicher'},  # noqa: E501
+    {"item_id": 'queue:v2:17613947b46b3084dd77dfc5be2fc59e', "lemma": 'stillen', "english_source": ('to nurse, suckle, breastfeed (a baby)',), "final_kind": 'synonym', "final_text": 'säugen', "manual_adjudicated": False, "bulk_kind": 'synonym', "bulk_text": 'säugen'},  # noqa: E501
+    {"item_id": 'queue:v2:1875c54ccd40395357e1d1f2b10b2267', "lemma": 'schwieligere', "english_source": ('inflection of schwielig:', 'strong/mixed nominative/accusative feminine singular comparative degree'), "final_kind": 'definition', "final_text": 'Femininum Singular, Nominativ oder Akkusativ, Komparativ, starke oder gemischte Flexion von „schwielig“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Femininum Singular, Nominativ oder Akkusativ, Komparativ, starke oder gemischte Flexion von „schwielig“'},  # noqa: E501
+    {"item_id": 'queue:v2:198fbee5ba3f6dafe7ccaf247bee1337', "lemma": 'hochverräterische', "english_source": ('strong nominative/accusative plural',), "final_kind": 'definition', "final_text": 'starke Nominativ- oder Akkusativ-Pluralform', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'starke Nominativ- oder Akkusativ-Pluralform'},  # noqa: E501
+    {"item_id": 'queue:v2:1cf0757de0d4a116f2ab9bd49f37fc3d', "lemma": 'wehrdienstuntaugliche', "english_source": ('strong nominative/accusative plural',), "final_kind": 'definition', "final_text": 'starke Nominativ-/Akkusativ-Pluralform', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'starke Nominativ-/Akkusativ-Pluralform'},  # noqa: E501
+    {"item_id": 'queue:v2:1f788617a7b52431de59e4ff37e77b6b', "lemma": 'Zwerchhaus', "english_source": ('wall dormer (a projection out of a slanted roof whose front is flush with the wall below on that side, optionally multiple floors tall)',), "final_kind": 'definition', "final_text": 'Ein vorspringender Teil aus einem geneigten Dach, dessen Vorderseite mit der darunterliegenden Wand bündig ist und der sich über mehrere Stockwerke erstrecken kann.', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Ein vorspringender Teil aus einem geneigten Dach, dessen Vorderseite mit der darunterliegenden Wand bündig ist und der sich über mehrere Stockwerke erstrecken kann.'},  # noqa: E501
+    {"item_id": 'queue:v2:224d3bb73084b1ad05bfcc337839e1a2', "lemma": 'PAV', "english_source": ('initialism of Parteiausschlussverfahren',), "final_kind": 'definition', "final_text": 'Abkürzung für „Parteiausschlussverfahren“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Abkürzung für „Parteiausschlussverfahren“'},  # noqa: E501
+    {"item_id": 'queue:v2:2a41e99c8c00088c7bf38da5d874dbda', "lemma": 'Netze', "english_source": ('nominative/accusative/genitive plural of Netz',), "final_kind": 'definition', "final_text": 'Nominativ, Akkusativ oder Genitiv Plural von „Netz“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Nominativ, Akkusativ oder Genitiv Plural von „Netz“'},  # noqa: E501
+    {"item_id": 'queue:v2:32f4b0c6b31ab11585ad268edcc72375', "lemma": 'Streifenameisenwürgers', "english_source": ('genitive of Streifenameisenwürger',), "final_kind": 'definition', "final_text": 'Genitiv Singular von „Streifenameisenwürger“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Genitiv Singular von „Streifenameisenwürger“'},  # noqa: E501
+    {"item_id": 'queue:v2:356867f7b6c946b3db6815718aa12ddc', "lemma": 'sendetest aus', "english_source": ('second-person singular subjunctive II',), "final_kind": 'definition', "final_text": '2. Person Singular Konjunktiv II', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": '2. Person Singular Konjunktiv II'},  # noqa: E501
+    {"item_id": 'queue:v2:367bae7242ddb8deebf49f2fc0b50fe4', "lemma": 'gefallener', "english_source": ('inflection of gefallen:', 'strong/mixed nominative masculine singular'), "final_kind": 'definition', "final_text": 'starke/gemischte Form im Nominativ Singular Maskulinum von „gefallen“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'starke/gemischte Form im Nominativ Singular Maskulinum von „gefallen“'},  # noqa: E501
+    {"item_id": 'queue:v2:37813fb88280997b8798486005446ddf', "lemma": 'menschenunwürdigem', "english_source": ('strong dative masculine/neuter singular of menschenunwürdig',), "final_kind": 'definition', "final_text": 'starke Dativform im Singular, Maskulinum oder Neutrum, von „menschenunwürdig“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'starker Dativ Singular Maskulinum oder Neutrum von „menschenunwürdig“'},  # noqa: E501
+    {"item_id": 'queue:v2:38ab3b1df59a4f67dced7767c3030bfa', "lemma": 'Arisierungen', "english_source": ('plural of Arisierung',), "final_kind": 'definition', "final_text": 'Plural von „Arisierung“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Plural von „Arisierung“'},  # noqa: E501
+    {"item_id": 'queue:v2:38b1ce3bd6597ab77d81a0fb782fc024', "lemma": 'photographischen', "english_source": ('inflection of photographisch:', 'strong genitive masculine/neuter singular'), "final_kind": 'definition', "final_text": 'starker Genitiv Singular Maskulinum oder Neutrum von „photographisch“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'starker Genitiv Singular Maskulinum oder Neutrum von „photographisch“'},  # noqa: E501
+    {"item_id": 'queue:v2:39561cc9923606212cf67cb7c40be0ca', "lemma": 'Kitzingens', "english_source": ('genitive singular of Kitzingen',), "final_kind": 'definition', "final_text": 'Genitiv Singular von „Kitzingen“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Genitiv Singular von „Kitzingen“'},  # noqa: E501
+    {"item_id": 'queue:v2:3a99e45482575743acf4789f24789062', "lemma": 'Marmarameer', "english_source": ('Sea of Marmara',), "final_kind": 'synonym', "final_text": 'Marmarameer', "manual_adjudicated": True, "bulk_kind": 'synonym', "bulk_text": 'Sea of Marmara'},  # noqa: E501
+    {"item_id": 'queue:v2:3bd8d7e8bcccee47d289f59f5b1538cb', "lemma": 'seinen Segen zu etwas geben', "english_source": ("to give one's blessing to",), "final_kind": 'definition', "final_text": 'jemandem oder etwas zustimmen', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'jemandem oder etwas zustimmen'},  # noqa: E501
+    {"item_id": 'queue:v2:45bd0bd1611b6a1f2df543fb0107a7c1', "lemma": 'grosser', "english_source": ('strong genitive/dative feminine singular',), "final_kind": 'definition', "final_text": 'starke Genitiv- und Dativform, feminin Singular', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'starke Genitiv- und Dativform Feminin Singular von'},  # noqa: E501
+    {"item_id": 'queue:v2:4a3700567c7630b97488c773a86ff210', "lemma": 'Schnappschüsse', "english_source": ('nominative/accusative/genitive plural of Schnappschuss',), "final_kind": 'definition', "final_text": 'Nominativ, Akkusativ oder Genitiv Plural von „Schnappschuss“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Nominativ, Akkusativ oder Genitiv Plural von „Schnappschuss“'},  # noqa: E501
+    {"item_id": 'queue:v2:4a6c8cb94a2379b6c75e6e1128bea3ea', "lemma": 'alternd', "english_source": ('present participle of altern',), "final_kind": 'definition', "final_text": 'Partizip Präsens von „altern“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Partizip Präsens von „altern“'},  # noqa: E501
+    {"item_id": 'queue:v2:4ad294b4a677c483450938cebc92b0c8', "lemma": 'Jan', "english_source": ('a male given name, variant of Johann, popular in the later 20th century',), "final_kind": 'definition', "final_text": 'Männlicher Vorname, Variante von Johann, beliebt im späten 20. Jahrhundert.', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Männlicher Vorname, eine Variante von Johann, die im späten 20. Jahrhundert beliebt war.'},  # noqa: E501
+    {"item_id": 'queue:v2:567327f4e2c121512310e9082760b947', "lemma": 'serbisch-montenegrinischen', "english_source": ('weak/mixed genitive/dative all-gender singular',), "final_kind": 'definition', "final_text": 'schwache/gemischte Genitiv- oder Dativform im Singular für alle Geschlechter', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'schwache/gemischte Genitiv- oder Dativform im Singular für alle Geschlechter'},  # noqa: E501
+    {"item_id": 'queue:v2:56927f0f429a0f49ac4604e75f3caec1', "lemma": 'Bühnendeutsch', "english_source": ('a unified, transregional pronunciation for German-language theatre productions codified in the late 19th century',), "final_kind": 'definition', "final_text": 'Eine einheitliche, überregionale Aussprache für deutschsprachige Theateraufführungen, die im späten 19. Jahrhundert festgelegt wurde.', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Eine einheitliche, überregionale Aussprache für deutschsprachige Theateraufführungen, die im späten 19. Jahrhundert festgelegt wurde.'},  # noqa: E501
+    {"item_id": 'queue:v2:65a1bd1275e7c2b5325ed0be9ce65874', "lemma": 'Think-tank', "english_source": ('alternative spelling of Thinktank',), "final_kind": 'synonym', "final_text": 'alternative Schreibweise von „Thinktank“', "manual_adjudicated": False, "bulk_kind": 'synonym', "bulk_text": 'alternative Schreibweise von „Thinktank“'},  # noqa: E501
+    {"item_id": 'queue:v2:6d7b75573bc7bca68c00e382f2a2dace', "lemma": 'einwohnerarmer', "english_source": ('inflection of einwohnerarm:', 'strong/mixed nominative masculine singular'), "final_kind": 'definition', "final_text": 'starke/gemischte Nominativform, maskulin Singular, von „einwohnerarm“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'starke/gemischte Nominativform, maskulin Singular, von „einwohnerarm“'},  # noqa: E501
+    {"item_id": 'queue:v2:6e864f3379436293212c94a6a84b5982', "lemma": 'Makro-Objektiv', "english_source": ('alternative form of Makroobjektiv',), "final_kind": 'synonym', "final_text": 'Makroobjektiv', "manual_adjudicated": False, "bulk_kind": 'synonym', "bulk_text": 'Makroobjektiv'},  # noqa: E501
+    {"item_id": 'queue:v2:817f12c325ed12959a17bf60afa48932', "lemma": 'nutznießerischen', "english_source": ('inflection of nutznießerisch:', 'strong genitive masculine/neuter singular'), "final_kind": 'definition', "final_text": 'starker Genitiv Singular Maskulinum oder Neutrum von „nutznießerisch“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'starker Genitiv Singular Maskulinum oder Neutrum von „nutznießerisch“'},  # noqa: E501
+    {"item_id": 'queue:v2:9c4724bce8da4103561869c5d314944a', "lemma": 'KL', "english_source": ('abbreviation of Kursleiter',), "final_kind": 'synonym', "final_text": 'Kursleiter', "manual_adjudicated": False, "bulk_kind": 'synonym', "bulk_text": 'Kursleiter'},  # noqa: E501
+    {"item_id": 'queue:v2:a5c71746f589b598fd3a55b414ef27af', "lemma": 'sinfonisch', "english_source": ('symphonic',), "final_kind": 'synonym', "final_text": 'symphonisch', "manual_adjudicated": False, "bulk_kind": 'synonym', "bulk_text": 'symphonisch'},  # noqa: E501
+    {"item_id": 'queue:v2:b240d6ab49d3527332b849a688ef9f2a', "lemma": 'inkonsequentestem', "english_source": ('strong dative masculine/neuter singular superlative degree of inkonsequent',), "final_kind": 'definition', "final_text": 'starke Dativform, Maskulinum oder Neutrum, Singular, Superlativ von „inkonsequent“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'starke Dativform, Maskulinum oder Neutrum, Singular, Superlativ von „inkonsequent“'},  # noqa: E501
+    {"item_id": 'queue:v2:b272b2567ab76eb218edb9fe1d93b803', "lemma": 'klüngelten', "english_source": ('inflection of klüngeln:', 'first/third-person plural preterite'), "final_kind": 'definition', "final_text": 'Präteritum der 1. und 3. Person Plural von „klüngeln“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Präteritum der 1. und 3. Person Plural von „klüngeln“'},  # noqa: E501
+    {"item_id": 'queue:v2:b498007e3209810a883ecae7c643d1a6', "lemma": 'Beteiligungsgesellschaft', "english_source": ('investment company; holding company (a company that holds shares in other companies for the purpose of control or financial gain)',), "final_kind": 'definition', "final_text": 'Unternehmen, das Anteile an anderen Unternehmen hält, um diese zu kontrollieren oder finanziellen Gewinn zu erzielen.', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Unternehmen, das Anteile an anderen Unternehmen hält, um diese zu kontrollieren oder finanziellen Gewinn zu erzielen.'},  # noqa: E501
+    {"item_id": 'queue:v2:ba3bcfd7b3c03b1e87df3c018284f511', "lemma": 'ertrinket', "english_source": ('second-person plural subjunctive I of ertrinken',), "final_kind": 'definition', "final_text": '2. Person Plural Konjunktiv I von „ertrinken“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": '2. Person Plural Konjunktiv I von „ertrinken“'},  # noqa: E501
+    {"item_id": 'queue:v2:be9ec30fc01e7df623840effd5231078', "lemma": 'Einsatzgebiete', "english_source": ('nominative/accusative/genitive plural of Einsatzgebiet',), "final_kind": 'definition', "final_text": 'Nominativ, Akkusativ oder Genitiv Plural von „Einsatzgebiet“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Nominativ, Akkusativ oder Genitiv Plural von „Einsatzgebiet“'},  # noqa: E501
+    {"item_id": 'queue:v2:bf6a754c4b85b6abdd8488209701bc70', "lemma": 'gemäßer', "english_source": ('comparative degree of gemäß',), "final_kind": 'definition', "final_text": 'Komparativ von „gemäß“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Komparativ von „gemäß“'},  # noqa: E501
+    {"item_id": 'queue:v2:c6f3f90bd8d15afff286ec797f88db9f', "lemma": 'Gutenberg', "english_source": ('A placename', 'A locale in Germany', 'Gutenberg (a municipality of Bad Kreuznach district, Rhineland-Palatinate, Germany, named after the castle and village)'), "final_kind": 'definition', "final_text": 'Eine Gemeinde im Landkreis Bad Kreuznach in Rheinland-Pfalz, Deutschland, benannt nach der Burg und dem Dorf Gutenberg.', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Eine Gemeinde im Landkreis Bad Kreuznach in Rheinland-Pfalz, Deutschland.'},  # noqa: E501
+    {"item_id": 'queue:v2:ca9a4c04e83f08678564370d2b52d3cf', "lemma": 'nordrhein-westfälischer', "english_source": ('comparative degree of nordrhein-westfälisch',), "final_kind": 'definition', "final_text": 'Komparativ von „nordrhein-westfälisch“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Steigerungsform von „nordrhein-westfälisch“'},  # noqa: E501
+    {"item_id": 'queue:v2:ccebe747e6129953aee6888b30c83356', "lemma": 'Furore', "english_source": ('sensation',), "final_kind": 'synonym', "final_text": 'Sensation', "manual_adjudicated": False, "bulk_kind": 'synonym', "bulk_text": 'Sensation'},  # noqa: E501
+    {"item_id": 'queue:v2:e535a290200075dc4b5b15098aa0e61d', "lemma": 'Versäumnisurteil', "english_source": ('default judgement (binding legal judgment in favor of either litigant in a lawsuit based on some failure to take action by the other party)',), "final_kind": 'definition', "final_text": 'Ein rechtsverbindliches Urteil zugunsten einer der beiden Parteien in einem Gerichtsverfahren, weil die andere Partei nicht gehandelt hat.', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Ein rechtsverbindliches Urteil zugunsten einer der beiden Parteien in einem Gerichtsverfahren, weil die andere Partei nicht gehandelt hat.'},  # noqa: E501
+    {"item_id": 'queue:v2:e874cbeb801203c47a3414d2157f863c', "lemma": 'PzH', "english_source": ('SPGH (“self-propelled howitzer”): abbreviation of Panzerhaubitze (“armoured howitzer, howitzer tank”)',), "final_kind": 'definition', "final_text": 'Abkürzung für Panzerhaubitze', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Abkürzung für Panzerhaubitze'},  # noqa: E501
+    {"item_id": 'queue:v2:ebe9620b5dffedf5ff1a9521e3e46609', "lemma": 'gleichberechtigtes', "english_source": ('strong/mixed nominative/accusative neuter singular of gleichberechtigt',), "final_kind": 'definition', "final_text": 'starke/gemischte Nominativ- oder Akkusativform Neutrum Singular von „gleichberechtigt“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'starke/gemischte Nominativ- oder Akkusativform Neutrum Singular von „gleichberechtigt“'},  # noqa: E501
+    {"item_id": 'queue:v2:efc8334ad5993e20c3b5e1298ef46dc9', "lemma": 'vorbereitet', "english_source": ('past participle of vorbereiten',), "final_kind": 'definition', "final_text": 'Partizip II von „vorbereiten“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Partizip II von „vorbereiten“'},  # noqa: E501
+    {"item_id": 'queue:v2:f6582244316e30bd5a98f46d1e7a5b51', "lemma": 'aasfressende', "english_source": ('strong nominative/accusative plural',), "final_kind": 'definition', "final_text": 'starke Form im Nominativ und Akkusativ Plural', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'starke Form im Nominativ und Akkusativ Plural'},  # noqa: E501
+    {"item_id": 'queue:v2:fca20836b82737bbbe7083358ad66f93', "lemma": 'Mod', "english_source": ('mod',), "final_kind": 'synonym', "final_text": 'Mod', "manual_adjudicated": True, "bulk_kind": 'definition', "bulk_text": 'eine Person, die Computerspiele verändert'},  # noqa: E501
+    {"item_id": 'queue:v2:fcf0b3676408cbf42fec29c3547b8bcd', "lemma": 'energieaufwändigsten', "english_source": ('superlative degree of energieaufwändig',), "final_kind": 'definition', "final_text": 'Superlativ von „energieaufwändig“', "manual_adjudicated": False, "bulk_kind": 'definition', "bulk_text": 'Superlativ von „energieaufwändig“'},  # noqa: E501
+)
+
+
+def _canary_v4_item(entry: dict[str, object]) -> dict[str, object]:
+    return {
+        "language": "de",
+        "lemma_text": entry["lemma"],
+        "derivation_inputs": [
+            {"text": src, "language": "en"} for src in entry["english_source"]
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [e for e in _CANARY_V4_ACCEPTED_ITEMS if not e["manual_adjudicated"]],
+    ids=[str(e["item_id"]) for e in _CANARY_V4_ACCEPTED_ITEMS if not e["manual_adjudicated"]],
+)
+def test_all_48_non_manual_canary_v4_finals_still_pass(entry: dict[str, object]) -> None:
+    """Required regression: all 48 non-manual accepted finals still validate.
+
+    Re-runs the complete deterministic semantic validator (now including all
+    three hardened checks) against every recorded final `(text, kind)` from
+    the fully accepted German Canary v4 evidence and confirms none
+    unexpectedly becomes invalid.
+    """
+    item = _canary_v4_item(entry)
+    assert (
+        _validate_de_semantic_contract(item, str(entry["final_text"]), str(entry["final_kind"]))
+        is None
+    )
+    assert (
+        _validate_generated_candidate(
+            str(entry["final_text"]), "de", str(entry["final_kind"]), str(entry["lemma"])
+        )
+        is None
+    )
+
+
+def test_canary_v4_manual_finals_preserved_and_structurally_valid() -> None:
+    """The 2 owner-approved manual finals are untouched and structurally sound.
+
+    Manual adjudication deliberately bypasses `_validate_de_semantic_contract`
+    (see `apply_manual_adjudication`); this only re-confirms the exact
+    recorded manual final text/kind for both items still passes generic
+    structural validation and was not altered by this task.
+    """
+    manual = {str(e["item_id"]): e for e in _CANARY_V4_ACCEPTED_ITEMS if e["manual_adjudicated"]}
+    assert set(manual) == {
+        "queue:v2:3a99e45482575743acf4789f24789062",
+        "queue:v2:fca20836b82737bbbe7083358ad66f93",
+    }
+    marmarameer = manual["queue:v2:3a99e45482575743acf4789f24789062"]
+    assert marmarameer["final_text"] == "Marmarameer"
+    assert marmarameer["final_kind"] == "synonym"
+    mod = manual["queue:v2:fca20836b82737bbbe7083358ad66f93"]
+    assert mod["final_text"] == "Mod"
+    assert mod["final_kind"] == "synonym"
+    # Both manual finals are deliberate lemma-equivalent fallbacks — exactly
+    # why `apply_manual_adjudication` documents that it skips the ordinary
+    # `echo_lemma` structural heuristic (it would otherwise trip on precisely
+    # this owner-chosen, correct text) while still running every other
+    # generic safety check (non-empty, valid language/kind, length bound,
+    # forbidden control/bidi characters).
+    for entry in manual.values():
+        assert entry["final_text"] == entry["lemma"]
+        assert (
+            _validate_generated_candidate(
+                str(entry["final_text"]), "de", str(entry["final_kind"]), ""
+            )
+            is None
+        )
+
+
+def test_canary_v4_original_marmarameer_bad_output_now_rejected() -> None:
+    """Required regression: the ORIGINAL bad Marmarameer provider output.
+
+    Exact recorded live bulk candidate before manual adjudication
+    (`queue:v2:3a99e45482575743acf4789f24789062`): the English source copied
+    verbatim. Must now trigger `english_source_echo`, not a silent PASS.
+    """
+    entry = next(
+        e
+        for e in _CANARY_V4_ACCEPTED_ITEMS
+        if e["item_id"] == "queue:v2:3a99e45482575743acf4789f24789062"
+    )
+    item = _canary_v4_item(entry)
+    assert (
+        _validate_de_semantic_contract(item, str(entry["bulk_text"]), str(entry["bulk_kind"]))
+        == "english_source_echo"
+    )
+
+
+def test_canary_v4_original_mod_bad_output_now_rejected() -> None:
+    """Required regression: the ORIGINAL bad Mod provider output.
+
+    Exact recorded live bulk candidate before manual adjudication
+    (`queue:v2:fca20836b82737bbbe7083358ad66f93`): an invented person
+    interpretation plus computer-game domain. Must now trigger
+    `unsupported_domain_elaboration`, not a silent PASS.
+    """
+    entry = next(
+        e
+        for e in _CANARY_V4_ACCEPTED_ITEMS
+        if e["item_id"] == "queue:v2:fca20836b82737bbbe7083358ad66f93"
+    )
+    item = _canary_v4_item(entry)
+    assert (
+        _validate_de_semantic_contract(item, str(entry["bulk_text"]), str(entry["bulk_kind"]))
+        == "unsupported_domain_elaboration"
+    )

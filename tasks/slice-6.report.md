@@ -2258,3 +2258,239 @@ German Canary v4 canary is semantically accepted
 (`PASS_WITH_2_MINOR`, 0 MATERIAL defects). Production remains unauthorized
 pending the three recorded generic pre-production hardening items and a
 separate full-production planning/authorization decision.
+
+---
+
+## German Stage-04 pre-production semantic hardening (3 generic defects) — zero-spend
+
+**Status:** local implementation repair only. No provider credential was
+read, no provider request was made, no new German canary was run or
+reopened. This task repairs exactly the three generic validator/classifier
+defects recorded above as "Pre-production hardening still required" —
+nothing else. `OPENAI_API_KEY` was not read.
+
+### Repository/asset verification
+
+- `branch == slice/6`; worktree clean (tracked files; only pre-existing
+  ignored paths present) — **MATCH**.
+- `git fetch origin`; `HEAD == origin/slice/6 == 4f2b0359299a252aecc885844338c4854b17d451`
+  — **MATCH**. `main == origin/main == 2f2486a5021465842ada8e5cc3d43e9a030e6955`
+  — **MATCH**.
+- `/tmp/flashcard-stage03-v2.json` SHA-256
+  `114dd20f1e071708ca43ff433284ce1be0e9662763db5a589930a8f5a045cf2a`,
+  334605426 bytes — **MATCH**. Read-only throughout; not modified.
+
+### A. English-source-echo detection (`tools/build_dict.py`)
+
+New bounded detector `_is_english_source_echo` + `_ENGLISH_ECHO_FUNCTION_WORDS`
+(a small closed set: "the", "of", "a", "and", "is", etc.), wired into
+`_validate_de_semantic_contract` ahead of the morphology block, returning the
+deterministic code `english_source_echo`. Deliberately not a general language
+detector: a candidate is flagged only when it is (a) multi-token, (b) an
+exact match (casefold + whitespace-collapsed) of one of the item's English
+`derivation_inputs` rows, and (c) that source row contains an unambiguous
+English function word as a whole token. A single identical token (acronym,
+code, name, or legitimate cognate) is never rejected by equality alone, and
+two candidates sharing a proper noun/acronym with no function word (e.g.
+"New York", "NATO") are never flagged.
+
+Added to `_QA_RECOVERABLE_SEMANTIC_ERRORS` (new section D below):
+`english_source_echo` bulk failures are persisted as a PROVISIONAL bulk
+completion and routed to mandatory Terra QA, never finalized without a full
+QA PASS re-run through the identical validator — exactly the existing
+`morphology_*` recovery mechanism, extended to this one additional class.
+
+**Offline Stage-03 corpus audit** (480221 items, 577141 source rows, all DE,
+0 EN — read-only, no provider calls): **332791 of 577141 source rows
+(332585 of 480221 items)** contain a multi-token phrase with at least one
+unambiguous English function word and would therefore be *eligible* for the
+echo check if a provider ever echoed them back verbatim unchanged (this is
+an upper-bound eligibility count over source structure, not a defect count —
+the Stage-03 queue holds no provider candidates to check against).
+
+### B. Unsupported-domain inflected-form recognition (`tools/build_dict.py`)
+
+`_UNSUPPORTED_DOMAIN_CUES`'s computer/video-game cue widened from
+`\bcomputer(?:spiel|game)\b|\bvideospiel\b` to recognize the closed German
+noun-inflection suffix family (nothing / "-e" / "-en" / "-s") via new
+`_DE_SPIEL_INFLECTION_SUFFIX`, the same bounded-suffix technique as the
+pre-existing `_DE_FORM_SUFFIX`. Covers all 4 required forms each of
+`Computerspiel(e|en|s)` and `Videospiel(e|en|s)`; still `\b`-bounded so a
+compound merely starting with the same stem (`Computerspielzeug`,
+`Computerspielindustrie`, `Videospielkonsole`) does not match — a closed
+linguistic strategy, not a substring test. Source-evidence gating is
+unchanged: a source that itself states "computer game"/"video game"/
+"gaming"/"videogame" still authorizes the corresponding candidate language.
+
+Added to `_QA_RECOVERABLE_SEMANTIC_ERRORS`: `unsupported_domain_elaboration`
+bulk failures are now PROVISIONAL + mandatory-QA-routed, same mechanism as
+morphology and the new echo class (previously a hard rejection — see the
+updated `test_unsupported_domain_elaboration_is_provisional_not_hard_rejection`,
+which replaces the old `test_non_morphology_semantic_failure_remains_hard_rejection`).
+
+**Offline Stage-03 corpus audit:** exactly **4 `Computerspiel` + 4
+`Videospiel`** bare/singular source-evidence occurrences found across the
+full queue; **zero inflected-form occurrences** (`Computerspiele`,
+`Computerspielen`, `Computerspiels`, `Videospiele`, `Videospielen`,
+`Videospiels`) in source text. Zero lookalike-compound occurrences
+(`Computerspielzeug`, `Computerspielindustrie`, `Videospielkonsole`, etc.).
+This is source-side evidence only — Stage-03 holds no candidate output to
+audit for the actual defect (an inflected form appearing in a *candidate*,
+as in the Mod canary evidence); the fix targets the candidate-side cue
+regex directly, verified by the regressions below and by the exact Mod
+canary re-validation in section D.
+
+### C. `perfect` English source-classifier ambiguity (`tools/build_dict.py`)
+
+**Full offline corpus audit** of every accepted Stage-03 DE-target source row
+containing the token `perfect` (602 of 577141 rows; 28 distinct non-
+participle texts):
+
+| Class | Row occurrences | Distinct texts | Resolution |
+|---|---|---|---|
+| `past participle` / `perfect participle` (pre-existing feature) | 571 | — | unchanged |
+| Ordinary Perfekt-tense grammar note (`forms the perfect aspect (have)`, `forms the perfect with sein`) | 2 | 2 | kept as the `perfect` feature, requires `Perfekt` in output — pattern narrowed to this closed context instead of the bare word |
+| Bare adjectival/verb/idiomatic "perfect" (`perfect, impeccable`; `a perfect wedding`; `perfect fifth`/`fourth` [music interval]; `to perfect`; `practice makes perfect`; etc.) | 24 | 20 | **no morphology feature at all** (previously wrongly forced `Perfekt` into the required output — this was a real, previously undiscovered false-positive class) |
+| Composite tense (`present perfect`, `past perfect`, `future perfect`, `conditional perfect`, `pluperfect`, and the compound row `forms the present perfect and past perfect tenses of certain verbs`) | 9 (row-level bucket sum; 6 distinct real source texts) | 6 | new `perfect_tense_composite` feature; **always** fails closed as `morphology_unsupported_composite_tense`, regardless of candidate content — never silently reduced to ordinary `Perfekt` |
+
+No occurrences of `pluperfect`, `future perfect`, or `conditional perfect` as
+standalone bare tokens outside the 6 distinct rows already counted above; no
+unclassified/ambiguous `perfect` phrasing remained (`unclassified_count=0`).
+
+Implementation: the `perfect` rule's source pattern narrowed from
+`\bperfect\b(?!\s+participles?)` to the closed grammatical-context pattern
+`\bperfect\s+aspect\b|\bforms?\s+the\s+perfect\b|\bperfect\s+with\s+(?:sein|haben)\b`.
+A new `perfect_tense_composite` rule
+(`\b(?:present|past|future|conditional)\s+perfect\b|\bpluperfect\b`) is
+checked first inside `_validate_de_semantic_contract`'s morphology block and
+always returns `morphology_unsupported_composite_tense` before the generic
+per-feature loop is reached — its output pattern is an intentionally
+unmatchable placeholder, never consulted. The pre-existing `present`/
+`preterite` rules additionally exclude their own composite phrasing
+(`(?!\s+perfect\b)`, mirroring the existing participle exclusion) — without
+this, `present perfect`/`past perfect` would simultaneously (and wrongly)
+also demand bare `Präsens`/`Präteritum`, a real collision the corpus audit
+surfaced (`forms the present perfect and past perfect tenses of certain
+verbs` contains both).
+
+**Operational note for the production plan:** because
+`morphology_unsupported_composite_tense` always fires regardless of output
+content, a composite-tense item can never pass Terra QA either (QA re-runs
+the identical validator) — it can only be resolved by a future contract
+extension adding a verified output pattern for that tense, or by explicit
+owner manual adjudication. This is intentional and matches the instruction
+not to invent translations for an unsupported grammar class; it affects at
+most 6 real Stage-03 rows.
+
+### D. QA-recoverable error policy (`tools/build_dict.py`)
+
+`_is_morphology_qa_recoverable` replaced by `_is_semantic_error_qa_recoverable`
+(the one bulk call site updated) plus a new explicit, closed allowlist
+constant `_QA_RECOVERABLE_SEMANTIC_ERRORS = {"english_source_echo",
+"unsupported_domain_elaboration"}`. Recoverability logic: the `morphology_*`
+prefix family (gated, as before, on the item carrying a source-supplied
+morphology feature) **or** an exact code in the new allowlist. No other
+semantic-contract code is recoverable — verified by
+`test_non_recoverable_semantic_failure_remains_hard_rejection`
+(`related_not_exact_synonym` still hard-rejects) and
+`test_structural_failure_on_morphology_item_remains_hard_rejection`
+(`echo_lemma`, a generic/structural code, still hard-rejects regardless of
+morphology features present).
+
+### Manual-adjudication safety (unchanged mechanism, new regression)
+
+`apply_manual_adjudication` remains the sole writer of the checkpoint's
+`manual_adjudications` section and is never called from inside
+`build_stage04`'s own execution path (verified again: only 6 call sites in
+the whole repository, all in test code exercising the explicit external
+API). New regression
+`test_normal_stage04_execution_never_creates_manual_adjudication_on_its_own`
+runs a normal bulk+QA-corrected completion and a normal hard rejection
+through `build_stage04` and asserts `manual_adjudications` stays empty in
+both checkpoints. The two accepted German Canary v4 manual adjudications
+(Marmarameer, Mod) were not read, re-applied, or altered by this task.
+
+### Paid-request-contract identities — re-verified unchanged
+
+Re-hashed all four frozen artifacts directly (outside the repository, under
+`tmp/`, gitignored):
+
+- `SELECTION_SHA` `1ffa5e76c7315467a39a5b7b953e07fba924b37dbc77512130e720adb3ab7475`
+  (`tmp/de-canary-v2/de-canary-selection-v2.json`) — **MATCH**.
+- `REQUEST_SHA` `185d2a592ef9e391008622b88adcb14a13d81dd615978f3c518925eae1d8f3d5`
+  (`tmp/de-canary-v4/de-canary-requests-v4.jsonl`) — **MATCH**.
+- `BATCH_SHA` `ca9fdc66a5924609cb16eea0385eba6ab223c2046b88af1209282170b60cf2a2`
+  (`tmp/de-canary-v4/de-canary-batch-manifest-v4.jsonl`) — **MATCH**.
+- `COST_PLAN_SHA` `e716609c93cf9e8e1d60307132486aac65eb869a247670614ab7a61863269a81`
+  (`tmp/de-canary-v4/live-cost-plan-v4.json`) — **MATCH**.
+
+No Luna instruction, Terra QA instruction, JSON schema, model name, reasoning
+setting, `max_output_tokens`, endpoint, live transport, or retry behavior was
+touched — this task only changed post-receipt local semantic validation
+(`tools/build_dict.py`'s `_validate_de_semantic_contract` and the
+QA-recoverability policy around it), never the outbound request.
+
+### German Canary v4 full accepted-evidence re-validation (deterministic, zero-spend)
+
+The complete real v4 accepted evidence (50 items: 48 non-manual finals + 2
+owner-approved manual finals) was embedded verbatim from the durable local
+canary evidence (`~/.cache/flashcard/stage04-runs/slice-6-de-canary-v4/
+checkpoint.json`, `review-bundle.json`; outside the repository) into a new
+self-contained regression table (`_CANARY_V4_ACCEPTED_ITEMS`,
+`tests/test_build_dict_stage04.py`) and re-validated read-only:
+
+- **`test_all_48_non_manual_canary_v4_finals_still_pass`** (48 parametrized
+  cases) — every recorded final `(text, kind)` still passes the complete
+  hardened `_validate_de_semantic_contract` and `_validate_generated_
+  candidate`. **48/48 PASS** — no previously accepted item became invalid.
+- **`test_canary_v4_manual_finals_preserved_and_structurally_valid`** — the 2
+  manual finals (`Marmarameer`, `Mod`, both kind `synonym`) are unchanged and
+  structurally sound (manual adjudication deliberately bypasses the semantic
+  contract, as documented above).
+- **`test_canary_v4_original_marmarameer_bad_output_now_rejected`** — the
+  exact original bad bulk candidate (`Sea of Marmara`) now returns
+  `english_source_echo` (was a silent PASS at canary time; only caught by
+  independent human review).
+- **`test_canary_v4_original_mod_bad_output_now_rejected`** — the exact
+  original bad bulk candidate (`eine Person, die Computerspiele verändert`)
+  now returns `unsupported_domain_elaboration` (was a silent PASS at canary
+  time; only caught by independent human review).
+
+`output.sqlite`, the checkpoint, and provider/spend ledger were not touched;
+no candidate text was retransmitted; no new canary ran. Cumulative v4 spend
+remains **USD 0.0716368** (86/86 paid calls, unchanged).
+
+### Tests (`tests/test_build_dict_stage04.py`)
+
+88 new tests added (203 → 291): direct-validator truth tables for all three
+hardenings (echo, domain inflections incl. 4+4 required forms and 3
+substring-lookalike non-triggers, and the full 28-case `perfect` corpus
+truth table), end-to-end `build_stage04` provisional→QA→final-output and
+provisional→QA→hard-reject pairs for both new recoverable classes, the
+still-hard non-recoverable-class regression, the manual-adjudication-safety
+regression, and the 48-case canary re-validation table plus the two
+"original bad output now rejected" regressions.
+
+- `pytest -q tests/test_build_dict_stage04.py` — **291 passed**.
+- `pytest -q tests/test_build_dict_stage03.py` — **16 passed** (file
+  unchanged; source-feature parsing tests already lived in
+  `test_build_dict_stage04.py`, so no stage03 changes were needed).
+- `git diff --check` — PASS (no whitespace errors).
+- `make gate` — `ruff check .` PASS; `mypy --strict .` PASS (18 source
+  files); `pytest -q` **534 passed**; `check_agents.py` R1/R3/R7 PASS.
+
+**Changed paths:** `tools/build_dict.py`, `tests/test_build_dict_stage04.py`,
+`tasks/slice-6.report.md`.
+
+**Provider calls:** `0`. **Paid spend:** `USD 0`. **New canary run:** `NO`.
+Cumulative v4 canary spend unchanged at `USD 0.0716368`.
+
+**Disposition:** `GERMAN_STAGE04_PREPRODUCTION_HARDENING_COMPLETE` — all
+three recorded generic pre-production hardening defects (English-source
+echo, inflected unsupported-domain forms, bare/composite `perfect`
+ambiguity) are repaired and regression-covered; the German Canary v4
+semantic gate remains `PASS_WITH_2_MINOR`. **Production remains
+unauthorized** pending a separate measured full-Stage-04 production plan
+(partition manifests, Batch limits/correlation verification, measured
+bulk+QA token/cost bounds, hard spend cap, recovery/resume plan, exact
+artifact SHAs) and explicit owner authorization.
