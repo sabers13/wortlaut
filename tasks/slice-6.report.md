@@ -2767,3 +2767,57 @@ Phase-1's bulk cost together with the measured Terra QA preknown floor
 (§6–7, **$1,429.16** minimum once QA is separately authorized in Phase 2) —
 this plan intentionally does not request or imply Phase-2 authorization.
 `PHASE2_TERRA_AUTHORIZATION: NOT_REQUESTED_YET`.
+
+---
+
+## Final owner disposition — v1 simplification and Slice-6 closure
+
+**Status:** Slice-6 implementation work accepted for closure. Full paid Stage-04 German production is NOT executed for v1.
+
+### 1. Owner decision and rationale
+
+The owner has decided to stop pursuing full paid Stage-04 German production for v1. This is a deliberate scope simplification, not a failed provider run.
+
+The completed production planning demonstrated that the full-coverage LLM enrichment and selective QA architecture became economically and operationally disproportionate for v1 requirements, available budget, and implementation complexity:
+- **Total German jobs:** `480221`
+- **Pending bulk items:** `480171`
+- **Measured Luna Batch input cost alone:** ≈ `USD 32.16` (previous proposed conservative Luna cap `USD 222.50`)
+- **Preknown Terra QA population (morphology-routed):** `349914` items exposing ≈ `USD 1429.16` in mandatory QA floor before any output-dependent QA triggers fire.
+
+No Phase-1 production authorization was granted, no full German production Batch was executed, and no further Stage-04 cost/QA optimization cycle is required for Slice-6.
+
+### 2. Summary of Slice-6 accomplishments
+
+Slice-6 has successfully implemented, tested, and hardened the entire offline enrichment and packaging pipeline:
+1. **Deterministic Stage-03 queue construction:** Verified against real Stage-02 input (480,221 records, zero secret leakage, stable semantic references);
+2. **Stage-04 offline generation infrastructure:** Implemented, tested with fake/local transports, and verified for structured responses, validation, and selective QA;
+3. **Durable resilience mechanisms:** Checkpoint/resume, spend fencing, deterministic Batch manifest partitioning, correlation metadata (`batchcorr:v1:<manifest-sha256>`), validation, and fail-closed provider error handling implemented;
+4. **German canary execution:** 50-item German Canary v4 executed and technically completed within the hard spend cap;
+5. **Semantic review and transparent adjudication:** Independent semantic review found 46 PASS / 2 MINOR / 2 MATERIAL; both MATERIAL items (`Marmarameer` → `Marmarameer`, `Mod` → `Mod`) were manually and transparently adjudicated and preserved in audit records;
+6. **Accepted canary verdict:** Final canary result `48 PASS / 2 MINOR / 0 MATERIAL` (`PASS_WITH_2_MINOR`);
+7. **Canary provider spend:** Cumulative German v4 canary provider spend recorded as `USD 0.0716368` across 86 paid calls;
+8. **Pre-production semantic hardening:** Repaired all three generic validator/classifier defects (English-source echo detection, inflected unsupported-domain form recognition, bare/composite `perfect` ambiguity) with 88 new regression tests;
+9. **Stage-05 fixture packaging:** Packaging pipeline verified for SQLite quick_check, metadata generation, attribution integrity, and overwrite refusal;
+10. **Piper/Docker prerequisite:** Standalone Dockerfile created and verified with pinned `piper-tts==1.6.0`, pinned `de_DE-thorsten-high` voice revision, SHA-256 digest check, bounded synthesis smoke test, and license/notice material;
+11. **Runtime LLM prohibition:** Zero runtime LLM dependencies in `pyproject.toml` runtime graph, `app/`, or the Docker runtime container (AGENTS R1).
+
+All historical investigations, cost plans, prompt repairs, canary evidence, adjudication receipts, and regression suites remain preserved as immutable engineering audit records.
+
+### 3. Normative operational disposition for v1
+
+1. **Slice-6 implementation work is accepted for closure.**
+2. **Full paid Stage-04 DE production is NOT executed as part of v1 closure.**
+3. **No further Stage-04 cost/QA optimization cycle is required for Slice-6.**
+4. **v1 dictionary baseline:** For v1, the application relies on:
+   - Existing source-backed dictionary data from Wiktionary and Tatoeba;
+   - Deterministic grammar and morphology;
+   - Existing source-backed English meanings;
+   - Suitable source-backed German learner meanings when present;
+   - Explicit absence/partial availability when a safe German learner meaning is unavailable.
+5. **No synthetic coverage invention:** German meanings are never hallucinated or invented merely to achieve complete coverage.
+6. **D43 meaning availability contract:** ADR-0004 D43's `meaning_state = none | partial | complete` remains the authoritative mechanism for representing incomplete selected-language coverage.
+7. **Future enrichment is optional:** Full paid Stage-04 DE enrichment is deferred as an optional future enhancement, not a prerequisite for completing the standalone v1 application.
+8. **Maintainer tooling preserved:** The Stage-04 LLM generation and QA machinery in `tools/build_dict.py` remains available in maintainer tooling for potential future use.
+9. **Runtime LLM remains strictly forbidden:** AGENTS R1 applies without exception across all application and runtime code paths.
+10. **Canary role:** The accepted canary remains historical validation evidence and does not imply authorization for full production.
+11. **Production authorization:** Production authorization remains **NO**.

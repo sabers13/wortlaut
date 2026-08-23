@@ -35,17 +35,6 @@ them. REJECTED items are listed so they do not resurface.
   `tasks/adr-0002-donor-notes.md`; any contradiction returns to governance. When
   that repo decomposes Phase 4, add one line to *its* backlog pointing here; do
   not file flashcard ADRs into it before then (ADR-0002 §3).
-- **Paid Stage-04 production remains owner-gated under accepted ADR-0006/ADR-0007.**
-  ADR-0007 is ACCEPTED / FROZEN; the Slice-6 implementation/design-reset is no
-  longer governance-blocked and may resume under the DE/EN-only architecture.
-  API credit expires **mid-September 2026**. ADR acceptance alone
-  authorizes no paid production run. Forward generation is DE/EN only: preserve only
-  positively eligible source-backed German wording; uncertainty generates one
-  isolated DE item; fill missing EN meanings. Generated DE/EN work remains one semantic item per request;
-  future production requires bounded deterministic Batch manifests, durable
-  correlation and exact-one ambiguous reconciliation. Current provider
-  capabilities/limits/cost are execution-time facts. The versioned generated
-  marker, non-masquerade and clean-reversibility rules remain binding (AGENTS R11).
 - **`reference/smoke_test.py` is path-broken as filed** — it does
   `sys.path.insert(0, dirname(__file__))` then imports `app.*` and opens
   `schema.sql` beside itself, i.e. it expects `reference/app/` and
@@ -77,6 +66,23 @@ them. REJECTED items are listed so they do not resurface.
   was evaluated/canaried (historical spend USD 0.0008764) but owner rejected its
   cost and complexity for v1. Persian is deferred from active v1 product scope;
   reconsider only through a future explicit owner decision and architecture review.
+- **Full paid Stage-04 DE/EN enrichment production — deferred by owner for v1.**
+  Full paid Stage-04 enrichment generation is deferred by owner decision for v1.
+  Measured production planning established that full-coverage LLM enrichment
+  and selective QA (480,221 German jobs; 480,171 pending bulk items with $32.16
+  measured Luna input / $222.50 conservative Luna cap, plus 349,914 preknown
+  morphology QA items exposing $1,429.16 in Terra QA floor) was economically and
+  operationally disproportionate for v1 requirements.
+  Accepted 50-item German canary evidence (PASS_WITH_2_MINOR, cumulative spend
+  USD 0.0716368) and pre-production semantic hardening remain preserved as
+  historical engineering and audit evidence.
+  The maintainer-operated offline generation tooling in `tools/build_dict.py`
+  remains available for optional future enrichment under a new explicit owner
+  decision and budget authorization.
+  No paid production is required before Slice-7; runtime LLM remains strictly
+  forbidden (AGENTS R1); and partial German learner-meaning availability is
+  cleanly supported under the accepted ADR-0004 D43 contract
+  (`meaning_state = none | partial | complete`).
 - Multilingual contribution/voting policy (cite: ADR-0004 D42 / ADR-0007). The existing
   `gloss_contribution` scope — English, one vote per user per lemma, promotion
   at dictionary build (ADR-0001 D10) — stays exactly as accepted and is
