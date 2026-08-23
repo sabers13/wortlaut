@@ -2019,3 +2019,242 @@ checkpoint now reads 50 bulk completed / 0 rejected; 36 QA required, 34
 completed, 0 rejected, 2 pending. `output.sqlite` remains correctly
 unfinalized. This repair authorizes no further paid work by itself; resuming
 the final 2 QA requests remains a separate owner/orchestrator decision.
+
+## German Canary v4 manual adjudication of 2 material findings — zero-spend
+
+**Status:** local checkpoint/artifact reconciliation only. No provider
+credential was read, no provider request was made, no candidate text was
+retransmitted.
+
+### Independent all-50 semantic review result
+
+Since the prior report entry, the live v4 canary reached full technical
+completion out of band (2 remaining QA calls transmitted, 50/50 bulk + 36/36
+QA, `output.sqlite` finalized — real paid execution, not part of this
+repair). An independent semantic review of all 50 final German meanings then
+found:
+
+**46 PASS / 2 MINOR / 2 MATERIAL.**
+
+The 2 MINOR findings (`seinen Segen zu etwas geben`, `Think-tank`) do not
+block canary acceptance and were **not** touched by this task.
+
+### MATERIAL finding A — Marmarameer (English-source echo)
+
+`queue:v2:3a99e45482575743acf4789f24789062`, lemma `Marmarameer` (PROPN),
+source `Sea of Marmara`. Bulk/final text was `Sea of Marmara` — the English
+source copied verbatim, not a German learner meaning at all.
+**Owner-approved manual final:** `Marmarameer` (kind `synonym`) — the direct
+German name, deliberately conservative, no invented geographical
+description.
+
+### MATERIAL finding B — Mod (unsupported domain/person narrowing)
+
+`queue:v2:fca20836b82737bbbe7083358ad66f93`, lemma `Mod`, source `mod`.
+Bulk/final text was `eine Person, die Computerspiele verändert` — inventing
+both a person interpretation and a computer-game domain the single-word
+source does not support. **Owner-approved manual final:** `Mod` (kind
+`synonym`) — a deliberate direct lemma-equivalent fallback; no domain/sense
+inferred.
+
+The owner chose explicit manual adjudication for both findings instead of
+additional paid Terra spend.
+
+### Manual-adjudication infrastructure (`tools/build_dict.py`)
+
+- `STAGE04_MANUAL_ADJUDICATION_SOURCE = "contributed"` — reused, not
+  invented: `reference/schema.sql` and ADR-0004's `sense_meaning` DDL
+  comment already document `contributed` as a third `source` value alongside
+  `wiktionary` and `llm_generated_v1`, for content that is neither
+  Wiktionary-sourced nor LLM-generated. A manual adjudication is never
+  persisted as `llm_generated_v1` — R11's marker contract is reserved for
+  rows a provider actually generated, and rollback-by-marker semantics
+  depend on that meaning exactly that.
+- `apply_manual_adjudication(checkpoint_path, identity, item_id, text, kind,
+  reason, generated_license)` — the only way to record one. Refuses any
+  item_id not already a real `bulk.completed` entry (an "unapproved
+  arbitrary override" is structurally impossible, not just discouraged) and
+  refuses a duplicate adjudication of the same item. Runs generic
+  structural/safety validation (non-empty, valid language/kind, length
+  bound, forbidden control/bidi characters) but deliberately skips the
+  lemma-echo heuristic (an LLM-laziness detector that a deliberate
+  owner-chosen lemma-equivalent, e.g. Marmarameer's own proper-noun name,
+  would otherwise trip) and the semantic-contract heuristic (the whole point
+  of this path is the owner's judgement superseding that heuristic). Never
+  touches historical provider evidence: no response ID, usage record, or
+  spend-ledger entry is added, removed, or modified.
+- New optional `manual_adjudications` checkpoint section, structurally
+  validated by `_load_checkpoint`/`_validate_manual_adjudications_state`
+  (fails closed on a corrupt/mislabeled record, in particular one whose
+  `source` isn't exactly `STAGE04_MANUAL_ADJUDICATION_SOURCE`) exactly like
+  the existing optional `spend` section — fully backward compatible with
+  every checkpoint that predates this feature.
+- Finalization precedence is now explicit and total: **manual adjudication
+  > successful QA > valid bulk.** The provisional-item finalization guard
+  and the pending-QA-transmission check both treat a manual adjudication as
+  a valid, complete resolution — a provisional item can be finalized via
+  manual adjudication alone, without ever requiring (or being blocked on) a
+  QA-capable transport.
+- **Bug found and fixed as a byproduct:** the `sense_meaning` INSERT
+  hardcoded `GENERATED_MARKER`/the run's `generated_license` parameter for
+  every row's `source`/`license` columns, ignoring each completion record's
+  own (already-present) `source`/`license` fields. This had been invisible
+  because every historical bulk/QA completion always carried
+  `source="llm_generated_v1"` anyway; it would have silently mislabeled the
+  first manually-adjudicated row as `llm_generated_v1` regardless of the
+  checkpoint's own `manual_adjudications` record. Fixed to read each row's
+  own `source`/`license`.
+- **Accepted-contract conflict found and resolved without violating it:**
+  `validate_sense_meaning_derivations` (ADR-0004 D45/A8) requires the
+  `generated_meaning_id` side of every `sense_meaning_derivation` edge to
+  carry the versioned `llm_generated_vN` marker. A manually-adjudicated row
+  cannot satisfy that (by design — it is not "generated"), so creating a
+  derivation edge for it would either violate this accepted invariant or
+  require weakening a general-purpose integrity checker outside this task's
+  scope. Resolved conservatively: a manually-adjudicated row's provenance
+  (the exact review finding, and the original Luna bulk text it supersedes)
+  is recorded truthfully in the checkpoint's `manual_adjudications` section
+  instead, and no derivation edge is created for it. **Consequence for the
+  regenerated output:** derivation edges are **58**, not 60 — 2 fewer than
+  the pre-adjudication run, exactly matching the 2 material items each
+  losing their 1 EN derivation edge. This is reported, not silently
+  mismatched against the earlier assumption of an unchanged count.
+
+### Regression tests (`tests/test_build_dict_stage04.py`, 5 new)
+
+1. `test_manual_adjudication_requires_existing_bulk_completed_item` — an
+   arbitrary/unknown item_id is refused; nothing is persisted.
+2. `test_manual_adjudication_overrides_bulk_and_qa_finalization` — with
+   distinct bulk and QA texts, a manual adjudication wins finalization;
+   the historical bulk/QA records themselves are never overwritten or
+   relabeled.
+3. `test_manual_adjudication_resolves_provisional_item_without_qa` — a
+   morphology-provisional item is finalized via manual adjudication alone,
+   with no QA-capable transport ever required.
+4. `test_manual_adjudication_checkpoint_round_trip_and_validation` — the
+   section round-trips through `_load_checkpoint` unchanged, and
+   `_validate_manual_adjudications_state` fails closed on a wrong `source`,
+   a blank `reason`, and a non-dict payload.
+5. `test_manual_adjudication_second_call_rejected` — an item cannot be
+   silently re-adjudicated.
+
+All prior regressions pass unmodified. `pytest -q tests/test_build_dict_stage04.py` —
+**203 passed** (198 + 5 additions). Per instruction, this task did not touch
+the three separately reported generic pre-production validators (English-
+source-echo detection, unsupported-domain inflected-form recognition, the
+bare-`perfect` ambiguity).
+
+### Preserved paid history (zero provider calls)
+
+Read the live checkpoint as durable evidence before touching anything:
+`bulk.completed=50`, `bulk.rejected=0`, `qa.required=36`, `qa.completed=36`,
+`qa.rejected=0`, `qa.in_flight=[]`; 86 ledger entries, all `ACTUAL`, all 86
+response IDs unique; cumulative spend `USD 0.0716368`. Applied both manual
+adjudications with the project's own `apply_manual_adjudication`; reloaded
+and verified afterward: `bulk`, `qa`, identity, manifests, and all 86 ledger
+entries byte-identical before/after — the only change is the new
+`manual_adjudications` section (2 entries). No response ID was added,
+removed, duplicated, or changed; no usage record changed; cumulative spend
+unchanged at `USD 0.0716368`.
+
+### Archived BLOCKED artifacts (pre-adjudication)
+
+Before regenerating, archived the independent-review BLOCKED versions
+byte-identical:
+
+- `output.semantic-blocked.sqlite` — SHA
+  `e3e1bb13d087fd4db21bd31cc2381284efd8a37a4235200160ae0ddbf9bc47eb` (match).
+- `review-bundle.semantic-blocked.json` — SHA
+  `99ff8ec49387e939fb35f90a55a301291fbe9dc30d359fa5c05c3edc8a62c20c` (match).
+- `receipt.semantic-blocked.txt` — SHA
+  `f2e3a663e2e6379dd3a94673de0a394193c36aad5dd03c59278e7990c5f98679` (match).
+
+### Regenerated final output.sqlite
+
+Regenerated via the project's own `build_stage04` finalization path
+(`transport=None`; no pending bulk or QA work remained) from the
+authoritative Stage-02 asset plus the existing checkpoint plus the two
+manual adjudications:
+
+- `PRAGMA quick_check` — `ok`.
+- 50 generated-class rows total: 48 `llm_generated_v1` + 2 `contributed`
+  (Marmarameer, Mod).
+- All 50 licenses `CC BY-SA`.
+- Derivation edges: **58** (60 minus the 2 material items' edges — see
+  above).
+- Cross-sense derivation violations: **0**.
+- Stage-02 SHA unchanged
+  (`75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97`).
+- `output.sqlite` SHA `1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c`,
+  945418240 bytes.
+
+### 48-item immutability check
+
+Compared every non-material final `(text, kind)` in the regenerated database
+against the archived BLOCKED review bundle:
+
+**UNCHANGED_FINAL_ITEMS: 48/48 PASS.**
+
+### Regenerated review bundle and receipt
+
+`review-bundle.json` (all 50 items; `manual_adjudicated`,
+`manual_adjudication_reason`, `manual_text`, `manual_kind`, `final_source`
+fields added; unambiguous ORIGINAL provider output vs. FINAL manual
+adjudication for both material items) — SHA
+`04b18f6f6ff729ed14638ae9e1760b1c133dabc1d63206bf1c115045b5d07e34`,
+51666 bytes.
+
+`receipt.txt` — SHA `501fe92aed15b0aefe9bf437986a5e374f7b3ffdda19939c141be5e0125e5a96`.
+
+### Canary semantic acceptance
+
+Marmarameer (`Sea of Marmara` → `Marmarameer`): PASS. Mod (`mod` → `Mod`):
+PASS. Review classification history preserved: **46 PASS / 2 MINOR / 2
+MATERIAL** before adjudication → **48 PASS / 2 MINOR / 0 MATERIAL** after.
+No MATERIAL defects remain.
+
+**`GERMAN_CANARY_V4_SEMANTIC_REVIEW: PASS_WITH_2_MINOR`**
+
+### Pre-production hardening still required (not run in this task)
+
+Canary semantic acceptance does **not** authorize full production. Recorded,
+not repaired here:
+
+A. Generic German-target English-source-echo detection/routing, exposed by
+   Marmarameer.
+B. Unsupported-domain cue recognition for inflected `Computerspiel`/
+   `Videospiel` forms, exposed by Mod.
+C. The previously reported bare-`perfect` source-classifier ambiguity
+   (`past perfect`/`future perfect`/`conditional perfect`).
+
+### Frozen paid identities — re-verified unchanged
+
+`SELECTION_SHA`, `REQUEST_SHA`, `BATCH_SHA`, `COST_PLAN_SHA` all re-hashed
+against their on-disk artifacts and confirmed byte-identical to the frozen
+values. No prompt, request body, schema, model, reasoning setting,
+`max_output_tokens`, selection, cost plan, endpoint, price, cap, transport,
+or retry policy was touched.
+
+### Executable evidence
+
+- `pytest -q tests/test_build_dict_stage04.py` — **203 passed**.
+- `pytest -q tests/test_build_dict_stage03.py` — **16 passed**.
+- `git diff --check` — PASS.
+- `make gate` — Ruff PASS; mypy --strict PASS (18 source files); pytest
+  **430 passed**; `check_agents.py` R1/R3/R7 PASS.
+
+**Changed paths:** `tools/build_dict.py`, `tests/test_build_dict_stage04.py`,
+`tasks/slice-6.report.md`. All canary run-directory artifacts (checkpoint,
+output.sqlite, review-bundle.json, receipt.txt, and the three
+`*.semantic-blocked.*` archives) are outside the repository; none are
+tracked or pushed.
+
+**Provider calls during repair:** 0. **Paid spend during repair:** USD 0.
+**Cumulative v4 spend remains:** USD 0.0716368 (unchanged; 86/86 paid calls
+preserved and accounted).
+
+**Disposition:** `GERMAN_CANARY_V4_MANUAL_ADJUDICATION_COMPLETE` — the
+German Canary v4 canary is semantically accepted
+(`PASS_WITH_2_MINOR`, 0 MATERIAL defects). Production remains unauthorized
+pending the three recorded generic pre-production hardening items and a
+separate full-production planning/authorization decision.

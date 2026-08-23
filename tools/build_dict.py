@@ -2149,6 +2149,16 @@ ALLOWED_FA_CF: Final[frozenset[int]] = frozenset({0x200C})
 
 GENERATED_MARKER: Final[str] = "llm_generated_v1"
 GENERATED_MARKER_PATTERN: Final[re.Pattern[str]] = re.compile(r"^llm_generated_v[1-9][0-9]*$")
+# Explicit manual-adjudication provenance: the schema's own documented, not-
+# yet-implemented third `sense_meaning.source` value alongside `wiktionary`
+# and `llm_generated_v1` (reference/schema.sql, ADR-0004 sense_meaning DDL
+# comment). A manually-adjudicated row is never persisted as
+# `llm_generated_v1` -- that marker's contract (R11) is reserved for rows a
+# provider actually generated, and rollback-by-marker semantics depend on it
+# meaning exactly that. `contributed` is reused here, not invented, for
+# owner-authored/owner-corrected content that is neither Wiktionary-sourced
+# nor LLM output.
+STAGE04_MANUAL_ADJUDICATION_SOURCE: Final[str] = "contributed"
 STAGE03_QUEUE_FORMAT: Final[str] = "flashcard-stage03-queue-v2"
 STAGE04_CHECKPOINT_FORMAT: Final[str] = "flashcard-stage04-checkpoint-v3"
 STAGE04_MAX_TEXT_LENGTH: Final[int] = 280
@@ -3603,6 +3613,8 @@ def _load_checkpoint(path: Path, expected_identity: dict[str, str]) -> dict[str,
         raise BuildDictError("Stage 04 checkpoint has invalid manifests")
     if data.get("spend") is not None:
         _validate_spend_state(data["spend"])
+    if data.get("manual_adjudications") is not None:
+        _validate_manual_adjudications_state(data["manual_adjudications"])
     return data
 
 
@@ -3845,6 +3857,35 @@ def _validate_spend_state(spend: object) -> dict[str, object]:
         if recorded_cumulative != running:
             raise BuildDictError("Stage 04 checkpoint spend cumulative chain mismatch")
     return spend
+
+
+def _validate_manual_adjudications_state(value: object) -> dict[str, object]:
+    """Structurally validate the optional persisted manual-adjudication map.
+
+    Corrupt or malformed state fails closed, matching every other checkpoint
+    section. Each record must carry a non-empty reason/text/kind/license and
+    the exact reserved `source` marker -- a manual adjudication can never be
+    silently mislabeled as `llm_generated_v1` even by a hand-edited file.
+    """
+    if not isinstance(value, dict):
+        raise BuildDictError("Stage 04 checkpoint has a corrupt manual_adjudications state")
+    for item_id, rec in value.items():
+        if not isinstance(item_id, str) or not item_id:
+            raise BuildDictError("Stage 04 checkpoint has a corrupt manual_adjudications key")
+        if not isinstance(rec, dict):
+            raise BuildDictError(f"Stage 04 checkpoint manual_adjudications[{item_id}] is corrupt")
+        for field_name in ("reason", "text", "kind", "source", "license"):
+            field_val = rec.get(field_name)
+            if not isinstance(field_val, str) or not field_val.strip():
+                raise BuildDictError(
+                    f"Stage 04 checkpoint manual_adjudications[{item_id}] missing/invalid "
+                    f"{field_name}"
+                )
+        if rec["source"] != STAGE04_MANUAL_ADJUDICATION_SOURCE:
+            raise BuildDictError(
+                f"Stage 04 checkpoint manual_adjudications[{item_id}] has an unexpected source"
+            )
+    return value
 
 
 def _spend_total_usd(spend: dict[str, object]) -> Decimal:
@@ -4737,6 +4778,83 @@ def run_stage04_live(ns: argparse.Namespace) -> dict[str, object]:
     )
 
 
+def apply_manual_adjudication(
+    checkpoint_path: Path | str,
+    identity: dict[str, str],
+    item_id: str,
+    text: str,
+    kind: str,
+    reason: str,
+    generated_license: str,
+) -> dict[str, object]:
+    """Record an explicit, deterministic owner override of one item's final text.
+
+    Manual adjudication exists for the narrow, reviewed case where an
+    independent semantic review finds a defect in an already-paid,
+    already-validated Luna/Terra result that the deterministic validator
+    contract does not (yet) catch, and the owner explicitly chooses a
+    conservative, source-grounded manual correction over additional paid QA.
+    It is NOT a general escape hatch:
+
+    - the item must already be a real, already-processed
+      ``bulk.completed`` entry (this never fabricates a new item, and never
+      touches an item outside the frozen, already-paid canary selection);
+    - it never touches historical provider evidence -- no response ID, usage
+      record, or spend-ledger entry is added, removed, or modified;
+    - the resulting text is persisted with
+      ``source=STAGE04_MANUAL_ADJUDICATION_SOURCE`` (``"contributed"`` --
+      the schema's own already-documented value for non-Wiktionary,
+      non-LLM-generated content), never ``llm_generated_v1``, so the
+      database itself never claims a human-authored override was Luna or
+      Terra output;
+    - finalization precedence is explicit and total: a manual adjudication,
+      once recorded, always supersedes both a successful QA completion and
+      the ordinary valid bulk result for that item (see the
+      ``manual_adjudications`` branch in ``build_stage04``'s finalization
+      guard and final-text selection).
+
+    Generic structural/safety validation still applies (non-empty, valid
+    language/kind, length bound, forbidden control/bidi characters) --
+    manual text is not exempt from basic safety. It is deliberately exempt
+    from the lemma-echo check (an LLM-laziness heuristic that a deliberate
+    owner-chosen lemma-equivalent, e.g. a proper-noun direct name, would
+    otherwise trip) and from the semantic-contract heuristic (the whole
+    point of this path is the owner's judgement superseding that heuristic).
+    """
+    ckpt_p = Path(checkpoint_path)
+    state = _load_checkpoint(ckpt_p, identity)
+    bulk_section = state.get("bulk")
+    bulk_completed = bulk_section.get("completed") if isinstance(bulk_section, dict) else None
+    if not isinstance(bulk_completed, dict) or item_id not in bulk_completed:
+        raise BuildDictError(
+            f"Manual adjudication refused: {item_id} is not an existing bulk-completed item"
+        )
+    if not reason or not reason.strip():
+        raise BuildDictError("Manual adjudication requires a non-empty reason")
+    existing = bulk_completed[item_id]
+    language = str(existing.get("language", "")) if isinstance(existing, dict) else ""
+    # lemma_text="" deliberately bypasses the echo-lemma heuristic; see docstring.
+    err = _validate_generated_candidate(text, language, kind, "", None)
+    if err is not None:
+        raise BuildDictError(f"Manual adjudication text failed generic validation: {err}")
+    manual = state.get("manual_adjudications")
+    if not isinstance(manual, dict):
+        manual = {}
+    if item_id in manual:
+        raise BuildDictError(f"Manual adjudication already recorded for {item_id}")
+    record: dict[str, object] = {
+        "reason": reason.strip(),
+        "text": text.strip(),
+        "kind": kind,
+        "source": STAGE04_MANUAL_ADJUDICATION_SOURCE,
+        "license": generated_license,
+    }
+    manual[item_id] = record
+    state["manual_adjudications"] = manual
+    _write_checkpoint(ckpt_p, identity, state)
+    return dict(record)
+
+
 def build_stage04(
     queue_path: Path | str,
     stage02_path: Path | str,
@@ -5223,8 +5341,22 @@ def build_stage04(
     if not isinstance(qa_completed, dict) or not isinstance(qa_rejected, dict):
         raise BuildDictError("Stage 04 checkpoint is corrupt")
 
+    # Explicit owner manual adjudication: see `apply_manual_adjudication`.
+    # Recorded only for an already-real `bulk.completed` item, never touches
+    # historical provider evidence, and -- once recorded -- always supersedes
+    # both a successful QA completion and the ordinary bulk result for that
+    # item at finalization. An item the owner has manually adjudicated is
+    # never "pending QA" -- manual adjudication is itself a resolution, so a
+    # required-but-unresolved QA item that has a manual adjudication does not
+    # force a QA transport requirement.
+    manual_adjudications = state.get("manual_adjudications")
+    if not isinstance(manual_adjudications, dict):
+        manual_adjudications = {}
+
     pending_qa_ids = [
-        iid for iid in required_qa_ids if iid not in qa_completed and iid not in qa_rejected
+        iid
+        for iid in required_qa_ids
+        if iid not in qa_completed and iid not in qa_rejected and iid not in manual_adjudications
     ]  # noqa: E501
 
     if pending_qa_ids and (transport is None or not hasattr(transport, "send_qa")):
@@ -5357,11 +5489,16 @@ def build_stage04(
     # morphology semantic-contract defect was routed to mandatory QA instead
     # of a hard rejection) must never reach output.sqlite on its own. Every
     # such item must be in the QA-required set, have a successful QA
-    # completion, and must not be QA-rejected, before finalization proceeds.
+    # completion, and must not be QA-rejected, before finalization proceeds
+    # -- UNLESS the owner has explicitly manually adjudicated it, which is an
+    # equally valid, deliberately reviewed resolution for a provisional item.
     # QA-completed text supersedes the provisional bulk text as usual below;
-    # this guard only blocks the fallback for items QA has not yet resolved.
+    # this guard only blocks the fallback for items neither QA nor manual
+    # adjudication has resolved.
     for _iid, _val in bulk_completed.items():
         if isinstance(_val, dict) and "qa_required_reason" in _val:
+            if _iid in manual_adjudications:
+                continue
             if _iid not in required_qa_ids or _iid in qa_rejected:
                 raise BuildDictError(
                     f"Provisional bulk item {_iid} failed QA and cannot be finalized; STOP"
@@ -5389,11 +5526,14 @@ def build_stage04(
             shutil.copyfile(stage02_p, tf_path)
             conn_out = sqlite3.connect(tf_path)
             try:
-                # Insert generated rows for each completed bulk item (use qa corrected if exists)
-                # Determine final text: if QA completed for item, use QA text else bulk text
+                # Insert generated rows for each completed bulk item. Final-text
+                # precedence is explicit and total: manual adjudication >
+                # successful QA > valid bulk.
                 final_texts: dict[str, dict[str, object]] = {}
                 for iid in bulk_completed:
-                    if iid in qa_completed and isinstance(qa_completed[iid], dict):
+                    if iid in manual_adjudications:
+                        final_texts[iid] = manual_adjudications[iid]
+                    elif iid in qa_completed and isinstance(qa_completed[iid], dict):
                         final_texts[iid] = qa_completed[iid]
                     else:
                         final_texts[iid] = bulk_completed[iid]
@@ -5407,9 +5547,17 @@ def build_stage04(
                 for iid, val in final_texts.items():
                     it = item_by_id[iid]
                     sense_id = int(str(it["sense_id"]))
-                    language = str((val if isinstance(val, dict) else {}).get("language", ""))
-                    kind = str((val if isinstance(val, dict) else {}).get("kind", ""))
-                    text = str((val if isinstance(val, dict) else {}).get("text", ""))
+                    val_dict = val if isinstance(val, dict) else {}
+                    language = str(val_dict.get("language", ""))
+                    kind = str(val_dict.get("kind", ""))
+                    text = str(val_dict.get("text", ""))
+                    # Row-level provenance: every completion record (ordinary
+                    # bulk/QA, and a manual adjudication) already carries its
+                    # own source/license -- a manual adjudication's
+                    # `STAGE04_MANUAL_ADJUDICATION_SOURCE` must reach the row
+                    # unchanged, never silently coerced to `GENERATED_MARKER`.
+                    row_source = str(val_dict.get("source", GENERATED_MARKER))
+                    row_license = str(val_dict.get("license", generated_license))
                     # Determine ord: count existing rows for this sense/language/kind
                     existing_ords = [
                         r[0]
@@ -5431,12 +5579,23 @@ def build_stage04(
                             kind,
                             ord_val,
                             text,
-                            GENERATED_MARKER,
-                            generated_license,
+                            row_source,
+                            row_license,
                         ),  # noqa: E501
                     )
-                    # Derivation edge: for each derivation_source_ids
-                    deriv_ids = it.get("derivation_source_ids", [])
+                    # Derivation edge: for each derivation_source_ids. Only for
+                    # a genuinely generated row -- `validate_sense_meaning_
+                    # derivations` (ADR-0004 D45/A8) requires the
+                    # generated_meaning_id side of every edge to carry the
+                    # versioned generated marker, so a manually-adjudicated
+                    # row (`source=STAGE04_MANUAL_ADJUDICATION_SOURCE`) is
+                    # correctly never a derivation-edge target: it was not
+                    # produced by consuming the source row through the
+                    # generation pipeline, and its provenance (the review
+                    # finding, and the exact original Luna/Terra evidence it
+                    # supersedes) is instead recorded truthfully in the
+                    # checkpoint's `manual_adjudications` section.
+                    deriv_ids = it.get("derivation_source_ids", []) if row_source == GENERATED_MARKER else []  # noqa: E501
                     if isinstance(deriv_ids, list):
                         for src_mid in deriv_ids:
                             # Validate derivation: source must be non-generated, same sense

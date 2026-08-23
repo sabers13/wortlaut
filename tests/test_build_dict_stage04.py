@@ -28,6 +28,7 @@ from tools.build_dict import (
     STAGE04_LIVE_CANARY_BULK_INPUT_TOKEN_ESTIMATE,
     STAGE04_LIVE_CANARY_QA_BOUND_INPUT_TOKEN_ESTIMATE,
     STAGE04_LIVE_RESPONSES_URL,
+    STAGE04_MANUAL_ADJUDICATION_SOURCE,
     STAGE04_MAX_OUTPUT_TOKENS,
     STAGE04_QA_REASONING_EFFORT,
     BuildDictError,
@@ -44,8 +45,10 @@ from tools.build_dict import (
     _spend_total_usd,
     _validate_de_semantic_contract,
     _validate_generated_candidate,
+    _validate_manual_adjudications_state,
     _validate_spend_state,
     _write_canary_selection_manifest,
+    apply_manual_adjudication,
     build_stage03,
     build_stage04,
     de_learner_meaning_request_body,
@@ -1739,6 +1742,204 @@ def test_non_morphology_semantic_failure_remains_hard_rejection(tmp_path: Path) 
     state = json.loads(checkpoint.read_text(encoding="utf-8"))
     assert state["bulk"]["rejected"][item_id]["error_code"] == "unsupported_domain_elaboration"
     assert item_id not in state["bulk"]["completed"]
+
+
+# --- Manual adjudication infrastructure ---
+#
+# Regression coverage for German Canary v4's two independent-review MATERIAL
+# findings (Marmarameer: an English-source echo; Mod: an unsupported
+# person/videogame narrowing). Both were resolved by explicit owner manual
+# adjudication instead of additional paid Terra spend. These tests cover only
+# the manual-adjudication infrastructure itself, not the three separately
+# reported generic pre-production validator gaps.
+
+
+def test_manual_adjudication_requires_existing_bulk_completed_item(tmp_path: Path) -> None:
+    """An arbitrary/unapproved item_id can never be manually adjudicated."""
+    stage02, queue, items = make_stage02_with_n(tmp_path, 1, prefix="manual-reject")
+    fake = FakeTransport()
+    fake.items = items
+    checkpoint = tmp_path / "checkpoint.json"
+    build_stage04(
+        queue, stage02, tmp_path / "out.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1",
+        transport=fake, batch_size=1,
+    )
+    identity = json.loads(checkpoint.read_text(encoding="utf-8"))["identity"]
+    with pytest.raises(BuildDictError, match="not an existing bulk-completed item"):
+        apply_manual_adjudication(
+            checkpoint,
+            identity,
+            "queue:v2:0000000000000000000000000000000000",
+            "Anything",
+            "synonym",
+            "arbitrary override attempt",
+            "TEST_SYNTHETIC_LICENSE_v1",
+        )
+    # No trace of the rejected attempt is persisted.
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert "manual_adjudications" not in state or not state["manual_adjudications"]
+
+
+def test_manual_adjudication_overrides_bulk_and_qa_finalization(tmp_path: Path) -> None:
+    """Manual adjudication wins over both the bulk and the QA result.
+
+    Precedence is explicit and total: manual adjudication > successful QA >
+    valid bulk.
+    """
+    stage02, queue, items = make_stage02_with_n(tmp_path, 1, prefix="manual-override")
+    item_id = sorted(items.keys())[0]
+    fake = FakeTransport()  # default placeholder texts: bulk and QA differ
+    fake.items = items
+    checkpoint = tmp_path / "checkpoint.json"
+    build_stage04(
+        queue, stage02, tmp_path / "blocked.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1",
+        transport=fake, batch_size=1,
+    )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    bulk_text = state["bulk"]["completed"][item_id]["text"]
+    qa_text = state["qa"]["completed"][item_id]["text"]
+    assert bulk_text != qa_text  # sanity: the two are genuinely distinct
+    identity = state["identity"]
+
+    record = apply_manual_adjudication(
+        checkpoint,
+        identity,
+        item_id,
+        "Manuelle Korrektur",
+        "synonym",
+        "independent semantic review: neither the bulk nor the QA text is acceptable",
+        "TEST_SYNTHETIC_LICENSE_v1",
+    )
+    assert record["text"] == "Manuelle Korrektur"
+    assert record["kind"] == "synonym"
+    assert record["source"] == STAGE04_MANUAL_ADJUDICATION_SOURCE
+    assert record["reason"]
+
+    final_out = tmp_path / "final.sqlite"
+    build_stage04(
+        queue, stage02, final_out, checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=None,
+    )
+    conn = sqlite3.connect(final_out)
+    row = conn.execute(
+        "SELECT text, kind, source FROM sense_meaning WHERE source=?",
+        (STAGE04_MANUAL_ADJUDICATION_SOURCE,),
+    ).fetchone()
+    conn.close()
+    assert row == ("Manuelle Korrektur", "synonym", STAGE04_MANUAL_ADJUDICATION_SOURCE)
+
+    # The historical bulk/QA records themselves are never overwritten or
+    # relabeled as the manual text -- the override lives only in the new
+    # `manual_adjudications` section and in the finalized row it produced.
+    reloaded = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert reloaded["bulk"]["completed"][item_id]["text"] == bulk_text
+    assert reloaded["qa"]["completed"][item_id]["text"] == qa_text
+    assert reloaded["bulk"]["completed"][item_id]["source"] == GENERATED_MARKER
+    assert reloaded["qa"]["completed"][item_id]["source"] == GENERATED_MARKER
+
+
+def test_manual_adjudication_resolves_provisional_item_without_qa(tmp_path: Path) -> None:
+    """Manual adjudication is an equally valid resolution for a provisional item.
+
+    A morphology-provisional item routed to mandatory QA can be finalized via
+    manual adjudication alone, without ever needing (or being blocked on) a
+    QA-capable transport.
+    """
+    db, queue, item_id, items = _de_morphology_fixture(
+        tmp_path, "manual-provisional", "comparative degree of Testlemma"
+    )
+    transport = _BulkOnlyTransport(items, "Steigerungsform von „Testlemma“")
+    checkpoint = tmp_path / "checkpoint.json"
+    with pytest.raises(BuildDictError, match="No local deterministic Stage 04 QA transport"):
+        build_stage04(
+            queue, db, tmp_path / "blocked.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1",
+            transport=transport, batch_size=1,
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert state["bulk"]["completed"][item_id]["qa_required_reason"] == "morphology_missing_comparative"  # noqa: E501
+    identity = state["identity"]
+
+    apply_manual_adjudication(
+        checkpoint,
+        identity,
+        item_id,
+        "Komparativ von „Testlemma“",
+        "definition",
+        "independent review: accept the corrected comparative form manually",
+        "TEST_SYNTHETIC_LICENSE_v1",
+    )
+
+    final_out = tmp_path / "final.sqlite"
+    build_stage04(
+        queue, db, final_out, checkpoint, "TEST_SYNTHETIC_LICENSE_v1", transport=None,
+    )
+    conn = sqlite3.connect(final_out)
+    row = conn.execute(
+        "SELECT text FROM sense_meaning WHERE source=?", (STAGE04_MANUAL_ADJUDICATION_SOURCE,)
+    ).fetchone()
+    conn.close()
+    assert row == ("Komparativ von „Testlemma“",)
+
+
+def test_manual_adjudication_checkpoint_round_trip_and_validation(tmp_path: Path) -> None:
+    """The manual-adjudication section round-trips and fails closed when corrupt."""
+    stage02, queue, items = make_stage02_with_n(tmp_path, 1, prefix="manual-roundtrip")
+    item_id = sorted(items.keys())[0]
+    fake = FakeTransport()
+    fake.items = items
+    checkpoint = tmp_path / "checkpoint.json"
+    build_stage04(
+        queue, stage02, tmp_path / "out.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1",
+        transport=fake, batch_size=1,
+    )
+    identity = json.loads(checkpoint.read_text(encoding="utf-8"))["identity"]
+    apply_manual_adjudication(
+        checkpoint, identity, item_id, "Text", "synonym", "review finding", "TEST_SYNTHETIC_LICENSE_v1",
+    )
+    raw = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert raw["manual_adjudications"][item_id] == {
+        "reason": "review finding",
+        "text": "Text",
+        "kind": "synonym",
+        "source": STAGE04_MANUAL_ADJUDICATION_SOURCE,
+        "license": "TEST_SYNTHETIC_LICENSE_v1",
+    }
+    # Reloading through the project's own checkpoint machinery validates and
+    # preserves the section unchanged -- this is what makes it "visible" to
+    # any downstream consumer (e.g. a review-bundle generator).
+    reloaded = _load_checkpoint(checkpoint, identity)
+    assert reloaded["manual_adjudications"] == raw["manual_adjudications"]
+    assert _validate_manual_adjudications_state(raw["manual_adjudications"]) == raw["manual_adjudications"]  # noqa: E501
+
+    with pytest.raises(BuildDictError, match="unexpected source"):
+        _validate_manual_adjudications_state({item_id: {**raw["manual_adjudications"][item_id], "source": "llm_generated_v1"}})  # noqa: E501
+    with pytest.raises(BuildDictError, match="missing/invalid reason"):
+        _validate_manual_adjudications_state({item_id: {**raw["manual_adjudications"][item_id], "reason": ""}})  # noqa: E501
+    with pytest.raises(BuildDictError, match="corrupt manual_adjudications state"):
+        _validate_manual_adjudications_state("not a dict")
+
+
+def test_manual_adjudication_second_call_rejected(tmp_path: Path) -> None:
+    """An item cannot be silently re-adjudicated; the first record stands."""
+    stage02, queue, items = make_stage02_with_n(tmp_path, 1, prefix="manual-second")
+    item_id = sorted(items.keys())[0]
+    fake = FakeTransport()
+    fake.items = items
+    checkpoint = tmp_path / "checkpoint.json"
+    build_stage04(
+        queue, stage02, tmp_path / "out.sqlite", checkpoint, "TEST_SYNTHETIC_LICENSE_v1",
+        transport=fake, batch_size=1,
+    )
+    identity = json.loads(checkpoint.read_text(encoding="utf-8"))["identity"]
+    apply_manual_adjudication(
+        checkpoint, identity, item_id, "Erste", "synonym", "first review", "TEST_SYNTHETIC_LICENSE_v1",
+    )
+    with pytest.raises(BuildDictError, match="already recorded"):
+        apply_manual_adjudication(
+            checkpoint, identity, item_id, "Zweite", "synonym", "second review",
+            "TEST_SYNTHETIC_LICENSE_v1",
+        )
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert state["manual_adjudications"][item_id]["text"] == "Erste"
 
 
 def test_reasoning_effort_change_invalidates_checkpoint_compatibility(tmp_path: Path) -> None:
