@@ -144,3 +144,19 @@
   drain-before-transaction. Spec clarification applied to A5 (cross-seam reader
   arrives during the window WITHOUT a pre-commit pin; blocks until publication).
   Fresh dispatch follows; any further failure halts slice-7 for owner consult.
+- Clarified close-out dispatch (`run_52b990a44b`, `b6e8a75`): gate PASS
+  (deadlock eliminated); sol review BLOCKED (3): same-thread activate() inside
+  an open reading() context waits on a count only the outer context can
+  decrement (deterministic self-deadlock — refusal via thread-id detection was
+  the required semantics); the injected hook sits after commit() where a raise
+  cannot be rolled back and leaves committed-new PART-B beside the old
+  published asset; the mandated all-column partial-relink rollback fixture was
+  absent.
+- OWNER HALT (2026-08-24, honored per the recorded stop commitment): slice-7
+  pauses with S1 + S2a accepted on `slice/7`. S2b is NOT accepted; its four
+  candidates remain unaccepted on orch branches as diagnostic evidence. A fresh
+  governance session must first resolve the D47 runtime design — capability-
+  gated activation, generation-pinned/refcounted reads, readers-writer drain
+  semantics, post-commit hook containment — then amend `tasks/slice-7.md` A5
+  mechanics before any further S2b implementation. Resume state: base for the
+  resumed S2b work is this branch's HEAD; stages S3–S6 unchanged.
