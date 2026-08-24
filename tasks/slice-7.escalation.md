@@ -133,3 +133,14 @@
   synchronization point between PART-B commit and runtime publication; the
   rollback fixture must include a non-no-op binding_status transition. S2b
   re-dispatched fresh against this contract.
+- Close-out attempt 1 (`run_c6d3f64883`, `35afb4c`): gate PASS; sol review
+  BLOCKED (3): wrapper-level lease borrow/release could close the incumbent;
+  generation pinning covered PART-A only while activation committed PART-B
+  mid-observation; capability registry was module-level mutable state.
+- Close-out same-tier retry (`run_25c708499c`, `2af0328`): gate FAIL exit -1 —
+  orchestrator diagnosis against the worktree isolated a self-deadlock in
+  `test_activation_waits_for_full_read_pin_then_publishes_one_generation`: the
+  test held a pre-commit pin while waiting on the publication hook, contradicting
+  drain-before-transaction. Spec clarification applied to A5 (cross-seam reader
+  arrives during the window WITHOUT a pre-commit pin; blocks until publication).
+  Fresh dispatch follows; any further failure halts slice-7 for owner consult.

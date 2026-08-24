@@ -240,8 +240,11 @@ In `app/dictionary.py`, `app/deck.py`, `app/api.py`:
      successfully even if activation swaps the runtime's current generation
      while they are open; concurrency evidence uses an injected synchronization
      point between the PART-B commit and runtime publication with readers
-     sampling across it, and the rollback fixture exercises a non-no-op
-     binding_status transition;
+     sampling across it — because activation drains all pre-commit pins before
+     its transaction begins, the cross-seam reader must arrive DURING the
+     commit-to-publication window without holding a pre-commit pin (it blocks
+     until publication, then observes complete-new) and the rollback fixture
+     exercises a non-no-op binding_status transition;
    - Atomically updates `active_dictionary_metadata` and relinks `cached_lemma_id` and
      `cached_sense_id` in `note_dictionary_binding`;
    - Exact matching stable refs are relinked (`binding_status='bound'`);
