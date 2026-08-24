@@ -232,6 +232,16 @@ In `app/dictionary.py`, `app/deck.py`, `app/api.py`:
      (cached ids, binding_status, last_relinked_at, note.status) and the
      visibility invariant is evidenced by reads that genuinely OVERLAP an
      activation, each observation being complete-old or complete-new;
+   - Activation is capability-gated and reads are generation-pinned: only
+     assets produced by the validator carry an opaque provenance capability
+     (registry-checked, not reproducible by copying or replace), so forged or
+     stolen-lease wrappers cannot be activated; open read observations are
+     pinned to one live generation (refcounted leases) and always complete
+     successfully even if activation swaps the runtime's current generation
+     while they are open; concurrency evidence uses an injected synchronization
+     point between the PART-B commit and runtime publication with readers
+     sampling across it, and the rollback fixture exercises a non-no-op
+     binding_status transition;
    - Atomically updates `active_dictionary_metadata` and relinks `cached_lemma_id` and
      `cached_sense_id` in `note_dictionary_binding`;
    - Exact matching stable refs are relinked (`binding_status='bound'`);

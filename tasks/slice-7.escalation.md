@@ -115,3 +115,21 @@
   evidence from reads genuinely overlapping an activation; rollback snapshot
   covering every PART-B column activation mutates. S2b re-dispatched fresh from
   attempt 1 of the amended contract with independent review.
+
+## Stage S2b structural close-out (2026-08-24)
+
+- The fresh amended-contract dispatch (`run_255d9cff45`, `b4e1920`) passed the
+  gate but its sol review ran live defeat exploits and BLOCKED (4): a forged
+  wrapper carrying the produced lease activated with a fake sha256/path;
+  reentrant activate() inside an open reading() context closed the held lease
+  mid-observation (RLock); concurrency evidence had no synchronization in the
+  commit-to-publication window; the rollback fixture never flipped
+  binding_status.
+- Owner chose structural close-out over threat-model rescoping. A5 amended:
+  activation is capability-gated (opaque validator-issued provenance,
+  registry-checked, not reproducible by copy/replace); read observations are
+  generation-pinned via refcounted leases and always complete against one live
+  generation even across concurrent activation; concurrency evidence injects a
+  synchronization point between PART-B commit and runtime publication; the
+  rollback fixture must include a non-no-op binding_status transition. S2b
+  re-dispatched fresh against this contract.
