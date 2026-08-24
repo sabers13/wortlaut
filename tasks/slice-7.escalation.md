@@ -94,3 +94,24 @@
   instance; required `asset_token`; complete-old-or-complete-new reads).
   `tasks/slice-7.md` A5 amended with the structural mechanics. Each sub-stage
   is dispatched fresh from attempt 1 with independent gpt-5.6-sol review.
+  Outcome: S2a fresh dispatch passed gate + review after one same-tier retry
+  (snapshot-binding corrections) and was accepted (`8cf6367`).
+
+## Stage S2b ceiling and respecification (2026-08-24)
+
+- S2b attempt 1 (`run_38c691320a`, `f08f33d`): gate PASS; sol review BLOCKED
+  (4): constructor accepted a raw active asset bypassing metadata reconciliation
+  and multi-instance serialization; failure path released the incumbent handle;
+  meaning-resolution reads accepted arbitrary dictionary data outside the
+  runtime lock; rollback/concurrency test evidence vacuous.
+- S2b same-tier retry (`run_10eabe5040`, `fb3bba3`): gate PASS; sol re-review
+  BLOCKED (3): shared-lease aliasing via dataclasses.replace could close the
+  incumbent connection through the equal-SHA branch; concurrent-reader evidence
+  was sequential (no read overlapped activation); rollback snapshot omitted
+  last_relinked_at and note.status.
+- T3 ceiling reached per WORKFLOW §5. Owner approved tightening A5 with three
+  structural requirements: incumbency guarded by lease identity with a
+  non-aliasable frozen asset (release only self-produced leases); visibility
+  evidence from reads genuinely overlapping an activation; rollback snapshot
+  covering every PART-B column activation mutates. S2b re-dispatched fresh from
+  attempt 1 of the amended contract with independent review.

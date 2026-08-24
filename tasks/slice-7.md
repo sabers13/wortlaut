@@ -223,6 +223,15 @@ In `app/dictionary.py`, `app/deck.py`, `app/api.py`:
      activation; `asset_token` is a required argument on note creation with no
      sentinel default, and creation fails closed when no active dictionary
      exists;
+   - Incumbency is tracked by LEASE IDENTITY, never by asset equality or SHA:
+     the frozen asset is non-aliasable (its lease/connection is not a
+     replaceable public dataclass field), activation releases only assets the
+     runtime itself produced, and no caller-reachable construction (including
+     dataclass replace/copy paths) can cause the incumbent's connection to be
+     closed; rollback restoration covers EVERY PART-B column activation mutates
+     (cached ids, binding_status, last_relinked_at, note.status) and the
+     visibility invariant is evidenced by reads that genuinely OVERLAP an
+     activation, each observation being complete-old or complete-new;
    - Atomically updates `active_dictionary_metadata` and relinks `cached_lemma_id` and
      `cached_sense_id` in `note_dictionary_binding`;
    - Exact matching stable refs are relinked (`binding_status='bound'`);
