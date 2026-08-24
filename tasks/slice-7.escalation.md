@@ -69,3 +69,28 @@
   an undeterminable count fails closed. This completes frozen ADR-0004 D46's
   ordered component vector without amending the ADR. Stage S1 is re-dispatched
   fresh from attempt 1 of the amended stage contract per WORKFLOW §5.3.
+  Outcome: fresh S1 dispatch (`run_ac40b393db`, candidate `a678f1b`) passed
+  gate and the gpt-5.6-sol review (VERDICT: PASS, defeat-check included) and
+  was accepted onto `slice/7`.
+
+## Stage S2 ceiling and split (2026-08-24)
+
+- S2 attempt 1 (`run_e9a8cb7f0b`, `ff9fadf`): gate PASS; sol review BLOCKED
+  (5): token check outside the write transaction; lookup tokens derived from
+  the constructed path instead of active metadata (mixed-state exposure);
+  arbitrary `lemma:v*`/`sense:v*` strings accepted as stable identity;
+  `asset_token=None` permitted without active metadata; mandated
+  corrupted-candidate and single-transaction assertions missing.
+- S2 same-tier retry (`run_2c11e3f861`, `efc4d2f`): gate PASS; sol re-review
+  BLOCKED (5 second-order findings): runtime-less activation path with a
+  call-local lock breaks exclusion; whitespace-stripping bypasses canonical
+  ref verification; a private-sentinel default bypasses token validation;
+  validate-close-reopen race can bind one asset's relink maps to another's
+  SHA/handle; ordering/rollback test evidence too weak.
+- T3 ceiling reached per WORKFLOW §5. Owner chose the §5.3 split response:
+  Stage S2 divides into **S2a** (candidate asset validation and stable-ref
+  verification bound to a single opened content; no PART-B writes) and **S2b**
+  (atomic activation/relink and runtime visibility through one runtime
+  instance; required `asset_token`; complete-old-or-complete-new reads).
+  `tasks/slice-7.md` A5 amended with the structural mechanics. Each sub-stage
+  is dispatched fresh from attempt 1 with independent gpt-5.6-sol review.

@@ -210,6 +210,19 @@ In `app/dictionary.py`, `app/deck.py`, `app/api.py`:
      expected `component_count` BEFORE any binding-status filtering: any missing,
      unbound, or ambiguous component, or an undeterminable count, fails closed
      with no dictionary meaning block (ADR-0004 D46 all-components-or-none);
+   - Activation mechanics are structural, not advisory: all dictionary reads and
+     activation run through ONE runtime instance (created later by the app
+     factory) whose lock serializes reads against activation —
+     `activate_dictionary` is a method on that runtime and NO runtime-less
+     activation path exists; the candidate asset is opened ONCE and its SHA-256,
+     integrity_check, PART-A schema validation, stable-ref verification, and the
+     handle installed by the swap all bind to that same opened content (no
+     validate-close-reopen gap); stable semantic refs are verified against their
+     exact persisted source fields with NO normalization or whitespace
+     stripping — mismatch, unverifiable ref, or cross-version ref reuse aborts
+     activation; `asset_token` is a required argument on note creation with no
+     sentinel default, and creation fails closed when no active dictionary
+     exists;
    - Atomically updates `active_dictionary_metadata` and relinks `cached_lemma_id` and
      `cached_sense_id` in `note_dictionary_binding`;
    - Exact matching stable refs are relinked (`binding_status='bound'`);
