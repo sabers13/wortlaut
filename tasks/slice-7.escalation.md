@@ -34,3 +34,25 @@
   2026-08-24. The mandatory WORKFLOW §6 T3 full-diff review over the entire
   `main...slice/7` diff remains required before merge and is not replaced by
   per-sub-run reviews.
+
+## Stage S1 review-repair addendum (2026-08-24)
+
+- S1 implementation attempt 1 (`run_a9892eedd7`, candidate `cac2e74`): gate
+  PASS; independent gpt-5.6-sol stage review BLOCKED with five findings
+  (tracked `.venv` symlink — orchestrator gate-mechanism defect; orphan move
+  gated on review history; D43 status-coupled availability; FSRS transition
+  outside the review transaction; unenforced non-empty `note_meaning_lang`).
+- S1 same-tier retry (attempt 2, `run_2f2f17fcd3`, candidate `f454ca5`): gate
+  PASS; all five findings fixed; follow-up gpt-5.6-sol review BLOCKED with
+  three narrower residual findings: implicit `meaning_languages=("en",)`
+  creation default (contradicts ADR-0004 §6.4/D44); derived-compound component
+  vector validated after `bound` filtering, letting a truncated contiguous
+  prefix pass (D46 all-components-or-none); deck-deletion membership read
+  outside the deletion transaction, allowing a concurrent membership insert to
+  lose its Orphaned placement (AGENTS R5).
+- Owner disposition (2026-08-24, this chat): one narrow T3 repair dispatch
+  reproducing the attempt-2 content plus exactly those three corrections,
+  followed by a fresh independent review. If that review BLOCKs again, Stage
+  S1 returns to design (split/redesign) with no further repair attempts. This
+  addendum documents why the third pass is a bounded repair under the §5.3
+  respecification umbrella rather than an uncounted brute-force retry.
