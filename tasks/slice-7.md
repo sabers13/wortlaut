@@ -210,41 +210,160 @@ In `app/dictionary.py`, `app/deck.py`, `app/api.py`:
      expected `component_count` BEFORE any binding-status filtering: any missing,
      unbound, or ambiguous component, or an undeterminable count, fails closed
      with no dictionary meaning block (ADR-0004 D46 all-components-or-none);
-   - Activation mechanics are structural, not advisory: all dictionary reads and
-     activation run through ONE runtime instance (created later by the app
-     factory) whose lock serializes reads against activation —
-     `activate_dictionary` is a method on that runtime and NO runtime-less
-     activation path exists; the candidate asset is opened ONCE and its SHA-256,
-     integrity_check, PART-A schema validation, stable-ref verification, and the
-     handle installed by the swap all bind to that same opened content (no
-     validate-close-reopen gap); stable semantic refs are verified against their
-     exact persisted source fields with NO normalization or whitespace
-     stripping — mismatch, unverifiable ref, or cross-version ref reuse aborts
-     activation; `asset_token` is a required argument on note creation with no
-     sentinel default, and creation fails closed when no active dictionary
-     exists;
-   - Incumbency is tracked by LEASE IDENTITY, never by asset equality or SHA:
-     the frozen asset is non-aliasable (its lease/connection is not a
-     replaceable public dataclass field), activation releases only assets the
-     runtime itself produced, and no caller-reachable construction (including
-     dataclass replace/copy paths) can cause the incumbent's connection to be
-     closed; rollback restoration covers EVERY PART-B column activation mutates
-     (cached ids, binding_status, last_relinked_at, note.status) and the
-     visibility invariant is evidenced by reads that genuinely OVERLAP an
-     activation, each observation being complete-old or complete-new;
-   - Activation is capability-gated and reads are generation-pinned: only
-     assets produced by the validator carry an opaque provenance capability
-     (registry-checked, not reproducible by copying or replace), so forged or
-     stolen-lease wrappers cannot be activated; open read observations are
-     pinned to one live generation (refcounted leases) and always complete
-     successfully even if activation swaps the runtime's current generation
-     while they are open; concurrency evidence uses an injected synchronization
-     point between the PART-B commit and runtime publication with readers
-     sampling across it — because activation drains all pre-commit pins before
-     its transaction begins, the cross-seam reader must arrive DURING the
-     commit-to-publication window without holding a pre-commit pin (it blocks
-     until publication, then observes complete-new) and the rollback fixture
-     exercises a non-no-op binding_status transition;
+   - ACTIVATION OWNER AND LAYERING (ADR-0004 §6.6): the activation owner is a
+     single `DictionaryRuntime` instance in `app/deck.py`, constructed by the
+     app factory with the user-DB path. `app/dictionary.py` stays read-only,
+     never references a PART-B table, and exposes NO activation path; it
+     supplies only `validate_candidate_dictionary()` (accepted S2a) plus
+     additive read-only PART-A helpers. `app/deck.py` never opens a dictionary
+     file itself: it passes a path to the validator and holds the returned
+     handle. AGENTS C2/R9 are preserved — dictionary and user data keep
+     separate files and separate connections;
+   - ACTIVATION INPUT IS A PATH, NEVER AN ASSET: the sole activation entry
+     point is `DictionaryRuntime.activate_dictionary(path, *, version,
+     activated_at)`. It calls the validator itself, and the resulting
+     `DictionaryAsset` never crosses a public boundary in either direction —
+     it is not accepted as an argument and is never returned, exposed, or
+     reachable from a read view. There is therefore NO provenance capability,
+     NO capability registry, and NO module-global mutable state: a forged,
+     copied, or `dataclasses.replace`d wrapper cannot be activated because no
+     activation path accepts a caller-supplied asset at all.
+     `validate_candidate_dictionary()` stays public as a dry-run report whose
+     handle the caller owns and closes; passing its result to activation is a
+     `TypeError`;
+   - MANAGED DICTIONARY DIRECTORY AND RESTART RECOVERY: the runtime owns ONE
+     managed dictionary directory, derived at construction from the initially
+     configured `dict_path.parent`. Every activation candidate must resolve
+     inside that managed directory: the runtime rejects path traversal, a bare
+     or embedded separator in the stored name, a symlink escaping the managed
+     directory, and any candidate whose resolved parent is not the managed
+     directory. `active_dictionary_metadata.active_filename` therefore stores
+     ONLY the managed filename, never an arbitrary absolute path, and no schema
+     column is added. Restart recovery resolves `managed_dir / active_filename`,
+     revalidates that file through the accepted S2a validator, and requires its
+     SHA-256 to equal the persisted `active_sha256` exactly; a missing file, a
+     failed revalidation, or a SHA-256 mismatch FAILS CONSTRUCTION closed rather
+     than publishing an unverified generation;
+   - GENERATION IDENTITY AND LEASE OWNERSHIP: each successful activation mints
+     a new generation carrying a monotonic integer `generation_id`, its own
+     validator-produced handle, and its own pin count. Generations are NEVER
+     deduplicated or aliased by SHA-256 or asset equality — activating a
+     byte-identical file still mints a new generation and retires the
+     incumbent. Only the runtime closes a handle, exactly once, when that
+     generation is retired AND its pin count has reached zero;
+   - READ PINS SPAN BOTH DATABASES: `DictionaryRuntime.reading()` acquires, in
+     one atomic step under the runtime lock, (a) a pin on the current
+     generation and (b) an open deferred read transaction on its own user-DB
+     connection. `DictionaryRuntime` construction ESTABLISHES WAL on the user
+     database itself: it issues `PRAGMA journal_mode=WAL`, verifies SQLite
+     actually returned `wal`, and FAILS CONSTRUCTION — before the runtime is
+     usable — if it did not. This is PART-B runtime configuration owned by the
+     runtime: it is NOT a schema change, and it is NOT a prerequisite that
+     `tests/conftest.py`, the app factory, or any later stage must satisfy
+     first. WAL is what makes a reader's PART-B snapshot immune to the
+     activation writer's commit. Every observation therefore pairs PART-A
+     content and PART-B bindings from ONE generation and completes even if
+     activation swaps generations while it is open. The view yielded to callers
+     exposes read results and `asset_token` only — never the asset, its handle,
+     or any close/release operation — and raises after context exit;
+   - NO DRAIN: activation never waits for, blocks, or aborts in-flight readers,
+     and readers never block for the duration of a relink. Exclusion is
+     confined to the transition itself — the runtime lock is held ACROSS the
+     PART-B commit and the runtime publication, and every reader must take that
+     lock to pin. A reader that pins before the transition observes
+     complete-old; a reader arriving during the commit-to-publication window
+     blocks on the lock until publication and then observes complete-new. No
+     reader can observe a mixed PART-A/PART-B state. Complete-old observations
+     stay safe on the write side through D47's own asset-token 409 round-trip.
+     The runtime lock is a plain `threading.Lock`, NEVER an `RLock`, and is
+     never held during candidate validation or the relink transaction. NO
+     user, plugin, application, or caller-supplied callback is EVER executed
+     while the runtime lock is held: the runtime exposes no hook parameter, no
+     callback registration, and no extension point anywhere on the activation
+     path. The sole thing that may run inside the seam is the private
+     test-only seam probe defined below, which is test instrumentation and not
+     public runtime behavior;
+   - REENTRANCY IS REFUSED, NEVER AWAITED: the runtime records the pin depth of
+     each owning thread. `activate_dictionary` and `close` refuse immediately —
+     before any validation or database work — when the CALLING thread holds any
+     pin, raising a distinct terminal error. They never wait on a count the
+     calling thread itself owns. The evidence must exercise genuine same-thread
+     reentrancy: ONE worker thread must itself execute
+     `with runtime.reading(): runtime.activate_dictionary(...)` — and
+     separately `with runtime.reading(): runtime.close()` — while the main test
+     thread proves termination with `join(timeout=...)` plus an
+     `is_alive()`/`join`-completion assertion. A thread that merely calls
+     activation while a DIFFERENT thread holds the pin does not own the pin and
+     proves nothing about reentrancy;
+   - TRANSACTION AND PUBLICATION ORDERING is fixed and total: reentrancy refusal
+     -> serialize activations on a SEPARATE activation lock -> validate the
+     candidate (one open, no reopen) -> `BEGIN IMMEDIATE` on a dedicated write
+     connection -> compute and write every relink mutation -> construct the new
+     generation completely -> [take runtime lock: commit, then the private
+     test-only seam probe if one is installed, then publish and retire the
+     incumbent, then release] -> close the write connection. Lock order is
+     activation lock before runtime lock, never the reverse; readers take only
+     the runtime lock;
+   - AFTER THE COMMIT RETURNS, PUBLICATION IS UNCONDITIONAL AND INFALLIBLE:
+     in production there is NOTHING between a successful commit and publication
+     except deterministic in-memory state transition. The new generation is
+     fully constructed before the transaction begins; publication is attribute
+     assignment and incumbent retirement only. There is no caller-provided
+     fallible callback on this path, so "post-commit failure" is not a normal
+     API failure mode at all — the production activation API cannot fail after
+     its commit returns. Committed-new PART-B state paired with old published
+     runtime state is therefore unreachable in-process. Across a process death
+     in that window the committed `active_dictionary_metadata` row is
+     authoritative and restart recovery above republishes it, so the system
+     converges on the committed generation;
+   - PRIVATE TEST-ONLY SEAM PROBE: deterministic concurrency and containment
+     evidence needs a synchronization point between the commit and the
+     publication, so the runtime carries ONE private, test-only internal seam
+     probe. It is private runtime internals — no public parameter, no
+     constructor argument, no registration API, no `create_app` surface — and
+     production callers can neither supply nor invoke it. It may BLOCK under
+     the runtime lock solely to make the commit-to-publication window
+     observable. If it raises, the exception is CAPTURED, publication proceeds
+     regardless, and the exception is surfaced only AFTER the runtime has
+     published — which is exactly what lets a test prove containment. This
+     re-raise is test instrumentation, not the documented failure semantics of
+     the activation API;
+   - FAILURE SEMANTICS ARE TOTAL: any failure before the commit returns
+     (validation, ref verification, D46 revalidation, relink computation, a
+     write error, or the commit itself) rolls the write transaction back,
+     closes the candidate handle, leaves the published generation and every
+     PART-B column untouched, and raises. No partial relink is observable;
+   - RELINK OUTCOMES: an exact single stable-ref match relinks cached ids and
+     sets `binding_status='bound'`. A disappeared direct sense clears its
+     cached ids, retains its refs, and sets `binding_status='unbound'` with
+     `note.status='needs_gloss'`. A disappeared component invalidates its WHOLE
+     vector — every component row of that note clears cached ids, becomes
+     `'unbound'`, and `note.status='needs_gloss'`; no partially rebound compound
+     is ever exposed. A note-side component vector that is malformed or whose
+     `component_count` is undeterminable fails closed for that note only, with
+     every row of the vector set to `binding_status='ambiguous'` and
+     `note.status='needs_gloss'`. Candidate-side duplicate or ambiguous stable
+     refs are an ACTIVATION FAILURE, not a per-note outcome (already rejected by
+     accepted S2a validation). An exact full rebind restores `note.status` to
+     `'resolved'` or `'derived_compound'`. Relink writes `note.status` only for
+     notes currently in {`resolved`, `derived_compound`, `needs_gloss`}; any
+     other status (notably `orphaned`) is preserved while its bindings still
+     relink. A never-bound `needs_gloss` stub with no binding row is never
+     auto-promoted. `last_relinked_at` is stamped on every row the relink writes;
+   - ROLLBACK EVIDENCE IS WHOLE-TABLE AND PROVEN NON-VACUOUS: the mandated
+     failure fixture snapshots COMPLETE rows of `note_dictionary_binding`,
+     `note`, and `active_dictionary_metadata` before activation, injects a
+     failure — through the same private, test-only internal mechanism, at the
+     last point INSIDE the transaction and therefore strictly BEFORE the commit
+     — and asserts the post-failure tables are identical to the snapshot. No
+     public API accepts a failure injection point either. The fixture is proven
+     non-vacuous by running the same activation to SUCCESS against a copy of the
+     same starting database and asserting that `binding_status` (a non-no-op
+     transition), `cached_lemma_id`, `cached_sense_id`, `last_relinked_at`,
+     `note.status`, and the `active_dictionary_metadata` row each actually
+     differ from the snapshot. Whole-row comparison, not a hand-maintained
+     column list, is what makes "every column the relink touches" mechanically
+     complete;
    - Atomically updates `active_dictionary_metadata` and relinks `cached_lemma_id` and
      `cached_sense_id` in `note_dictionary_binding`;
    - Exact matching stable refs are relinked (`binding_status='bound'`);

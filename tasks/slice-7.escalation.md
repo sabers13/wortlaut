@@ -160,3 +160,123 @@
   semantics, post-commit hook containment — then amend `tasks/slice-7.md` A5
   mechanics before any further S2b implementation. Resume state: base for the
   resumed S2b work is this branch's HEAD; stages S3–S6 unchanged.
+
+## Stage S2b governance resolution — D47 runtime design (2026-08-24)
+
+Fresh governance consultation held against `main` `eb42ccf` and `slice/7`
+`0488a96`, with S1 (`a678f1b`) and S2a (`8cf6367`) frozen and not reopened.
+
+**Verdict: IMPLEMENTABLE_WITH_BRIEF_CLARIFICATION.** Frozen ADR-0004 D47 needs
+no amendment. Every blocking defect traced to `tasks/slice-7.md` A5 mechanics
+that were added during the failed cycles, not to the ADR.
+
+- ROOT CAUSE. `DictionaryAsset` was made to carry four roles at once —
+  validation result, authority to activate, owner of a SQLite handle, and the
+  runtime's published generation. Each review defeat exploited a seam between
+  two of those roles (forge the value to gain the authority; `dataclasses.
+  replace` the value to alias the handle; hold the value across a swap to pair
+  old PART-A with new PART-B). Every repair added a guard on the *outside* of
+  that conflation — a provenance capability, an `id()`-keyed weakref registry,
+  a `generation.asset is not asset` recheck — so each fix created a fresh
+  second-order surface. Compounding it, A5 simultaneously mandated
+  drain-before-transaction AND always-completing generation-pinned reads; those
+  are contradictory, and the contradiction produced both the test self-deadlock
+  and the same-thread reentrancy deadlock. The defects were structural, not
+  workmanship.
+
+- RESOLUTION. Remove the untrusted input instead of gating it, and remove the
+  drain instead of reconciling it:
+  1. Activation accepts a PATH, never an asset. The runtime calls the accepted
+     S2a validator itself, and the asset never crosses a public boundary in
+     either direction. No capability, no registry, no module-global mutable
+     state — a forged or copied wrapper has no activation path to reach.
+  2. A read pin is acquired atomically over BOTH databases: a generation pin
+     plus an open deferred read transaction on a WAL user DB. Every observation
+     is internally consistent by construction.
+  3. No drain. The runtime lock is held only ACROSS the PART-B commit and the
+     runtime publication; readers take it only to pin. Pre-seam readers observe
+     complete-old, cross-seam readers block until publication and observe
+     complete-new, and activation never waits on a reader.
+  4. Reentrancy is refused before any work, by owning-thread pin depth, on a
+     plain `Lock` (never an `RLock`).
+  5. After the commit returns, publication is unconditional and infallible.
+     Production runs NO caller-supplied callback there, so post-commit failure
+     is not an API failure mode; a private test-only seam probe provides the
+     synchronization point for evidence, and a process death in that window
+     converges on the committed `active_dictionary_metadata` row via managed-
+     directory restart recovery.
+
+- WHY THIS IS NOT AN ADR WEAKENING. D47's binding text is "an atomic relink
+  transaction swaps handles under an exclusive lock" (§6.6) and its stated
+  purpose is to prevent stale ID collisions, wrong-sense binding, and mixed
+  runtime states. The handle swap still happens under an exclusive lock;
+  generation pinning provides a strictly STRONGER per-observation guarantee
+  than draining, since every read is a consistent snapshot that also cannot
+  fail or stall. "Drain all pre-commit pins" appears nowhere in ADR-0004 — it
+  was A5 wording. D47 itself already anticipates readers holding pre-swap
+  state: that is precisely why §6.6 mandates the asset-token HTTP 409
+  round-trip, which is the write-side protection that makes a complete-old
+  observation safe. A strict drain reading is also operationally defective
+  (activation becomes indefinitely starvable by any reader), so it cannot have
+  been the intent.
+
+- ADDITIONAL FINDING. ADR-0004 §6.6 states normatively that the user-data/deck
+  layer owns activation and that `app/dictionary.py` never accesses user state.
+  `DictionaryRuntime` therefore belongs in `app/deck.py`; `tests/test_dictionary
+  .py::test_no_part_b_table_references` already enforces this mechanically.
+  A5 now records the ownership explicitly so the resumed attempt cannot drift.
+
+- A5 amended in `tasks/slice-7.md` (activation owner/layering, path-only
+  activation input, generation identity and lease ownership, dual-database read
+  pins, no-drain seam exclusion, reentrancy refusal, total transaction and
+  publication ordering, infallible publication and crash convergence, total
+  failure semantics, relink outcome table, whole-table non-vacuous rollback
+  evidence). No ADR, application code, or test was modified by this
+  consultation. S2b is re-dispatched fresh from attempt 1 of the amended
+  contract per WORKFLOW §5.3.
+
+### S2b clarification self-review (2026-08-24, same governance session)
+
+Owner-directed narrow self-review of the proposed clarification before
+acceptance. Direction (IMPLEMENTABLE_WITH_BRIEF_CLARIFICATION) upheld; five
+internal inconsistencies in the first draft were repaired in A5:
+
+1. **Lock/hook contradiction.** The draft forbade holding the runtime lock
+   during "any user hook" while placing an injected synchronization point
+   inside the commit-to-publication seam. Resolved by separating the two
+   notions: NO user, plugin, application, or caller-supplied callback ever runs
+   under the runtime lock (no hook parameter, no registration API, no extension
+   point), and the seam synchronization is a single PRIVATE, TEST-ONLY internal
+   seam probe that production callers can neither supply nor invoke.
+2. **Same-thread reentrancy evidence.** The draft's T1 let a worker thread
+   activate while a different thread held the pin, which proves nothing. A5 now
+   mandates that ONE worker thread itself run
+   `with runtime.reading(): runtime.activate_dictionary(...)` — and the same
+   for `close()` — with the main thread proving termination by
+   `join(timeout=...)`.
+3. **WAL ownership.** The draft required WAL without saying who establishes it,
+   creating a hidden dependency on `tests/conftest.py` or S5. `DictionaryRuntime`
+   construction now issues `PRAGMA journal_mode=WAL` itself, verifies SQLite
+   returned `wal`, and fails construction otherwise. PART-B runtime
+   configuration, not a schema change.
+4. **Crash-recovery path.** `active_dictionary_metadata.active_filename` is a
+   filename, not a durable absolute path, so the draft's "adopt the recorded
+   filename" was unimplementable. A5 now defines one managed dictionary
+   directory derived from the initial `dict_path.parent`; candidates must
+   resolve inside it (traversal, separators, and escaping symlinks rejected);
+   `active_filename` stores only the managed filename; restart recovery
+   resolves `managed_dir / active_filename`, revalidates through S2a, requires
+   an exact `active_sha256` match, and fails construction closed otherwise. No
+   schema column added, no allowlist broadening.
+5. **Post-commit error semantics.** A5 now states that the production
+   activation API cannot fail after its commit returns, and that the test seam
+   probe's post-publication re-raise is test instrumentation rather than
+   documented API failure semantics. The rollback fixture's failure injection
+   is likewise private and test-only, and fires strictly BEFORE the commit.
+
+Full re-read of the amended A5 and the required-test list found no residual
+contradiction: no "drain" language, no public hook surface, no capability
+registry, and the seam probe is referenced consistently in the ordering,
+publication, and evidence bullets. Verdict unchanged:
+IMPLEMENTABLE_WITH_BRIEF_CLARIFICATION. No ADR, application code, test,
+schema, or STATE file was modified.
