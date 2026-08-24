@@ -103,7 +103,7 @@ Complete `reference/schema.sql` PART-B user tables:
 
 1. `deck`: `id`, `name`, `created_at`;
 2. `note`: `id`, `lemma_semantic_ref`, `sense_semantic_ref` (nullable), `status`
-   (`active`, `needs_gloss`, `derived_compound`, `orphaned`), `created_at`, `due_at`,
+   (`resolved`, `needs_gloss`, `derived_compound`, `orphaned`), `created_at`, `due_at`,
    `interval_days`, `ease_factor`, `review_count`, `last_confidence`;
 3. `card`: front/back rendered at runtime, never stored (AGENTS R4);
 4. `note_deck`: `note_id`, `deck_id`, `created_at`;
@@ -136,17 +136,22 @@ Rules:
 Implement FSRS scheduling in `app/deck.py`:
 
 1. Card review accepts raw 1–5 learner confidence (ADR-0003 D27);
-2. Maps raw confidence 1–5 to FSRS 4-grade rating:
+2. Maps raw confidence 1–5 to FSRS 4-grade rating through the single ADR-0003
+   D28 function `{1: Again, 2: Again, 3: Hard, 4: Good, 5: Easy}`:
    - 1 -> Again (rating 1)
-   - 2 -> Hard (rating 2)
-   - 3 -> Good (rating 3)
-   - 4 -> Easy (rating 4)
-   - 5 -> Easy (rating 4, with mastery / graduation acceleration)
+   - 2 -> Again (rating 1; identical scheduling to 1 on new cards)
+   - 3 -> Hard (rating 2)
+   - 4 -> Good (rating 3)
+   - 5 -> Easy (rating 4; graduates new cards to Review per FSRS)
 3. Computes updated interval, due date, ease factor, and stability;
 4. Appends a new row to `review_log` recording BOTH raw confidence (1–5) and
    mapped FSRS rating (1–4) (AGENTS R6);
 5. Application code contains ZERO `UPDATE review_log` or `DELETE FROM review_log`
-   queries (AGENTS R6).
+   queries (AGENTS R6);
+6. Pins `fsrs==6.3.2` in `pyproject.toml` runtime dependencies with learning
+   steps `(1 min, 10 min)` (ADR-0003 §6); a five-case scheduler test asserts
+   the mapped grades, the 1/2 equality on new cards, the 3/4 learning-step
+   intervals, and confidence 5 graduation to Review.
 
 ### A3 — Multilingual meaning set, user meanings, and D43 availability
 
