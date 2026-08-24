@@ -116,7 +116,11 @@ Complete `reference/schema.sql` PART-B user tables:
    `created_at`, `updated_at`, superseding scalar `note.gloss_user`;
 8. `note_dictionary_binding`: `note_id`, `lemma_semantic_ref`, `sense_semantic_ref`,
    `cached_lemma_id` (nullable), `cached_sense_id` (nullable), `binding_status`
-   (`bound`, `unbound`, `ambiguous`), `last_relinked_at`;
+   (`bound`, `unbound`, `ambiguous`), `last_relinked_at`; derived-compound notes
+   additionally persist an expected ordered `component_count` (captured at note
+   creation from the resolver's decomposition and revalidated at D47 relink)
+   so the D46 all-components-or-none rule is checkable against an independent
+   declared length, never against the surviving rows themselves;
 9. `active_dictionary_metadata`: singleton table tracking `active_version`,
    `active_filename`, `active_sha256`, `activated_at`;
 10. `custom_pronunciation`: `note_id` (primary key), `media_filename`, `sha256`,
@@ -202,6 +206,10 @@ In `app/dictionary.py`, `app/deck.py`, `app/api.py`:
    - `activate_dictionary(new_dict_path)` validates the new asset against PART-A schema;
    - Validates all PART-B `lemma_semantic_ref` and `sense_semantic_ref` values against
      the new dictionary;
+   - Validates each derived_compound note's component vector against its persisted
+     expected `component_count` BEFORE any binding-status filtering: any missing,
+     unbound, or ambiguous component, or an undeterminable count, fails closed
+     with no dictionary meaning block (ADR-0004 D46 all-components-or-none);
    - Atomically updates `active_dictionary_metadata` and relinks `cached_lemma_id` and
      `cached_sense_id` in `note_dictionary_binding`;
    - Exact matching stable refs are relinked (`binding_status='bound'`);

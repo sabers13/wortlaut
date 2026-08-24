@@ -56,3 +56,16 @@
   S1 returns to design (split/redesign) with no further repair attempts. This
   addendum documents why the third pass is a bounded repair under the §5.3
   respecification umbrella rather than an uncounted brute-force retry.
+- S1 bounded repair (attempt 3, `run_e9735fd409`, candidate `bfe10ef`): gate
+  PASS; final stop-or-go gpt-5.6-sol review confirmed F1 and F3 fixed with no
+  regressions, but BLOCKED on one structural residual: the D46 vector check
+  compared surviving ordinals against the surviving row count (circular), and
+  no independently persisted expected component count existed, so trailing-row
+  loss still passed as a valid vector.
+- Design return per the authorized stop-or-go: owner approved amending
+  `tasks/slice-7.md` (A1 item 8 and A5) so derived_compound notes persist an
+  expected ordered `component_count` captured at creation and revalidated at
+  D47 relink; full-vector validation precedes any binding-status filtering and
+  an undeterminable count fails closed. This completes frozen ADR-0004 D46's
+  ordered component vector without amending the ADR. Stage S1 is re-dispatched
+  fresh from attempt 1 of the amended stage contract per WORKFLOW §5.3.
