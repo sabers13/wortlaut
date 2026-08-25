@@ -506,3 +506,68 @@ commit is rebased on top).
   (`tasks/slice-7.s2b-runtime-boundary-consult.md`) conflicts with this
   correction (post-exit raising evidence, attribute-graph walker
   definition), the amended A5 and this addendum govern.
+
+## Stage S2b corrected-contract cycle — gate-PASS/review-BLOCK twice; one bounded repair consumed; owner halt (2026-08-25)
+
+Fresh implementation dispatched from `04671c8` against the corrected contract
+(A5 as amended at `91c8134`; consult report `4fbb4d7`), using the consult
+report's exact worker prompt with only the base-ref line updated to the
+authoritative HEAD. Transport notes: owner redirected all routing away from
+opencode (quota exhausted) to Gemini/GPT models for the remainder of the
+slice; an initial opencode launch was aborted by the owner before any
+candidate existed, leaving zombie row `run_f47bd97290` (retained; cleanup
+deferred).
+
+- Attempt 1 (`run_75ac68111d`, codex/gpt-5.6-terra, T3, max-attempts 1):
+  candidate `56e5270` on `orch/run_75ac68111d/a1`. Deterministic gate PASS
+  (authoritative venv toolchain). Scope verified: only `app/deck.py`
+  (+441/−1 region) and `tests/test_dictionary.py` (+520); `app/dictionary.py`
+  and `tests/test_deck.py` byte-identical to base.
+- Independent adversarial review (`run_b41d67a8ef`, codex/gpt-5.6-sol):
+  **VERDICT: BLOCK**. Areas 1/2/6/11/12 (payload purity, fresh-copy backing,
+  reentrancy-first, post-commit containment, managed-path/restart/WAL) held.
+  Seven findings: N1 teardown-failure pin stranding; N2 vacuous configure-case
+  acquisition-failure evidence; N3 phase-9 writer close inside the activation
+  lock; N4 missing cross-seam reader evidence; N5 multi-direct-row resolved
+  overwrite; N6 rollback companion reusing the failed DB instead of an
+  independent copy; N7 dict/user path aliasing unchecked.
+- Owner disposition: all seven classified as existing-contract
+  implementation/evidence defects; authorized EXACTLY ONE bounded T3 repair
+  reproducing `56e5270` plus corrections for exactly N1–N7 (+ non-blocking
+  FIFO-ordering test hardening), followed by ONE fresh independent review.
+- Bounded repair (`run_2a156e73aa`, codex/gpt-5.6-terra, max-attempts 1):
+  candidate `6a120c0` on `orch/run_2a156e73aa/a1`. Deterministic gate PASS.
+  Scope verified under the same policy; repair delta vs `56e5270`: 491+/106−
+  confined to the two expected files.
+- Fresh independent review (`run_1e4c209ab9`, codex/gpt-5.6-sol):
+  **VERDICT: BLOCK**. FIXED: N2, N3, N5, N6, FIFO. NOT FIXED: N1 (teardown
+  evidence lacks rollback-alone/close-alone successful-body cases), N4
+  (cross-seam evidence asserts binding ids only — never the same snapshot's
+  new asset token/PART-A pairing), N7 (resolved-path string comparison misses
+  hard-link aliases). NEW: B1 writer-close error after commit/publication
+  surfaces as activation failure, contradicting post-commit infallibility;
+  B2 rollback raise skips candidate close and masks the primary failure;
+  B3 schema-permitted stray direct row on a derived_compound note keeps
+  serving dictionary meanings despite fail-closed activation. Regression
+  sweep: previously held invariants HELD; E-suite/R9/R13 flagged solely via
+  those items.
+- OWNER HALT (2026-08-25): the corrected-contract cycle's one permitted
+  repair is CONSUMED; candidate `6a120c0` NOT accepted; S3–S6 not started.
+  Owner classification of residuals: N1/N4 evidence gaps (mechanical, no new
+  architecture); N7 hard-link identity bypass (implementation safety defect;
+  new architecture only if the existing contract genuinely cannot express
+  underlying-file identity); B2 cleanup/exception-ordering defect; B3
+  fail-closed derived-compound defect; **B1 GOVERNANCE QUESTION** — A5 says
+  activation cannot fail after commit returns while phase 9 closes the
+  writer connection after publication and close() itself may raise; the
+  contract must explicitly define post-publication cleanup semantics before
+  another implementation attempt.
+- NEXT SESSION MANDATE — fresh narrow governance consult, primarily B1
+  (post-publication cleanup semantics), secondarily confirming whether the
+  existing contract can express underlying-file identity (N7) without an
+  architectural change; no further implementation dispatch until it resolves.
+  Retained diagnostic evidence: `orch/run_75ac68111d/a1` (`56e5270`),
+  `orch/run_b41d67a8ef/a1` (VERDICT.md), `orch/run_2a156e73aa/a1`
+  (`6a120c0`), `orch/run_1e4c209ab9/a1` (VERDICT.md), zombie row
+  `run_f47bd97290`. Session audit artifact:
+  `tasks/slice-7.s2b-corrected-cycle-report.md`.
