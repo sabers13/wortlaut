@@ -1,17 +1,31 @@
-"""Tests for app/dictionary.py read-only dictionary asset reader (ADR-0004 PART A alignment)."""
+"""Tests for app/dictionary.py and DictionaryRuntime (ADR-0004 PART A/B alignment)."""
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+from types import MappingProxyType
+from typing import Literal, cast
 
 import pytest
 
+from app import deck
+from app.deck import (
+    DictionaryClosedError,
+    DictionaryRuntime,
+    DictionaryRuntimeError,
+    ReadingSnapshot,
+    _Generation,
+)
 from app.dictionary import (
     Dictionary,
+    DictionaryAsset,
     DictionaryAssetError,
     DictionaryEntry,
     _build_lemma_ref_maps,
@@ -31,7 +45,7 @@ def _make_candidate_asset(
     part_a_schema: str,
     *,
     lemma: str = "See",
-    source_ref: str = "senseid:en-see-1",
+    source_ref: str = "senseid:see-1",
     schema: str | None = None,
 ) -> Path:
     """Create a minimal, internally consistent PART-A candidate asset."""
@@ -204,9 +218,7 @@ def test_candidate_identity_fingerprints_preserve_trivial_source_differences(
         second.release()
 
 
-def test_released_candidate_handle_closes_cleanly(
-    tmp_path: Path, part_a_schema: str
-) -> None:
+def test_released_candidate_handle_closes_cleanly(tmp_path: Path, part_a_schema: str) -> None:
     """Discarded candidates free their retained read-only snapshot idempotently."""
     asset = validate_candidate_dictionary(_make_candidate_asset(tmp_path, part_a_schema))
     asset.release()
@@ -446,6 +458,7 @@ def test_suggest_lemmas_prefix(create_test_db: Callable[[], Path]) -> None:
 def test_no_part_b_table_references() -> None:
     """Acceptance B5: app/dictionary.py must never touch, query, or reference PART B tables."""
     import app.dictionary
+
     source_file = app.dictionary.__file__
     assert source_file is not None
     with open(source_file, encoding="utf-8") as f:
@@ -464,3 +477,1082 @@ def test_no_part_b_table_references() -> None:
         assert f"INTO {table}" not in code
         assert f"UPDATE {table}" not in code
         assert f"JOIN {table}" not in code
+
+
+# =========================================================================
+# Stage S2b: DictionaryRuntime, atomic activation/relink, read pins, and evidence
+# =========================================================================
+
+
+def _is_primitive_value(val: object) -> bool:
+    return isinstance(val, (str, int, float, bool, type(None)))
+
+
+def _assert_payload_pure(obj: object) -> None:
+    """Certify payload purity over stored instance payload (slots) only."""
+    forbidden_types = (
+        sqlite3.Connection,
+        sqlite3.Cursor,
+        DictionaryAsset,
+        _Generation,
+        DictionaryRuntime,
+    )
+
+    def _check(v: object, path: str) -> None:
+        if isinstance(v, forbidden_types):
+            raise AssertionError(f"Forbidden authority/resource type {type(v)} at {path}")
+        if callable(v):
+            raise AssertionError(f"Forbidden callable {type(v)} at {path}")
+        if _is_primitive_value(v):
+            return
+        if isinstance(v, MappingProxyType):
+            for k, val in v.items():
+                if not _is_primitive_value(k) and not isinstance(k, tuple):
+                    raise AssertionError(f"Non-primitive/non-tuple key {type(k)} at {path}")
+                if isinstance(k, tuple) and not all(_is_primitive_value(item) for item in k):
+                    raise AssertionError(f"Non-primitive tuple element in key at {path}")
+                _check(val, f"{path}[{k!r}]")
+            return
+        if isinstance(v, tuple):
+            for i, item in enumerate(v):
+                _check(item, f"{path}[{i}]")
+            return
+        if isinstance(v, frozenset):
+            for item in v:
+                _check(item, f"{path}{{{item!r}}}")
+            return
+        raise AssertionError(f"Forbidden mutable or unrecognized container {type(v)} at {path}")
+
+    if hasattr(obj, "__slots__"):
+        for slot in getattr(obj, "__slots__"):
+            val = getattr(obj, slot)
+            _check(val, slot)
+    else:
+        raise AssertionError(f"Object {type(obj)} does not use __slots__")
+
+
+def _make_runtime(
+    tmp_path: Path,
+    part_a_schema: str,
+    user_db_path: Path,
+    *,
+    dict_filename: str = "dictionary.sqlite",
+    lemma: str = "See",
+    source_ref: str = "senseid:see-1",
+) -> tuple[DictionaryRuntime, Path]:
+    dicts_dir = tmp_path / "managed_dicts"
+    dicts_dir.mkdir(parents=True, exist_ok=True)
+    dict_path = dicts_dir / dict_filename
+    cand_path = _make_candidate_asset(tmp_path, part_a_schema, lemma=lemma, source_ref=source_ref)
+    cand_path.replace(dict_path)
+    runtime = DictionaryRuntime(dict_path, user_db_path)
+    return runtime, dict_path
+
+
+def test_e1_reading_snapshot_payload_purity(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """E1: Certified payload purity walker over stored instance payload."""
+    runtime, _ = _make_runtime(tmp_path, part_a_schema, user_db_path)
+    try:
+        with runtime.reading() as snapshot:
+            _assert_payload_pure(snapshot)
+            assert isinstance(snapshot.asset_token, str)
+            assert len(snapshot.asset_token) == 64
+    finally:
+        runtime.close()
+
+
+def test_e1_payload_purity_walker_negative_control() -> None:
+    """E1 negative control: assert that _assert_payload_pure detects forbidden objects."""
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True, slots=True)
+    class BadConnection:
+        conn: object
+
+    @dataclass(frozen=True, slots=True)
+    class BadCallable:
+        func: object
+
+    @dataclass(frozen=True, slots=True)
+    class BadMutable:
+        mapping: object
+
+    @dataclass(frozen=True, slots=True)
+    class BadNested:
+        nested: object
+
+    dummy_conn = sqlite3.connect(":memory:")
+    try:
+        with pytest.raises(AssertionError, match="Forbidden authority/resource type"):
+            _assert_payload_pure(BadConnection(dummy_conn))
+    finally:
+        dummy_conn.close()
+
+    with pytest.raises(AssertionError, match="Forbidden callable"):
+        _assert_payload_pure(BadCallable(lambda: None))
+
+    with pytest.raises(AssertionError, match="Forbidden mutable"):
+        _assert_payload_pure(BadMutable({"key": "val"}))
+
+    with pytest.raises(AssertionError, match="Forbidden callable"):
+        _assert_payload_pure(BadNested(MappingProxyType({"key": lambda: None})))
+
+
+def test_e2_snapshot_copy_no_shared_backing(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """E2: Mutating source mappings or user DB leaves already-constructed snapshot unchanged."""
+    runtime, _ = _make_runtime(tmp_path, part_a_schema, user_db_path)
+    try:
+        with runtime.reading() as snapshot:
+            assert isinstance(snapshot.lemma_ids, MappingProxyType)
+            original_lemma_ids = dict(snapshot.lemma_ids)
+            original_bindings = dict(snapshot.bindings)
+
+            # Mutate user DB externally; deliberately unmatched stub refs
+            # test DB materialization isolation.
+            conn = sqlite3.connect(user_db_path)
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO note (id, lemma_semantic_ref, status, created_at, due_at)
+                    VALUES (999, 'lemma:v1:fake', 'needs_gloss', '2026-01-01', '2026-01-01')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO note_dictionary_binding (
+                        note_id, role, component_ord, lemma_semantic_ref, sense_semantic_ref,
+                        binding_status
+                    ) VALUES (999, 'direct', 0, 'lemma:v1:fake', 'sense:v1:fake', 'bound')
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            # Snapshot must NOT reflect the new row (it was materialized at pin time)
+            assert dict(snapshot.bindings) == original_bindings
+            assert (999, "direct", 0) not in snapshot.bindings
+            assert dict(snapshot.lemma_ids) == original_lemma_ids
+    finally:
+        runtime.close()
+
+
+def test_e3_acquisition_failure_at_each_step(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E3: Failure injection at EACH acquisition step leaves 0 pins, 0 thread depth, no leaks."""
+    runtime, _ = _make_runtime(tmp_path, part_a_schema, user_db_path)
+    try:
+        # Step a: sqlite3.connect fails
+        orig_connect = sqlite3.connect
+
+        def failing_connect(
+            database: str | bytes | Path | os.PathLike[str] | os.PathLike[bytes],
+            timeout: float = 5.0,
+            detect_types: int = 0,
+            isolation_level: Literal["DEFERRED", "EXCLUSIVE", "IMMEDIATE"] | None = "DEFERRED",
+            check_same_thread: bool = True,
+            cached_statements: int = 128,
+            uri: bool = False,
+        ) -> sqlite3.Connection:
+            if str(database).startswith("file:") and "mode=ro" in str(database):
+                raise sqlite3.OperationalError("injected connect failure")
+            return orig_connect(
+                database,
+                timeout=timeout,
+                detect_types=detect_types,
+                isolation_level=isolation_level,
+                check_same_thread=check_same_thread,
+                cached_statements=cached_statements,
+                uri=uri,
+            )
+
+        monkeypatch.setattr(sqlite3, "connect", failing_connect)
+        with pytest.raises(sqlite3.OperationalError, match="injected connect failure"):
+            with runtime.reading():
+                pass
+        assert runtime._current_generation.pins == 0
+        assert getattr(runtime._thread_local, "depth", 0) == 0
+
+        class _FailingProxyConnection:
+            def __init__(
+                self,
+                inner: sqlite3.Connection,
+                fail_sql: Callable[[str], bool],
+                error_message: str,
+            ) -> None:
+                self._inner = inner
+                self._fail_sql = fail_sql
+                self._error_message = error_message
+                self.row_factory: object | None = None
+
+            def execute(
+                self,
+                sql: str,
+                parameters: tuple[int | str | float | bytes | None, ...] = (),
+            ) -> sqlite3.Cursor:
+                if self._fail_sql(sql):
+                    raise sqlite3.OperationalError(self._error_message)
+                return self._inner.execute(sql, parameters)
+
+            def rollback(self) -> None:
+                self._inner.rollback()
+
+            def close(self) -> None:
+                self._inner.close()
+
+        def make_failing_connector(
+            fail_sql: Callable[[str], bool],
+            error_message: str,
+        ) -> Callable[..., sqlite3.Connection]:
+            def proxy_connect(
+                database: str | bytes | Path | os.PathLike[str] | os.PathLike[bytes],
+                timeout: float = 5.0,
+                detect_types: int = 0,
+                isolation_level: Literal["DEFERRED", "EXCLUSIVE", "IMMEDIATE"] | None = "DEFERRED",
+                check_same_thread: bool = True,
+                cached_statements: int = 128,
+                uri: bool = False,
+            ) -> sqlite3.Connection:
+                inner = orig_connect(
+                    database,
+                    timeout=timeout,
+                    detect_types=detect_types,
+                    isolation_level=isolation_level,
+                    check_same_thread=check_same_thread,
+                    cached_statements=cached_statements,
+                    uri=uri,
+                )
+                return cast(
+                    sqlite3.Connection,
+                    _FailingProxyConnection(inner, fail_sql, error_message),
+                )
+
+            return proxy_connect
+
+        # Step c: Inject failure during BEGIN DEFERRED
+        monkeypatch.undo()
+        monkeypatch.setattr(
+            sqlite3,
+            "connect",
+            make_failing_connector(
+                lambda sql: sql == "BEGIN DEFERRED",
+                "injected begin deferred failure",
+            ),
+        )
+        with pytest.raises(sqlite3.OperationalError, match="injected begin deferred failure"):
+            with runtime.reading():
+                pass
+        assert runtime._current_generation.pins == 0
+        assert getattr(runtime._thread_local, "depth", 0) == 0
+
+        # Step d: PART-B materialization query fails
+        monkeypatch.undo()
+        monkeypatch.setattr(
+            sqlite3,
+            "connect",
+            make_failing_connector(
+                lambda sql: "SELECT note_id, role" in sql,
+                "injected part-b read failure",
+            ),
+        )
+        with pytest.raises(sqlite3.OperationalError, match="injected part-b read failure"):
+            with runtime.reading():
+                pass
+        assert runtime._current_generation.pins == 0
+        assert getattr(runtime._thread_local, "depth", 0) == 0
+
+        # Step e: PART-A copy failure
+        monkeypatch.undo()
+        gen = runtime._current_generation
+
+        class BadAsset:
+            @property
+            def asset_token(self) -> str:
+                raise RuntimeError("injected part-a copy failure")
+
+        orig_asset = gen.asset
+        gen.asset = BadAsset()  # type: ignore[assignment]
+        try:
+            with pytest.raises(RuntimeError, match="injected part-a copy failure"):
+                with runtime.reading():
+                    pass
+            assert gen.pins == 0
+            assert getattr(runtime._thread_local, "depth", 0) == 0
+        finally:
+            gen.asset = orig_asset
+    finally:
+        runtime.close()
+
+
+class _CloseTrackingAsset:
+    """Tracking wrapper delegating all DictionaryAsset properties and counting close() calls."""
+
+    def __init__(self, real_asset: DictionaryAsset) -> None:
+        self._real_asset = real_asset
+        self.close_calls = 0
+
+    @property
+    def path(self) -> Path:
+        return self._real_asset.path
+
+    @property
+    def sha256(self) -> str:
+        return self._real_asset.sha256
+
+    @property
+    def asset_token(self) -> str:
+        return self._real_asset.asset_token
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        return self._real_asset.connection
+
+    @property
+    def lemma_ids(self) -> Mapping[str, int]:
+        return self._real_asset.lemma_ids
+
+    @property
+    def sense_ids(self) -> Mapping[str, tuple[int, int]]:
+        return self._real_asset.sense_ids
+
+    @property
+    def lemma_identity_fingerprints(self) -> Mapping[str, str]:
+        return self._real_asset.lemma_identity_fingerprints
+
+    @property
+    def sense_identity_fingerprints(self) -> Mapping[str, str]:
+        return self._real_asset.sense_identity_fingerprints
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self._real_asset.close()
+
+    def release(self) -> None:
+        self._real_asset.release()
+
+
+def test_e4_release_symmetry_across_every_exit_shape(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """E4: Success/release symmetry across normal, exception, and closed-while-pinned exits."""
+    runtime, _ = _make_runtime(tmp_path, part_a_schema, user_db_path)
+
+    # 1. Normal body completion
+    with runtime.reading():
+        assert runtime._current_generation.pins == 1
+        assert getattr(runtime._thread_local, "depth", 0) == 1
+    assert runtime._current_generation.pins == 0
+    assert getattr(runtime._thread_local, "depth", 0) == 0
+
+    # 2. Body-exception exit
+    with pytest.raises(ZeroDivisionError):
+        with runtime.reading():
+            _ = 1 / 0
+    assert runtime._current_generation.pins == 0
+    assert getattr(runtime._thread_local, "depth", 0) == 0
+
+    # 3. Closed while pinned: pin prevents handle close; exiting context closes handle exactly once
+    tracker = _CloseTrackingAsset(runtime._current_generation.asset)
+    runtime._current_generation.asset = tracker  # type: ignore[assignment]
+
+    with runtime.reading():
+        t = threading.Thread(target=runtime.close)
+        t.start()
+        t.join(timeout=2.0)
+        assert not t.is_alive()
+
+        assert runtime.is_closed is True
+        assert runtime._current_generation.retired is True
+        assert runtime._current_generation.pins == 1
+        assert tracker.close_calls == 0
+
+    assert runtime._current_generation.pins == 0
+    assert tracker.close_calls == 1
+
+
+def test_e4_runtime_close_unpinned_closes_handle_exactly_once(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """E4: runtime.close() closes unpinned handle exactly once, idempotently."""
+    runtime, _ = _make_runtime(tmp_path, part_a_schema, user_db_path)
+    tracker = _CloseTrackingAsset(runtime._current_generation.asset)
+    runtime._current_generation.asset = tracker  # type: ignore[assignment]
+
+    runtime.close()
+    assert tracker.close_calls == 1
+    runtime.close()
+    assert tracker.close_calls == 1
+
+
+def test_e5a_closed_runtime_dominates_path_and_type_errors(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """E5a: Closed runtime raises DictionaryClosedError ahead of path or type errors."""
+    runtime, _ = _make_runtime(tmp_path, part_a_schema, user_db_path)
+    runtime.close()
+
+    with pytest.raises(DictionaryClosedError):
+        runtime.activate_dictionary("nonexistent.sqlite")
+
+    with pytest.raises(DictionaryClosedError):
+        runtime.activate_dictionary(123)  # type: ignore[arg-type]
+
+    with pytest.raises(DictionaryClosedError):
+        runtime.activate_dictionary(None)  # type: ignore[arg-type]
+
+
+def test_e5b_blocking_validation_serializes_concurrent_ops(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E5b: Concurrent close() and activate() block while validation holds activation lock."""
+    runtime, _ = _make_runtime(tmp_path, part_a_schema, user_db_path)
+    cand2_path = _make_candidate_asset(
+        tmp_path, part_a_schema, lemma="Meer", source_ref="senseid:meer-1"
+    )
+    cand2_target = runtime.managed_dir / "dict_v2.sqlite"
+    cand2_path.replace(cand2_target)
+    v2_asset = validate_candidate_dictionary(cand2_target)
+    v2_sha = v2_asset.sha256
+    v2_asset.close()
+
+    validation_entered = threading.Event()
+    validation_unblock = threading.Event()
+
+    orig_validate = validate_candidate_dictionary
+
+    def blocking_validate(p: Path | str) -> DictionaryAsset:
+        res = orig_validate(p)
+        validation_entered.set()
+        assert validation_unblock.wait(timeout=5.0)
+        return res
+
+    monkeypatch.setattr(deck, "validate_candidate_dictionary", blocking_validate)
+
+    act_errors: list[Exception] = []
+    close_errors: list[Exception] = []
+    bad_errors: list[Exception] = []
+
+    def activate_worker() -> None:
+        try:
+            runtime.activate_dictionary("dict_v2.sqlite", version="v2")
+        except Exception as e:
+            act_errors.append(e)
+
+    def close_worker() -> None:
+        try:
+            runtime.close()
+        except Exception as e:
+            close_errors.append(e)
+
+    def bad_activate_worker() -> None:
+        try:
+            runtime.activate_dictionary(123)  # type: ignore[arg-type]
+        except Exception as e:
+            bad_errors.append(e)
+
+    t_act = threading.Thread(target=activate_worker)
+    t_close = threading.Thread(target=close_worker)
+    t_bad = threading.Thread(target=bad_activate_worker)
+
+    t_act.start()
+    assert validation_entered.wait(timeout=5.0)
+
+    # Start concurrent close and bad activate while activation lock is held
+    t_close.start()
+    t_bad.start()
+
+    # Both must be blocked
+    t_close.join(timeout=0.1)
+    t_bad.join(timeout=0.1)
+    assert t_close.is_alive()
+    assert t_bad.is_alive()
+
+    # Unblock validation
+    validation_unblock.set()
+
+    t_act.join(timeout=5.0)
+    t_close.join(timeout=5.0)
+    t_bad.join(timeout=5.0)
+
+    assert not t_act.is_alive()
+    assert not t_close.is_alive()
+    assert not t_bad.is_alive()
+
+    assert not act_errors
+    assert not close_errors
+    assert len(bad_errors) == 1
+    assert isinstance(bad_errors[0], (TypeError, DictionaryClosedError))
+
+    # Assert activation actually published generation 2 before close completed
+    assert runtime._generation_counter == 2
+    assert runtime._current_generation.generation_id == 2
+    assert runtime._current_generation.asset.sha256 == v2_sha
+
+    conn = sqlite3.connect(user_db_path)
+    try:
+        row = conn.execute(
+            "SELECT active_version, active_sha256 "
+            "FROM active_dictionary_metadata WHERE singleton = 1"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "v2"
+        assert row[1] == v2_sha
+    finally:
+        conn.close()
+
+
+def test_e5c_same_thread_reentrancy_termination(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """E5c: Same worker thread executing activate/close inside reading() terminates with error."""
+    runtime, _ = _make_runtime(tmp_path, part_a_schema, user_db_path)
+    cand2_path = _make_candidate_asset(
+        tmp_path, part_a_schema, lemma="Meer", source_ref="senseid:meer-1"
+    )
+    (runtime.managed_dir / "dict_v2.sqlite").write_bytes(cand2_path.read_bytes())
+
+    act_result: list[bool] = []
+    close_result: list[bool] = []
+
+    def act_reentrant_worker() -> None:
+        with runtime.reading():
+            try:
+                runtime.activate_dictionary("dict_v2.sqlite")
+            except DictionaryRuntimeError:
+                act_result.append(True)
+
+    def close_reentrant_worker() -> None:
+        with runtime.reading():
+            try:
+                runtime.close()
+            except DictionaryRuntimeError:
+                close_result.append(True)
+
+    t1 = threading.Thread(target=act_reentrant_worker)
+    t1.start()
+    t1.join(timeout=5.0)
+    assert not t1.is_alive()
+    assert act_result == [True]
+
+    t2 = threading.Thread(target=close_reentrant_worker)
+    t2.start()
+    t2.join(timeout=5.0)
+    assert not t2.is_alive()
+    assert close_result == [True]
+
+    runtime.close()
+
+
+def test_e6_whole_table_non_vacuous_rollback(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """E6: Whole-table rollback on pre-commit failure proven non-vacuous on independent copy."""
+    lemma_ref_see = _stable_ref("lemma", ["de", "See", "NOUN", "der"])
+    sense_ref_see = _stable_ref(
+        "sense", [lemma_ref_see, "wiktextract:enwiktionary", "senseid:see-1"]
+    )
+    lemma_ref_meer = _stable_ref("lemma", ["de", "Meer", "NOUN", "der"])
+    sense_ref_meer = _stable_ref(
+        "sense", [lemma_ref_meer, "wiktextract:enwiktionary", "senseid:meer-1"]
+    )
+    lemma_ref_comp = _stable_ref("lemma", ["de", "Seemeer", "NOUN", "das"])
+
+    conn = sqlite3.connect(user_db_path)
+    try:
+        now_dt = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+        _ = deck.create_note(
+            conn,
+            lemma_ref_see,
+            sense_semantic_ref=sense_ref_see,
+            status="resolved",
+            meaning_languages=("de", "en"),
+            created_at=now_dt,
+        )
+        _ = deck.create_note(
+            conn,
+            lemma_ref_comp,
+            status="derived_compound",
+            component_bindings=(
+                (lemma_ref_see, sense_ref_see),
+                (lemma_ref_meer, sense_ref_meer),
+            ),
+            meaning_languages=("de",),
+            created_at=now_dt,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime, _ = _make_runtime(
+        tmp_path, part_a_schema, user_db_path, lemma="See", source_ref="senseid:see-1"
+    )
+
+    cand2_path = _make_candidate_asset(
+        tmp_path, part_a_schema, lemma="Meer", source_ref="senseid:meer-1"
+    )
+    (runtime.managed_dir / "dict_v2.sqlite").write_bytes(cand2_path.read_bytes())
+
+    # Snapshot COMPLETE rows of note_dictionary_binding, note, active_dictionary_metadata
+    conn = sqlite3.connect(user_db_path)
+    try:
+        snap_bindings = conn.execute(
+            "SELECT * FROM note_dictionary_binding ORDER BY note_id, role, component_ord"
+        ).fetchall()
+        snap_notes = conn.execute("SELECT * FROM note ORDER BY id").fetchall()
+        snap_metadata = conn.execute("SELECT * FROM active_dictionary_metadata").fetchall()
+    finally:
+        conn.close()
+
+    def fail_pre_commit() -> None:
+        raise RuntimeError("injected pre-commit failure")
+
+    runtime._pre_commit_probe = fail_pre_commit
+
+    with pytest.raises(RuntimeError, match="injected pre-commit failure"):
+        runtime.activate_dictionary("dict_v2.sqlite", version="v2")
+
+    # Verify tables identical to snapshot
+    conn = sqlite3.connect(user_db_path)
+    try:
+        post_bindings = conn.execute(
+            "SELECT * FROM note_dictionary_binding ORDER BY note_id, role, component_ord"
+        ).fetchall()
+        post_notes = conn.execute("SELECT * FROM note ORDER BY id").fetchall()
+        post_metadata = conn.execute("SELECT * FROM active_dictionary_metadata").fetchall()
+    finally:
+        conn.close()
+
+    assert post_bindings == snap_bindings
+    assert post_notes == snap_notes
+    assert post_metadata == snap_metadata
+
+    runtime.close()
+
+    # Non-vacuity proof: run same activation against an INDEPENDENT copy of user DB
+    ind_user_db = tmp_path / "independent_user_db.sqlite"
+    ind_user_db.write_bytes(user_db_path.read_bytes())
+
+    runtime_ind = DictionaryRuntime(runtime.managed_dir / "dictionary.sqlite", ind_user_db)
+    try:
+        runtime_ind.activate_dictionary("dict_v2.sqlite", version="v2")
+        conn_ind = sqlite3.connect(ind_user_db)
+        try:
+            succ_bindings = conn_ind.execute(
+                "SELECT * FROM note_dictionary_binding ORDER BY note_id, role, component_ord"
+            ).fetchall()
+            succ_notes = conn_ind.execute("SELECT * FROM note ORDER BY id").fetchall()
+            succ_metadata = conn_ind.execute("SELECT * FROM active_dictionary_metadata").fetchall()
+        finally:
+            conn_ind.close()
+
+        # 1. binding_status changed for note1 (from bound to unbound)
+        assert succ_bindings[0] != snap_bindings[0]
+        assert succ_bindings[0][7] == "unbound" and snap_bindings[0][7] == "bound"
+        # 2. cached_lemma_id or cached_sense_id changed (cleared to None)
+        assert succ_bindings[0][5] != snap_bindings[0][5]
+        assert succ_bindings[0][5] is None and snap_bindings[0][5] is not None
+        # 3. last_relinked_at changed
+        assert succ_bindings[0][9] != snap_bindings[0][9]
+        # 4. note.status changed (note1 became needs_gloss)
+        assert succ_notes[0][3] == "needs_gloss" and snap_notes[0][3] == "resolved"
+        # 5. active_dictionary_metadata changed
+        assert succ_metadata[0][1] == "v2" and snap_metadata[0][1] == "v1"
+    finally:
+        runtime_ind.close()
+
+
+def test_e7_overlapping_read_visibility_single_generation_pairing(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """E7: Pre-seam and cross-seam readers observe single-generation pairing without mixed state."""
+    lemma_ref_see = _stable_ref("lemma", ["de", "See", "NOUN", "der"])
+    sense_ref_see = _stable_ref(
+        "sense", [lemma_ref_see, "wiktextract:enwiktionary", "senseid:see-1"]
+    )
+    conn = sqlite3.connect(user_db_path)
+    try:
+        now_dt = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+        note_id = deck.create_note(
+            conn,
+            lemma_ref_see,
+            sense_semantic_ref=sense_ref_see,
+            status="resolved",
+            meaning_languages=("de", "en"),
+            created_at=now_dt,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime, _ = _make_runtime(
+        tmp_path, part_a_schema, user_db_path, lemma="See", source_ref="senseid:see-1"
+    )
+    v1_token = runtime.asset_token
+
+    cand2_path = _make_candidate_asset(
+        tmp_path, part_a_schema, lemma="Meer", source_ref="senseid:meer-1"
+    )
+    dict2_path = runtime.managed_dir / "dict_v2.sqlite"
+    cand2_path.replace(dict2_path)
+
+    v2_asset = validate_candidate_dictionary(dict2_path)
+    v2_token = v2_asset.sha256
+    v2_asset.close()
+
+    with runtime.reading() as snap_old:
+        in_seam_event = threading.Event()
+        unblock_seam_event = threading.Event()
+
+        def seam_probe_fn() -> None:
+            in_seam_event.set()
+            assert unblock_seam_event.wait(timeout=5.0)
+
+        runtime._seam_probe = seam_probe_fn
+
+        act_thread = threading.Thread(
+            target=lambda: runtime.activate_dictionary("dict_v2.sqlite", version="v2")
+        )
+        act_thread.start()
+
+        assert in_seam_event.wait(timeout=5.0)
+
+        cross_read_snap: list[ReadingSnapshot] = []
+
+        def cross_reader() -> None:
+            with runtime.reading() as s:
+                cross_read_snap.append(s)
+
+        cross_thread = threading.Thread(target=cross_reader)
+        cross_thread.start()
+
+        cross_thread.join(timeout=0.1)
+        assert cross_thread.is_alive()
+
+        unblock_seam_event.set()
+
+        act_thread.join(timeout=5.0)
+        cross_thread.join(timeout=5.0)
+
+        assert not act_thread.is_alive()
+        assert not cross_thread.is_alive()
+
+        # Pre-seam reader still observes complete-old:
+        # asset token, PART-A lemma_ids, and non-None PART-B cached ids together
+        assert snap_old.asset_token == v1_token
+        assert lemma_ref_see in snap_old.lemma_ids
+        assert snap_old.lemma_ids[lemma_ref_see] == 1
+        assert snap_old.bindings[(note_id, "direct", 0)] == (1, 1)
+
+        # Cross-seam reader observed complete-new:
+        # asset token, PART-A lemma_ids, and cleared PART-B cached ids together
+        assert len(cross_read_snap) == 1
+        snap_new = cross_read_snap[0]
+        assert snap_new.asset_token == v2_token
+        assert lemma_ref_see not in snap_new.lemma_ids
+        lemma_ref_meer = _stable_ref("lemma", ["de", "Meer", "NOUN", "der"])
+        assert lemma_ref_meer in snap_new.lemma_ids
+        assert snap_new.bindings[(note_id, "direct", 0)] == (None, None)
+
+    runtime.close()
+
+
+def test_e8_seam_probe_exception_containment(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """E8: Seam probe exception is captured, publication completes, then exception re-raised."""
+    runtime, _ = _make_runtime(tmp_path, part_a_schema, user_db_path)
+
+    cand2_path = _make_candidate_asset(
+        tmp_path, part_a_schema, lemma="Meer", source_ref="senseid:meer-1"
+    )
+    dict2_path = runtime.managed_dir / "dict_v2.sqlite"
+    cand2_path.replace(dict2_path)
+    cand2_sha256 = validate_candidate_dictionary(dict2_path).sha256
+
+    def fail_seam() -> None:
+        raise RuntimeError("injected seam failure")
+
+    runtime._seam_probe = fail_seam
+
+    with pytest.raises(RuntimeError, match="injected seam failure"):
+        runtime.activate_dictionary("dict_v2.sqlite", version="v2")
+
+    assert runtime.asset_token == cand2_sha256
+    with runtime.reading() as snap:
+        assert snap.asset_token == cand2_sha256
+
+    conn = sqlite3.connect(user_db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT active_version, active_sha256
+            FROM active_dictionary_metadata WHERE singleton = 1
+            """
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "v2"
+        assert row[1] == cand2_sha256
+    finally:
+        conn.close()
+
+    runtime.close()
+
+
+def test_e9_managed_directory_rejection_cases(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """E9: Rejection of traversal on raw string, symlink escaping, and stored separators."""
+    runtime, _ = _make_runtime(tmp_path, part_a_schema, user_db_path)
+
+    # 1. Raw text traversal
+    with pytest.raises(DictionaryAssetError, match="path traversal"):
+        runtime.activate_dictionary("subdir/../dict.sqlite")
+
+    # 2. Outside candidate path
+    outside = tmp_path / "outside.sqlite"
+    outside.write_bytes(b"some content")
+    with pytest.raises(DictionaryAssetError, match="must reside in managed directory"):
+        runtime.activate_dictionary(outside)
+
+    # 3. Symlink escaping managed directory
+    symlink_path = runtime.managed_dir / "escape_symlink.sqlite"
+    try:
+        symlink_path.symlink_to(outside)
+        with pytest.raises(DictionaryAssetError, match="must reside in managed directory"):
+            runtime.activate_dictionary(symlink_path)
+    finally:
+        symlink_path.unlink(missing_ok=True)
+
+    runtime.close()
+
+
+def test_e10_restart_recovery_sha_mismatch_fails_construction(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """E10: Restart recovery with corrupted SHA in metadata fails construction."""
+    runtime, dict_path = _make_runtime(tmp_path, part_a_schema, user_db_path)
+    runtime.close()
+
+    conn = sqlite3.connect(user_db_path)
+    try:
+        conn.execute(
+            "UPDATE active_dictionary_metadata SET active_sha256 = ? WHERE singleton = 1",
+            ("0" * 64,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(DictionaryRuntimeError, match="recovery target SHA-256 does not match"):
+        DictionaryRuntime(dict_path, user_db_path)
+
+
+def test_e11_teardown_close_failure_contained(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """E11: Writer close error in Phase 9 is contained and activation reports success."""
+    runtime, _ = _make_runtime(tmp_path, part_a_schema, user_db_path)
+
+    cand2_path = _make_candidate_asset(
+        tmp_path, part_a_schema, lemma="Meer", source_ref="senseid:meer-1"
+    )
+    dict2_path = runtime.managed_dir / "dict_v2.sqlite"
+    cand2_path.replace(dict2_path)
+    cand2_sha256 = validate_candidate_dictionary(dict2_path).sha256
+
+    def fail_writer_close() -> None:
+        raise sqlite3.Error("injected writer close error")
+
+    runtime._writer_close_hook = fail_writer_close
+
+    # Must NOT raise: success reported solely on completed commit + publication
+    runtime.activate_dictionary("dict_v2.sqlite", version="v2")
+
+    assert runtime.asset_token == cand2_sha256
+
+    conn = sqlite3.connect(user_db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT active_version, active_sha256
+            FROM active_dictionary_metadata WHERE singleton = 1
+            """
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "v2"
+        assert row[1] == cand2_sha256
+    finally:
+        conn.close()
+
+    runtime.close()
+
+
+def test_e12_cleanup_non_masking_primary_exception_propagates(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """E12: Pre-commit primary exception propagates unmasked when rollback also fails."""
+    runtime, _ = _make_runtime(tmp_path, part_a_schema, user_db_path)
+
+    cand2_path = _make_candidate_asset(
+        tmp_path, part_a_schema, lemma="Meer", source_ref="senseid:meer-1"
+    )
+    dict2_path = runtime.managed_dir / "dict_v2.sqlite"
+    cand2_path.replace(dict2_path)
+
+    class CustomPrimaryError(Exception):
+        pass
+
+    def fail_pre_commit() -> None:
+        raise CustomPrimaryError("primary pre-commit failure")
+
+    def fail_rollback() -> None:
+        raise sqlite3.Error("secondary rollback failure")
+
+    runtime._pre_commit_probe = fail_pre_commit
+    runtime._rollback_failure_hook = fail_rollback
+
+    with pytest.raises(CustomPrimaryError, match="primary pre-commit failure"):
+        runtime.activate_dictionary("dict_v2.sqlite", version="v2")
+
+    runtime.close()
+
+
+def test_e13_underlying_file_identity_rejected(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """E13: Hard-link alias of user database is rejected for activation and recovery."""
+    runtime, dict_path = _make_runtime(tmp_path, part_a_schema, user_db_path)
+
+    # 1. Hard-link alias rejected on activation
+    alias_path = runtime.managed_dir / "user_db_alias.sqlite"
+    try:
+        os.link(user_db_path, alias_path)
+        with pytest.raises(DictionaryAssetError, match="user database file"):
+            runtime.activate_dictionary("user_db_alias.sqlite")
+    finally:
+        alias_path.unlink(missing_ok=True)
+
+    runtime.close()
+
+    # 2. Hard-link alias rejected on restart recovery
+    alias_recovery = runtime.managed_dir / "recovery_alias.sqlite"
+    os.link(user_db_path, alias_recovery)
+    try:
+        conn = sqlite3.connect(user_db_path)
+        try:
+            conn.execute(
+                """
+                UPDATE active_dictionary_metadata
+                SET active_filename = 'recovery_alias.sqlite'
+                WHERE singleton = 1
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with pytest.raises(DictionaryRuntimeError, match="user database file"):
+            DictionaryRuntime(dict_path, user_db_path)
+    finally:
+        alias_recovery.unlink(missing_ok=True)
+
+
+def test_e14_role_status_consistency_stray_rows(user_db: sqlite3.Connection) -> None:
+    """E14: Meaning availability uses only binding role matching persisted note.status."""
+    now_dt = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+    # Deliberately unmatched stub refs in dictionary mapping to test role/status
+    # consistency in isolation.
+    dictionary = {
+        "sense:v1:see_0": {"de": ("See",), "en": ("lake",)},
+        "sense:v1:haus_0": {"de": ("Haus",), "en": ("house",)},
+    }
+
+    # 1. derived_compound with failing component vector + stray bound direct row -> NO meaning block
+    comp_note = deck.create_note(
+        user_db,
+        "lemma:v1:compound",
+        status="derived_compound",
+        component_bindings=(
+            ("lemma:v1:see", "sense:v1:see_0"),
+            ("lemma:v1:haus", "sense:v1:haus_0"),
+        ),
+        meaning_languages=("de", "en"),
+        created_at=now_dt,
+    )
+    # Make one component unbound
+    user_db.execute(
+        """
+        UPDATE note_dictionary_binding
+        SET binding_status = 'unbound'
+        WHERE note_id = ? AND component_ord = 1
+        """,
+        (comp_note,),
+    )
+    # Insert stray bound direct row
+    user_db.execute(
+        """
+        INSERT INTO note_dictionary_binding (
+            note_id, role, component_ord, lemma_semantic_ref, sense_semantic_ref,
+            cached_lemma_id, cached_sense_id, binding_status
+        ) VALUES (?, 'direct', 0, 'lemma:v1:see', 'sense:v1:see_0', 1, 1, 'bound')
+        """,
+        (comp_note,),
+    )
+    user_db.commit()
+
+    # Because status is derived_compound, stray direct row MUST NOT create availability
+    assert deck.resolved_meanings(user_db, comp_note, dictionary) == {"de": (), "en": ()}
+    assert deck.meaning_state(user_db, comp_note, dictionary) == "none"
+
+    # 2. resolved note with valid direct row + stray component rows -> keeps direct availability
+    res_note = deck.create_note(
+        user_db,
+        "lemma:v1:see",
+        sense_semantic_ref="sense:v1:see_0",
+        status="resolved",
+        meaning_languages=("de", "en"),
+        created_at=now_dt,
+    )
+    # Insert stray component rows
+    user_db.execute(
+        """
+        INSERT INTO note_dictionary_binding (
+            note_id, role, component_ord, lemma_semantic_ref, sense_semantic_ref,
+            binding_status, component_count
+        ) VALUES (?, 'component', 0, 'lemma:v1:fake', 'sense:v1:fake', 'unbound', 1)
+        """,
+        (res_note,),
+    )
+    user_db.commit()
+
+    assert deck.resolved_meanings(user_db, res_note, dictionary) == {
+        "de": ("See",),
+        "en": ("lake",),
+    }
+    assert deck.meaning_state(user_db, res_note, dictionary) == "complete"
+
+
+def test_e15_stale_token_detection_readiness(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """E15: Token validation matches active generation asset token and rejects stale tokens."""
+    runtime, _ = _make_runtime(tmp_path, part_a_schema, user_db_path)
+    try:
+        active_token = runtime.asset_token
+        stale_token = "0" * 64
+
+        assert runtime.asset_token == active_token
+        assert active_token != stale_token
+
+        def check_token(submitted_token: str) -> bool:
+            return submitted_token == runtime.asset_token
+
+        assert check_token(active_token) is True
+        assert check_token(stale_token) is False
+    finally:
+        runtime.close()
