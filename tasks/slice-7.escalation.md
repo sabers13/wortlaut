@@ -571,3 +571,56 @@ deferred).
   (`6a120c0`), `orch/run_1e4c209ab9/a1` (VERDICT.md), zombie row
   `run_f47bd97290`. Session audit artifact:
   `tasks/slice-7.s2b-corrected-cycle-report.md`.
+
+## Stage S2b narrow governance resolution — B1 post-publication cleanup + N7 expressibility (2026-08-25)
+
+Fresh slice-7 orchestrator session resolved the recorded B1 governance question
+and the N7 contract-expressibility question against `slice/7` `f33ac79`
+(`main` unchanged at `eb42ccf`; S1 `a678f1b`, S2a `8cf6367` frozen; corrected
+contract `91c8134` and consult report `4fbb4d7` ancestors). Scope restricted to
+exactly B1 and N7; the D47 architecture is not reopened.
+
+**Verdict: NARROW A5 CLARIFICATION — no ADR change required.**
+
+- **B1 (post-publication cleanup semantics).** A5 already declares the
+  production activation API cannot fail after its commit returns, but phase (9)
+  releases the activation lock and closes the dedicated write connection after
+  publication, and `close()` itself may raise — leaving teardown failure
+  semantics unstated. Verified against SQLite semantics (after a successful WAL
+  commit the transaction is durable; a later connection-close failure cannot
+  un-commit it), Python connection lifecycle, and resource-ownership
+  invariants: containing post-publication teardown exceptions creates no
+  materially incorrect persistent state. Clarified contract, now frozen in A5
+  as CLEANUP CONTAINMENT AND EXACTLY-ONCE RELEASE: before the commit returns,
+  any failure rolls back and releases every acquired resource exactly once,
+  with rollback/release failures captured and suppressed so the PRIMARY
+  exception propagates unmasked (repairs B2's ordering defect); after the
+  commit returns successfully and publication has completed, phase-(9)
+  teardown is infallible from the caller's perspective — exceptions are
+  captured and discarded, never propagated, never reported as activation
+  failure. Success is reported solely on completed commit + publication.
+- **N7 (hard-link / underlying-file identity bypass).** Expressible as a
+  narrow existing-contract invariant: filesystem identity (`st_dev`/`st_ino`
+  via `os.stat`, or equivalent such as `os.path.samefile`) fully detects
+  hard-link aliases and distinct paths to one inode using ordinary machinery.
+  No new trust/identity architecture is required → classified RB1/RB2
+  implementation work under the corrected contract, NOT RD1. Frozen in A5 as
+  UNDERLYING-FILE IDENTITY under the managed-directory bullet: every accepted
+  candidate and the restart-recovery target must be rejected when it
+  identifies the same underlying filesystem object as the configured user
+  database; string/path comparison alone is a defect.
+- **B3 (stray-row fail-closed)** frozen in A5 as ROLE/STATUS CONSISTENCY:
+  availability is established only through the binding role matching the
+  note's persisted resolver status; schema-permitted stray rows of the other
+  role never create availability.
+- **N1/N4 evidence sharpening** frozen into the existing A5 bullets:
+  release-symmetry/teardown evidence must cover every exit shape (normal,
+  body-exception/rollback, closed-while-pinned); cross-seam evidence must
+  assert the same snapshot's asset token + PART-A mappings + PART-B binding
+  ids together as one single-generation pairing.
+
+Amended files: `tasks/slice-7.md` (A5 only) and this record. No application
+code, tests, schema, ADR, or STATE content was modified by this resolution.
+S2b implementation convergence resumes from attempt 1 of the clarified frozen
+contract per the review-budget policy; the residuals N1/N4/N7/B2/B3 are now
+explicitly regression-tested requirements, not open questions.

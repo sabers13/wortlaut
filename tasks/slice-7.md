@@ -237,13 +237,23 @@ In `app/dictionary.py`, `app/deck.py`, `app/api.py`:
      inside that managed directory: the runtime rejects path traversal, a bare
      or embedded separator in the stored name, a symlink escaping the managed
      directory, and any candidate whose resolved parent is not the managed
-     directory. `active_dictionary_metadata.active_filename` therefore stores
-     ONLY the managed filename, never an arbitrary absolute path, and no schema
-     column is added. Restart recovery resolves `managed_dir / active_filename`,
-     revalidates that file through the accepted S2a validator, and requires its
-     SHA-256 to equal the persisted `active_sha256` exactly; a missing file, a
-     failed revalidation, or a SHA-256 mismatch FAILS CONSTRUCTION closed rather
-     than publishing an unverified generation;
+      directory. `active_dictionary_metadata.active_filename` therefore stores
+      ONLY the managed filename, never an arbitrary absolute path, and no schema
+      column is added. Restart recovery resolves `managed_dir / active_filename`,
+      revalidates that file through the accepted S2a validator, and requires its
+      SHA-256 to equal the persisted `active_sha256` exactly; a missing file, a
+      failed revalidation, or a SHA-256 mismatch FAILS CONSTRUCTION closed rather
+      than publishing an unverified generation;
+    - UNDERLYING-FILE IDENTITY (hard-link-safe R9): resolved-path string
+      equality alone is NOT file identity. Every accepted activation candidate
+      — and the restart-recovery target — must additionally be rejected when it
+      identifies the SAME UNDERLYING FILESYSTEM OBJECT as the configured user
+      database. Identity is compared by filesystem identity (`st_dev`/`st_ino`
+      via `os.stat`, or an equivalent such as `os.path.samefile`), which
+      detects hard-link aliases and distinct paths resolving to one inode;
+      string/path comparison alone is insufficient and is a defect. A
+      same-file candidate is an ACTIVATION FAILURE, and a same-file recovery
+      target is a CONSTRUCTION FAILURE;
    - GENERATION IDENTITY AND LEASE OWNERSHIP: each successful activation mints
      a new generation carrying a monotonic integer `generation_id`, its own
      validator-produced handle, and its own pin count. Generations are NEVER
@@ -311,18 +321,26 @@ In `app/dictionary.py`, `app/deck.py`, `app/api.py`:
      runtime lock; yield the inert value snapshot. Any failure before the
      counter increments closes whatever reader resource was already
      acquired and leaves generation pins and thread depth unchanged. After
-     a successful yield the release path runs exactly once: roll back and
-     close the PART-B reader transaction/connection; under the runtime lock
-     decrement each counter exactly once; close a retired generation's
-     handle exactly once when its pin count reaches zero;
-   - NO DRAIN: activation never waits for, blocks, or aborts in-flight readers,
-     and readers never block for the duration of a relink. Exclusion is
-     confined to the transition itself — the runtime lock is held ACROSS the
-     PART-B commit and the runtime publication, and every reader must take that
-     lock to pin. A reader that pins before the transition observes
-     complete-old; a reader arriving during the commit-to-publication window
-     blocks on the lock until publication and then observes complete-new. No
-     reader can observe a mixed PART-A/PART-B state. Complete-old observations
+      a successful yield the release path runs exactly once: roll back and
+      close the PART-B reader transaction/connection; under the runtime lock
+      decrement each counter exactly once; close a retired generation's
+      handle exactly once when its pin count reaches zero. Release-symmetry
+      and teardown evidence must cover EVERY exit shape — normal body
+      completion, body-exception (rollback) exit, and the runtime closed
+      while a pin is held; an evidence suite exercising only the happy path
+      is vacuous;
+    - NO DRAIN: activation never waits for, blocks, or aborts in-flight readers,
+      and readers never block for the duration of a relink. Exclusion is
+      confined to the transition itself — the runtime lock is held ACROSS the
+      PART-B commit and the runtime publication, and every reader must take that
+      lock to pin. A reader that pins before the transition observes
+      complete-old; a reader arriving during the commit-to-publication window
+      blocks on the lock until publication and then observes complete-new. No
+      reader can observe a mixed PART-A/PART-B state. Cross-seam evidence must
+      assert the SAME snapshot's asset token, PART-A value mappings, and
+      PART-B binding ids TOGETHER as one single-generation pairing; asserting
+      binding ids alone is insufficient evidence of complete-old/complete-new.
+      Complete-old observations
      stay safe on the write side through D47's own asset-token 409 round-trip.
      The runtime lock is a plain `threading.Lock`, NEVER an `RLock`, and is
      never held during candidate validation or the relink transaction. NO
@@ -391,11 +409,29 @@ In `app/dictionary.py`, `app/deck.py`, `app/api.py`:
      published — which is exactly what lets a test prove containment. This
      re-raise is test instrumentation, not the documented failure semantics of
      the activation API;
-   - FAILURE SEMANTICS ARE TOTAL: any failure before the commit returns
-     (validation, ref verification, D46 revalidation, relink computation, a
-     write error, or the commit itself) rolls the write transaction back,
-     closes the candidate handle, leaves the published generation and every
-     PART-B column untouched, and raises. No partial relink is observable;
+    - FAILURE SEMANTICS ARE TOTAL: any failure before the commit returns
+      (validation, ref verification, D46 revalidation, relink computation, a
+      write error, or the commit itself) rolls the write transaction back,
+      closes the candidate handle, leaves the published generation and every
+      PART-B column untouched, and raises. No partial relink is observable;
+    - CLEANUP CONTAINMENT AND EXACTLY-ONCE RELEASE (post-publication cleanup
+      semantics): every activation attempt owns each acquired resource exactly
+      once on every path. BEFORE THE COMMIT RETURNS: if any phase raises, the
+      write transaction is rolled back and every already-acquired resource —
+      the candidate validation handle and the dedicated write connection — is
+      released exactly once; a rollback or release failure during this cleanup
+      is captured and suppressed so it can never replace or mask the PRIMARY
+      exception, which propagates unchanged to the caller. AFTER THE COMMIT
+      RETURNS SUCCESSFULLY and publication has completed inside the runtime-lock
+      section, phase (9)'s teardown — releasing the activation lock and closing
+      the dedicated write connection — is INFALLIBLE from the caller's
+      perspective: any exception raised while releasing those resources is
+      captured and discarded; it is never propagated and never reported as an
+      activation failure, because the committed PART-B state and the published
+      generation are already authoritative and durable at that point.
+      Activation reports success based solely on the completed commit +
+      publication. Each owned resource is closed at most once per attempt on
+      every path;
    - RELINK OUTCOMES: an exact single stable-ref match relinks cached ids and
      sets `binding_status='bound'`. A disappeared direct sense clears its
      cached ids, retains its refs, and sets `binding_status='unbound'` with
@@ -411,8 +447,17 @@ In `app/dictionary.py`, `app/deck.py`, `app/api.py`:
      `'resolved'` or `'derived_compound'`. Relink writes `note.status` only for
      notes currently in {`resolved`, `derived_compound`, `needs_gloss`}; any
      other status (notably `orphaned`) is preserved while its bindings still
-     relink. A never-bound `needs_gloss` stub with no binding row is never
-     auto-promoted. `last_relinked_at` is stamped on every row the relink writes;
+      relink. A never-bound `needs_gloss` stub with no binding row is never
+      auto-promoted. `last_relinked_at` is stamped on every row the relink writes;
+    - ROLE/STATUS CONSISTENCY (stray-row fail-closed): dictionary meaning
+      availability is established ONLY through the binding role that matches
+      the note's persisted resolver status — a `'direct'` row only for a
+      `resolved` note, the ordered component vector only for a
+      `derived_compound` note. The schema permits stray rows of the other
+      role; they never create availability. A `derived_compound` note whose
+      component vector fails closed has NO dictionary meaning block even if a
+      stray bound `'direct'` row exists, and a resolved note's availability
+      ignores stray component rows;
    - ROLLBACK EVIDENCE IS WHOLE-TABLE AND PROVEN NON-VACUOUS: the mandated
      failure fixture snapshots COMPLETE rows of `note_dictionary_binding`,
      `note`, and `active_dictionary_metadata` before activation, injects a
