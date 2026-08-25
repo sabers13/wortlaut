@@ -723,7 +723,7 @@ def test_e3_acquisition_failure_at_each_step(
                 cached_statements: int = 128,
                 uri: bool = False,
             ) -> sqlite3.Connection:
-                real_conn = orig_connect(
+                inner = orig_connect(
                     database,
                     timeout=timeout,
                     detect_types=detect_types,
@@ -734,7 +734,7 @@ def test_e3_acquisition_failure_at_each_step(
                 )
                 return cast(
                     sqlite3.Connection,
-                    _FailingProxyConnection(real_conn, fail_sql, error_message),
+                    _FailingProxyConnection(inner, fail_sql, error_message),
                 )
 
             return proxy_connect
