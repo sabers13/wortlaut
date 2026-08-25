@@ -57,9 +57,13 @@ Updated only at session CLOSE from repository/gate evidence.
 
 ## Sessions since last audit
 
-* 10 (slice-6 close recorded 7; paused slice-7 session 8; governance session
-  9; this corrected-cycle session 10). **The next fresh startup HITS the ≥10
-  audit trigger: run the §Audit prompt before any dispatch.**
+* 0 (mandatory audit completed 2026-08-25 on `slice/7` @ `a340c6b`, `main`
+  @ `eb42ccf`: expected refs verified, clean tree, local/origin equality
+  after fetch, fresh full gate PASS — ruff, mypy strict 20 files, 552 tests,
+  AGENTS R1/R3/R7; STATE/reports/git-history agreement confirmed; escalation
+  counts match committed reports; all ADR cold reviews resolved; no
+  cross-file contradictions. S2b remains blocked on the B1 governance
+  consult. Next trigger: phase boundary or counter ≥ 10.)
 
 ## Blocked
 
