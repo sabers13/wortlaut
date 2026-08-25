@@ -280,3 +280,73 @@ registry, and the seam probe is referenced consistently in the ordering,
 publication, and evidence bullets. Verdict unchanged:
 IMPLEMENTABLE_WITH_BRIEF_CLARIFICATION. No ADR, application code, test,
 schema, or STATE file was modified.
+
+## Stage S2b resume round 2 — bounded repair BLOCKED; owner halt (2026-08-25)
+
+Resumed from `d6f304a` per owner instruction: exactly ONE bounded T3 repair
+reproducing candidate `4fefdda` plus corrections for exactly the nine
+independent-review findings, followed by ONE fresh independent gpt-5.6-sol
+review. Stop condition reached; S2b halted again.
+
+- Transport incident (`run_a6ea268a1f`, opencode-go/deepseek-v4-pro): the
+  worker aborted ~8 seconds in — its first tool call targeted the
+  authoritative checkout (`/home/saber/projects/flashcard`) and the opencode
+  sandbox auto-rejected the external-directory access; zero changes, no
+  candidate, no gate execution. Owner classified this a transport/sandbox
+  correction that does NOT consume the authorized attempt (failures agree:
+  dispatch-prompt defect, not implementation), and ordered re-dispatch with
+  worktree-relative-only prompt discipline (never reference or touch the
+  authoritative checkout; gate owned by the engine).
+- Bounded repair (`run_e1cfe3a7e6`, opencode-go/deepseek-v4-pro, T3,
+  max-attempts 1): candidate `5e0bd4a` on `orch/run_e1cfe3a7e6/a1`.
+  Deterministic gate PASS (authoritative venv toolchain). Scope verified by
+  the orchestrator: only `app/deck.py` (+581/−1) and
+  `tests/test_dictionary.py` (+1296) differ; `app/dictionary.py` and
+  `tests/test_deck.py` byte-identical to base; nothing outside the four-path
+  allowlist.
+- Independent adversarial review (`run_109be0d891`, codex/gpt-5.6-sol, fresh
+  cold reviewer, read-only VERDICT.md contract): **VERDICT: BLOCK**. Findings
+  2–9 verified FIXED under live defeat attempts. Finding 1 NOT FIXED, plus
+  two new blockers:
+  - **Finding 1 / N1 — read-view encapsulation.** `_ReadingView` stores the
+    live `_Generation` (in `__slots__`) and its typed accessors traverse
+    `_generation.asset`; the validator handle, raw SQLite connection,
+    `execute`, and `close` therefore remain reachable through nominally
+    private attributes. `PRAGMA query_only` can be switched back off on the
+    reachable connection, after which PART-B writes and `COMMIT` succeed —
+    defeating the read-only clause and post-commit publication infallibility.
+    The candidate's own regression test retrieves `_connection` directly.
+  - **N2 — pin-acquisition failure atomicity.** `reading()` increments
+    `generation.pins` before opening the reader connection; if
+    `sqlite3.connect` raises, the try/cleanup has not begun, leaving a
+    phantom pin (and no view). The generation can then never reach zero
+    pins: `close()` retires it but never closes it.
+  - **N3 — activation/close serialization point.** Activation performs
+    type/version checks and managed-path resolution/validation BEFORE
+    acquiring `_activation_lock`, contradicting A5's fixed total order
+    (reentrancy refusal -> activation lock -> validate candidate) and letting
+    filesystem validation race a concurrent `close()`.
+- OWNER HALT (option B, 2026-08-25, honored): no further repair dispatched;
+  candidate `5e0bd4a` NOT accepted; S3 not started. Orchestrator assessment
+  (non-authoritative): all three residuals are mechanical implementation
+  defects; none indicates the amended no-drain / path-only A5 design itself
+  is defective.
+- Retained diagnostic evidence: repair candidate `orch/run_e1cfe3a7e6/a1`
+  (`5e0bd4a`); review record `orch/run_109be0d891/a1` (VERDICT.md, `fc2b29c`);
+  all earlier S2b candidates and reviews retained. Cleanup deferred until
+  slice-7 closes.
+- NEXT SESSION MANDATE — fresh, narrowly scoped governance consultation
+  restricted to the three remaining S2b runtime-boundary issues:
+  1. **Reading-view encapsulation:** the public/yielded view must not make
+     `_Generation`, `DictionaryAsset`, SQLite connections, `close()`,
+     `execute()`, or other mutation-capable internals reachable, including
+     through nominally-private attributes.
+  2. **Pin acquisition failure atomicity:** define ordering so a failure
+     opening the PART-B read connection cannot leave a generation pin or
+     thread pin-depth increment behind.
+  3. **Activation/close serialization:** define where `_activation_lock`
+     begins so managed-path resolution/validation cannot race `close()`,
+     while preserving the same-thread reentrancy-first rule.
+  Do not reopen ADR-0004 D47 unless the consultation proves a genuine new
+  architectural decision is required. The outcome amends
+  `tasks/slice-7.md` A5 mechanics before any S2b re-dispatch.
