@@ -350,3 +350,159 @@ review. Stop condition reached; S2b halted again.
   Do not reopen ADR-0004 D47 unless the consultation proves a genuine new
   architectural decision is required. The outcome amends
   `tasks/slice-7.md` A5 mechanics before any S2b re-dispatch.
+
+## Stage S2b governance resolution — narrow runtime-boundary consult (2026-08-25)
+
+Fresh, narrowly scoped governance consultation held against `slice/7` `9deb5e5`
+(`main` unchanged at `eb42ccf`; S1 `a678f1b` and S2a `8cf6367` frozen), restricted
+to exactly the three residuals of the blocked bounded repair. Evidence base: the
+resume-round-2 record above, the retained candidate worktree
+`orch/run_e1cfe3a7e6/a1`, and its review record `orch/run_109be0d891/a1`.
+Record correction: the candidate's full SHA is
+`5e0bd4390fa401f732d72952540dc17e4a2dab52` (short form `5e0bd43`); the
+round-2 record's `5e0bd4a` is a one-character transcription slip referring to
+this same retained commit.
+
+**Verdict: IMPLEMENTABLE_WITH_NARROW_A5_CLARIFICATION.** Frozen ADR-0004 D47
+needs no amendment. None of the three residuals touches path-only activation,
+no-drain generation pinning, dual-database read pins, plain-Lock ordering, or
+post-commit publication infallibility; all three are placement defects inside
+single methods/objects where the previous A5 clarification stated an invariant
+but left its mechanical realization to worker discretion.
+
+- ROOT CAUSE (why they survived the larger A5 clarification). (1) A5 said what
+  the reading view must not EXPOSE but not what it may CONTAIN, so the worker
+  drew the boundary at the naming level — typed public accessors over private
+  slots holding the live `_Generation` and raw connection — which in Python is
+  reachability, not encapsulation (`view._generation.asset.connection` plus
+  `PRAGMA query_only=OFF` remained one attribute chain away; the candidate's
+  own regression test retrieved `_connection`). (2) A5 required pin + read
+  transaction "in one atomic step under the runtime lock" but did not
+  enumerate failure ordering inside the step; the implementation incremented
+  `generation.pins` before the first fallible operation and began cleanup one
+  statement too late, so a failed `sqlite3.connect` left a phantom pin that
+  `close()` retires but never closes. "Atomic" was implemented as "under one
+  lock", not as all-or-nothing with respect to the pin. (3) A5's total order
+  was read as governing only the expensive tail: argument checks and
+  managed-path filesystem resolution ran before `_activation_lock`, letting
+  validation race `close()` and making error precedence on a closed runtime
+  nondeterministic. The publication-time closed recheck prevented corruption
+  but not the ordering-contract violation.
+
+- RESOLUTION (amended into A5, three clauses only).
+  1. VALUE-SNAPSHOT READING VIEW: the yielded view holds only copied immutable
+     values — asset token string, the pinned generation's immutable ref-to-id
+     mappings, a materialized mapping of every `note_dictionary_binding` row's
+     cached ids keyed by `(note_id, role, component_ord)` read inside the
+     pinned deferred transaction at pin time, and an internal active flag only
+     the runtime clears. No `_Generation`, no `DictionaryAsset`, no SQLite
+     connection/cursor, no bound method or closure reaching either, no
+     reference to the runtime — transitively through every attribute.
+     Accessors raise after context exit. Future stages extend the view only by
+     materializing more immutable values under the pin. Authority is deleted,
+     not hidden: any design retaining dynamic reads must store some reference
+     chain to a connection, and every Python hiding mechanism (private slots,
+     closures via `__closure__`, proxies) stays introspectable, so copied
+     values are the smallest boundary that makes the property structural.
+     Cost: one bounded table read per `reading()` context (single-user scale).
+  2. PIN ACQUISITION IS ALL-OR-NOTHING (acquire-all-then-publish): inside the
+     runtime lock, all fallible acquisitions (connect, configure,
+     `query_only=ON`, `BEGIN DEFERRED`, materialization read) precede any pin
+     or thread-depth increment; counters increment once, infallibly, only
+     after everything succeeded; any failure closes partially acquired
+     resources exactly once and leaves counters untouched; every success has
+     exactly one matching release (counters once, reader connection once,
+     retired-generation handle exactly once at zero pins).
+  3. NORMATIVE PHASE PLACEMENT for activation/close: reentrancy refusal is the
+     ONLY pre-lock work; then activation lock -> runtime-lock closed check
+     (released before validation) -> argument/type validation ->
+     managed-path resolution -> candidate validation (one open, no reopen) ->
+     relink transaction -> [runtime lock: defensive closed recheck, commit,
+     seam probe, publish, release] -> unlock, close write connection.
+     `close()` takes the same activation lock after its own reentrancy
+     refusal, so no validation phase can race it; a closed runtime reports the
+     closed error ahead of any path/type error. Lock order activation-before-
+     runtime unchanged; readers take only the runtime lock; no-drain,
+     complete-old/complete-new, and infallible publication unchanged.
+
+- REQUIRED NEW TESTS (only these; all previously mandated S2b evidence remains
+  required): view-graph purity walker with planted-object vacuity control;
+  post-exit accessor raising; failure injection at each acquisition step
+  asserting zero pin/depth residue and no leaked connection; success-path
+  release symmetry including exactly-once retired-handle close; serialization
+  evidence that a closed runtime dominates path/type errors and that
+  concurrent `close()` and bad-argument activation block while candidate
+  validation runs inside the activation lock (bounded joins); the already
+  mandated same-thread reentrancy termination tests remain the regression
+  anchor.
+
+- SCOPE of the next S2b attempt (unchanged four-path allowlist):
+  `app/deck.py` + `tests/test_dictionary.py` carry the corrections;
+  `app/dictionary.py` and `tests/test_deck.py` expected byte-identical to
+  base. No schema change, no ADR change, no new dependency. S2b re-dispatches
+  fresh from attempt 1 of this corrected contract with independent
+  gpt-5.6-sol review, venv-linked gates, workers never touching git, and
+  worktree-relative sandbox discipline.
+
+### Pre-push narrow correction to the value-snapshot contract (2026-08-25)
+
+Owner-directed final correction before push, restricted to the
+VALUE-SNAPSHOT READING VIEW clause of A5. The verdict
+IMPLEMENTABLE_WITH_NARROW_A5_CLARIFICATION is unchanged; no other S2b
+decision is reopened; no application code, tests, ADRs, or STATE were
+touched. Because `eec4800` had NOT been pushed, the correction was folded
+into the same local governance commit (history rewrite; the consult-report
+commit is rebased on top).
+
+- REVOCABLE LIVENESS REMOVED. The first draft contradicted its own purpose:
+  it deleted authority from the yielded object yet kept a runtime-cleared
+  `_active` flag and raise-after-exit semantics. If nominally-private
+  attributes are reachable, the flag is reachable too, so revocable liveness
+  reintroduced a mutable internal boundary rather than deleting it.
+  Corrected contract: the snapshot is INERT and immutable; copied values MAY
+  remain readable after context exit as stale immutable values; after exit
+  there is no connection, no generation pin, no runtime reference, no
+  callback, no mutation capability, and no ability to perform a fresh read;
+  the context lifetime governs resource/pin ownership only. The active flag,
+  raise-after-exit, and the corresponding post-exit test are deleted.
+- PURITY WALKER MADE PRECISE. Purity is certified over STORED INSTANCE
+  PAYLOAD only — the declared slots/fields constituting the snapshot's
+  stored state and containers stored therein — not over `dir()`/
+  `__class__`/descriptor graphs, which encounter class objects and callables
+  on any ordinary Python value. Permitted payload: primitives and immutable
+  containers of primitives (plus a snapshot-construction `MappingProxyType`
+  per the copy rule below). Forbidden anywhere in stored payload: SQLite
+  connection/cursor, `DictionaryAsset`, `_Generation`, `DictionaryRuntime`,
+  any callable/function/method/closure, any mutable authority-bearing
+  object. Class objects, descriptors, and other implementation metadata are
+  outside the certified graph. The negative control injects a forbidden
+  object into the SAME payload-walker helper and proves detection.
+- SNAPSHOT MAPPINGS MUST BE COPIES. `MappingProxyType` alone is a read-only
+  view of its backing mapping. The snapshot must use `MappingProxyType` over
+  a FRESH dict built exclusively from primitive key/value data during
+  snapshot construction, or an equivalent tuple/frozenset representation,
+  sharing no backing mapping with `DictionaryAsset`, `_Generation`, the
+  runtime, or any other authority-bearing object.
+- PIN ORDERING WORDING EXACTED. Under the runtime lock: closed check ->
+  acquire/configure reader connection -> `BEGIN DEFERRED` -> materialize the
+  PART-B snapshot -> copy the PART-A value mappings -> ONLY THEN increment
+  generation pin + same-thread pin depth -> release runtime lock -> yield
+  the inert value snapshot. Any failure before the counter increments closes
+  whatever reader resource was acquired and leaves both counters unchanged.
+  Release after a successful yield: close the PART-B reader
+  transaction/connection; decrement counters exactly once under the runtime
+  lock; close a retired generation exactly once when its pin count reaches
+  zero.
+- REENTRANCY PROBE CLARIFIED. Phase (1) of the activation order inspects the
+  calling thread's OWN runtime-owned thread-local pin depth, optionally
+  under a brief runtime-lock acquire/release that fully releases before the
+  activation lock is taken; `_activation_lock` is NEVER acquired while
+  holding the runtime lock.
+- Re-read of the corrected three-clause A5 clarification found no residual
+  contradiction: no revocable state on the snapshot, no shared backing
+  mappings, walker and negative control defined over the same helper,
+  ordering clauses mutually consistent, no-drain and publication
+  infallibility untouched. Where the earlier consult report
+  (`tasks/slice-7.s2b-runtime-boundary-consult.md`) conflicts with this
+  correction (post-exit raising evidence, attribute-graph walker
+  definition), the amended A5 and this addendum govern.

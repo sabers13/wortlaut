@@ -263,9 +263,58 @@ In `app/dictionary.py`, `app/deck.py`, `app/api.py`:
      first. WAL is what makes a reader's PART-B snapshot immune to the
      activation writer's commit. Every observation therefore pairs PART-A
      content and PART-B bindings from ONE generation and completes even if
-     activation swaps generations while it is open. The view yielded to callers
-     exposes read results and `asset_token` only — never the asset, its handle,
-     or any close/release operation — and raises after context exit;
+     activation swaps generations while it is open. At pin time the runtime
+     MATERIALIZES COPIES of the reader's data inside that transaction —
+     copies of the pinned generation's ref-to-id mappings, its asset token,
+     and the cached numeric ids of every `note_dictionary_binding` row —
+     and hands the caller a VALUE-SNAPSHOT VIEW (next bullet);
+   - VALUE-SNAPSHOT READING VIEW: the object yielded by `reading()` is an
+     INERT IMMUTABLE VALUE SNAPSHOT holding ONLY copied values — the asset
+     token string, copied PART-A ref-to-id mappings, and the materialized
+     binding-id mapping keyed by `(note_id, role, component_ord)`. It
+     contains NO runtime-owned resource, NO authority, and NO callable of
+     any kind: no `_Generation`, no `DictionaryAsset`, no SQLite connection
+     or cursor, no bound method or closure reaching either, no reference to
+     the runtime, and NO mutable liveness or revocation mechanism such as
+     an active flag — the context lifetime governs RESOURCE AND PIN
+     ownership only, never the lifetime of already-copied values. Copied
+     values MAY remain readable after the context exits precisely because
+     they are stale immutable values: after exit the snapshot has no
+     connection, no generation pin, no runtime reference, no callback, no
+     mutation capability, and no ability to perform a fresh read, so it can
+     never observe anything new and complete-old/complete-new semantics are
+     unaffected. Snapshot mappings MUST be genuine copies: a
+     `MappingProxyType` over a FRESH dict built exclusively from primitive
+     key/value data during snapshot construction, or an equivalent
+     tuple/frozenset representation — never a mapping shared with
+     `DictionaryAsset`, `_Generation`, the runtime, or any other
+     authority-bearing object. Later stages extend the snapshot ONLY by
+     materializing additional immutable values under the pin — never by
+     storing resources, connections, callables, or flags. PURITY IS
+     CERTIFIED OVER STORED INSTANCE PAYLOAD ONLY: the mechanical regression
+     walker inspects the declared slots/fields constituting the snapshot's
+     stored state and recursively inspects containers stored in those
+     fields; permitted payload values are primitives and immutable
+     containers of primitives (plus a snapshot-construction
+     `MappingProxyType` as above); FORBIDDEN anywhere in stored payload are
+     SQLite connections/cursors, `DictionaryAsset`, `_Generation`,
+     `DictionaryRuntime`, any callable/function/method/closure, and any
+     mutable authority-bearing object. Class objects, descriptors, and
+     other Python implementation metadata are NOT part of the certified
+     payload graph. The negative control injects a forbidden object into
+     the SAME payload-walker helper and proves the helper detects it;
+   - PIN ACQUISITION IS ALL-OR-NOTHING: inside the runtime lock,
+     `reading()` executes EXACTLY this order — closed check; acquire and
+     configure the reader connection; `BEGIN DEFERRED`; materialize the
+     PART-B snapshot; copy the PART-A value mappings; ONLY THEN increment
+     the generation pin and the calling thread's pin depth; release the
+     runtime lock; yield the inert value snapshot. Any failure before the
+     counter increments closes whatever reader resource was already
+     acquired and leaves generation pins and thread depth unchanged. After
+     a successful yield the release path runs exactly once: roll back and
+     close the PART-B reader transaction/connection; under the runtime lock
+     decrement each counter exactly once; close a retired generation's
+     handle exactly once when its pin count reaches zero;
    - NO DRAIN: activation never waits for, blocks, or aborts in-flight readers,
      and readers never block for the duration of a relink. Exclusion is
      confined to the transition itself — the runtime lock is held ACROSS the
@@ -295,15 +344,29 @@ In `app/dictionary.py`, `app/deck.py`, `app/api.py`:
      `is_alive()`/`join`-completion assertion. A thread that merely calls
      activation while a DIFFERENT thread holds the pin does not own the pin and
      proves nothing about reentrancy;
-   - TRANSACTION AND PUBLICATION ORDERING is fixed and total: reentrancy refusal
-     -> serialize activations on a SEPARATE activation lock -> validate the
-     candidate (one open, no reopen) -> `BEGIN IMMEDIATE` on a dedicated write
-     connection -> compute and write every relink mutation -> construct the new
-     generation completely -> [take runtime lock: commit, then the private
-     test-only seam probe if one is installed, then publish and retire the
-     incumbent, then release] -> close the write connection. Lock order is
-     activation lock before runtime lock, never the reverse; readers take only
-     the runtime lock;
+   - TRANSACTION AND PUBLICATION ORDERING is fixed and total, and the
+     placement of every phase is normative: (1) same-thread reentrancy
+     refusal — the ONLY work before the activation lock; (2) acquire the
+     SEPARATE activation lock; (3) under the runtime lock verify not closed,
+     then release the runtime lock (it is never held during validation);
+     (4) argument/type validation; (5) managed-path resolution and
+     validation; (6) validate the candidate (one open, no reopen);
+     (7) `BEGIN IMMEDIATE` on a dedicated write connection, compute and
+     write every relink mutation, construct the new generation completely;
+     (8) [take runtime lock: defensive closed recheck, commit, then the
+     private test-only seam probe if one is installed, then publish and
+     retire the incumbent, then release]; (9) release the activation lock
+     and close the write connection. No runtime-owned work may run between
+     phases (1) and (2): argument checks and filesystem resolution happen
+     INSIDE the activation-lock section so they can never race `close()`,
+     which takes the same activation lock after its own reentrancy refusal.
+     Phase (1) is implemented by inspecting the calling thread's OWN
+     runtime-owned thread-local pin depth, optionally under a brief
+     runtime-lock acquire/release that FULLY RELEASES before phase (2);
+     `_activation_lock` is NEVER acquired while holding the runtime lock.
+     Once closed, activation reports the closed error deterministically,
+     ahead of any path or type error. Lock order is activation lock before
+     runtime lock, never the reverse; readers take only the runtime lock;
    - AFTER THE COMMIT RETURNS, PUBLICATION IS UNCONDITIONAL AND INFALLIBLE:
      in production there is NOTHING between a successful commit and publication
      except deterministic in-memory state transition. The new generation is
