@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, cast
 
 import pytest
 
@@ -678,19 +678,17 @@ def test_e3_acquisition_failure_at_each_step(
         assert runtime._current_generation.pins == 0
         assert getattr(runtime._thread_local, "depth", 0) == 0
 
-        # Step c: Inject failure during BEGIN DEFERRED
-        monkeypatch.undo()
-
+        # Helpers for Step c and Step d: proxy connection failing specific SQL
         class _FailingProxyConnection:
             def __init__(
                 self,
                 inner: sqlite3.Connection,
                 fail_sql: Callable[[str], bool],
-                error_message: str,
+                error_msg: str,
             ) -> None:
                 self._inner = inner
                 self._fail_sql = fail_sql
-                self._error_message = error_message
+                self._error_msg = error_msg
                 self.row_factory: object | None = None
 
             def execute(
@@ -699,7 +697,7 @@ def test_e3_acquisition_failure_at_each_step(
                 parameters: tuple[int | str | float | bytes | None, ...] = (),
             ) -> sqlite3.Cursor:
                 if self._fail_sql(sql):
-                    raise sqlite3.OperationalError(self._error_message)
+                    raise sqlite3.OperationalError(self._error_msg)
                 return self._inner.execute(sql, parameters)
 
             def rollback(self) -> None:
@@ -710,10 +708,8 @@ def test_e3_acquisition_failure_at_each_step(
 
         def make_proxy_connector(
             fail_sql: Callable[[str], bool],
-            error_message: str,
+            error_msg: str,
         ) -> Callable[..., sqlite3.Connection]:
-            from typing import cast
-
             def proxy_connect(
                 database: str | bytes | Path | os.PathLike[str] | os.PathLike[bytes],
                 timeout: float = 5.0,
@@ -732,13 +728,12 @@ def test_e3_acquisition_failure_at_each_step(
                     cached_statements=cached_statements,
                     uri=uri,
                 )
-                return cast(
-                    sqlite3.Connection,
-                    _FailingProxyConnection(inner, fail_sql, error_message),
-                )
+                return cast(sqlite3.Connection, _FailingProxyConnection(inner, fail_sql, error_msg))
 
             return proxy_connect
 
+        # Step c: Inject failure during BEGIN DEFERRED
+        monkeypatch.undo()
         monkeypatch.setattr(
             sqlite3,
             "connect",
