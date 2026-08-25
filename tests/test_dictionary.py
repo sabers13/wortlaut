@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal, cast
+from typing import Literal
 
 import pytest
 
@@ -678,6 +678,9 @@ def test_e3_acquisition_failure_at_each_step(
         assert runtime._current_generation.pins == 0
         assert getattr(runtime._thread_local, "depth", 0) == 0
 
+        # Step c: Inject failure during BEGIN DEFERRED
+        monkeypatch.undo()
+
         class _FailingProxyConnection:
             def __init__(
                 self,
@@ -705,10 +708,12 @@ def test_e3_acquisition_failure_at_each_step(
             def close(self) -> None:
                 self._inner.close()
 
-        def make_failing_connector(
+        def make_proxy_connector(
             fail_sql: Callable[[str], bool],
             error_message: str,
         ) -> Callable[..., sqlite3.Connection]:
+            from typing import cast
+
             def proxy_connect(
                 database: str | bytes | Path | os.PathLike[str] | os.PathLike[bytes],
                 timeout: float = 5.0,
@@ -718,7 +723,7 @@ def test_e3_acquisition_failure_at_each_step(
                 cached_statements: int = 128,
                 uri: bool = False,
             ) -> sqlite3.Connection:
-                inner = orig_connect(
+                real_conn = orig_connect(
                     database,
                     timeout=timeout,
                     detect_types=detect_types,
@@ -729,17 +734,15 @@ def test_e3_acquisition_failure_at_each_step(
                 )
                 return cast(
                     sqlite3.Connection,
-                    _FailingProxyConnection(inner, fail_sql, error_message),
+                    _FailingProxyConnection(real_conn, fail_sql, error_message),
                 )
 
             return proxy_connect
 
-        # Step c: Inject failure during BEGIN DEFERRED
-        monkeypatch.undo()
         monkeypatch.setattr(
             sqlite3,
             "connect",
-            make_failing_connector(
+            make_proxy_connector(
                 lambda sql: sql == "BEGIN DEFERRED",
                 "injected begin deferred failure",
             ),
@@ -755,7 +758,7 @@ def test_e3_acquisition_failure_at_each_step(
         monkeypatch.setattr(
             sqlite3,
             "connect",
-            make_failing_connector(
+            make_proxy_connector(
                 lambda sql: "SELECT note_id, role" in sql,
                 "injected part-b read failure",
             ),
