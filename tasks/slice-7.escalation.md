@@ -624,3 +624,49 @@ code, tests, schema, ADR, or STATE content was modified by this resolution.
 S2b implementation convergence resumes from attempt 1 of the clarified frozen
 contract per the review-budget policy; the residuals N1/N4/N7/B2/B3 are now
 explicitly regression-tested requirements, not open questions.
+
+## Stage S2b implementation convergence — ACCEPTED (2026-08-25)
+
+Executed by the same fresh orchestrator session that resolved B1/N7 above,
+against base `4c6e533`. Routing constraint changed mid-session by owner
+directive: GPT quota exhausted — only Gemini (`antigravity/gemini-3.7-flash`)
+and ox (`opencode/opencode-go/ox-alpha-free`) routes permitted for the
+remainder of the slice.
+
+- Attempt 1 (`run_6dbab25275`, gemini-3.7-flash): candidate `c04e0df`;
+  gate FAIL — four mechanical mypy --strict errors in new test code only.
+- Attempt 2 (§5 Failure-1 same-tier retry, `run_c0ae2529be`, seeded from
+  `c04e0df`): candidate `22e9b14`; mypy PASS; gate FAIL — six pytest failures.
+  Orchestrator diagnosis against the frozen contract classified ALL SIX as
+  test-harness/fixture defects plus two small implementation conformance
+  deviations (off-contract 3-tuple snapshot binding values; unmandated silent
+  reader-connect fallback defeating E3 injection). No persistent-state or
+  concurrency defect.
+- §5.3 tightened re-dispatch (`run_fb0aed85ed`, seeded from `22e9b14`, with
+  per-defect directives R-A/R-B/T-1..T-5): candidate `02d458e`; 570/571 — one
+  residual harness defect surfaced (E3 step-c patched immutable
+  `sqlite3.Connection`), previously masked by the step-a failure.
+- Final convergence fix (`run_4416ff99a9`, seeded from `02d458e`, E3 proxy
+  directive only): candidate `bbf858e` — full gate PASS (ruff, mypy strict 20
+  files, 571 tests, AGENTS checks). Scope verified: only `app/deck.py` and
+  `tests/test_dictionary.py` differ from base; `app/dictionary.py` and
+  `tests/test_deck.py` byte-identical.
+- Independent adversarial Review #1: three opencode/ox-alpha-free dispatches
+  failed at TRANSPORT level (repeated `Unexpected server error`, zero
+  candidate each time — attempts not consumed); with GPT quota-banned and ox
+  down, review fell back to a FRESH COLD `antigravity/gemini-3.7-flash`
+  session (`run_7a32b6614b/a1`, VERDICT.md committed `04b07c6`) under an
+  explicit extra-skepticism protocol. **VERDICT: PASS** — zero RB1/RB2/RB3/
+  RD1; all E1–E15 independently defeat-tested; regression sweep confirms
+  S1/S2a preservation and byte-identity; one trivial RN1 (non-blocking).
+  Same-family fallback is a disclosed deviation from the SHOULD-level
+  cross-family preference, forced by the outage + owner quota ban; the
+  mandatory WORKFLOW §6 T3 full-diff review remains ahead and will restore
+  cross-family coverage if ox recovers.
+- **S2b explicitly accepted**: `orch accept run_4416ff99a9` integrated
+  candidate `bbf858efe72caa636a6085cbaaa0302571318b29` onto `slice/7`;
+  post-integration authoritative gate PASSED. Residuals N1/N4/N7/B2/B3 and
+  B1 are closed by the accepted implementation and its evidence suite.
+- Next: S3 rendering (A4) → S4 audio (A6) → S5 app factory/API/guards (A7) →
+  S6 executable checks + report (A8/A10) → mandatory full-diff T3 review over
+  `main...slice/7` → slice-7 acceptance → mechanical closure.
