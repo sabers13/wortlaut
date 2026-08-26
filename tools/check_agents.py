@@ -3,7 +3,10 @@
 Enforces:
 - R1: Runtime LLM SDK prohibition (pyproject.toml runtime deps and app/ imports)
 - R3: Build-cache keys include resolver hash (tools.resolver_hash canonical helper)
+- R6: review_log append-only schema constraints and zero UPDATE/DELETE mutations in app/
 - R7: Zero lecture-app coupling (no imports or dependencies on lecture app)
+- R12: Browser-facing loopback origin/host guards and X-Flashcards-Request non-GET coverage
+- R13: Durable semantic identity validation on activation and stale-token HTTP 409 rejection
 """
 
 from __future__ import annotations
@@ -385,6 +388,85 @@ def check_r3(repo_root: Path) -> list[str]:
     return violations
 
 
+def check_r6(repo_root: Path) -> list[str]:
+    """Check AGENTS Rule R6: review_log is append-only and logs the raw confidence.
+
+    Enforces:
+    1. reference/schema.sql enforces confidence INTEGER NOT NULL CHECK (1..5)
+       and rating INTEGER NOT NULL CHECK (1..4) on review_log.
+    2. Every file under app/ contains zero UPDATE review_log or DELETE FROM review_log SQL.
+    """
+    violations: list[str] = []
+
+    # 1. Check schema constraints in reference/schema.sql
+    schema_path = repo_root / "reference" / "schema.sql"
+    if not schema_path.exists() or not schema_path.is_file():
+        violations.append(f"R6 fail-closed: Missing required schema file: {schema_path}")
+    else:
+        try:
+            schema_sql = schema_path.read_text(encoding="utf-8")
+            table_match = re.search(
+                r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?review_log\s*\((.*?)\);",
+                schema_sql,
+                re.DOTALL | re.IGNORECASE,
+            )
+            if not table_match:
+                violations.append(
+                    "R6 violation: reference/schema.sql missing CREATE TABLE review_log definition"
+                )
+            else:
+                table_body = table_match.group(1)
+
+                # Check confidence column: INTEGER NOT NULL + CHECK (confidence BETWEEN 1 AND 5)
+                conf_match = re.search(
+                    r"\bconfidence\s+INTEGER\s+NOT\s+NULL\b.*?\bCHECK\s*\(\s*confidence\s+(?:BETWEEN\s+1\s+AND\s+5|(?:>=\s*1\s+AND\s+confidence\s*<=\s*5))\s*\)",
+                    table_body,
+                    re.IGNORECASE | re.DOTALL,
+                )
+                if not conf_match:
+                    violations.append(
+                        "R6 violation: reference/schema.sql review_log table missing "
+                        "'confidence INTEGER NOT NULL CHECK (confidence BETWEEN 1 AND 5)'"
+                    )
+
+                # Check rating column: INTEGER NOT NULL + CHECK (rating BETWEEN 1 AND 4)
+                rating_match = re.search(
+                    r"\brating\s+INTEGER\s+NOT\s+NULL\b.*?\bCHECK\s*\(\s*rating\s+(?:BETWEEN\s+1\s+AND\s+4|(?:>=\s*1\s+AND\s+rating\s*<=\s*4))\s*\)",
+                    table_body,
+                    re.IGNORECASE | re.DOTALL,
+                )
+                if not rating_match:
+                    violations.append(
+                        "R6 violation: reference/schema.sql review_log table missing "
+                        "'rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 4)'"
+                    )
+        except Exception as e:
+            violations.append(f"R6 fail-closed: Failed to read schema file: {e}")
+
+    # 2. Scan every Python file under app/ for SQL UPDATE or DELETE on review_log
+    try:
+        app_files = get_app_python_files(repo_root)
+        mutation_pattern = re.compile(
+            r"\b(UPDATE\s+review_log|DELETE\s+FROM\s+review_log)\b",
+            re.IGNORECASE,
+        )
+        for py_file in app_files:
+            try:
+                content = py_file.read_text(encoding="utf-8")
+                matches = mutation_pattern.findall(content)
+                if matches:
+                    violations.append(
+                        f"R6 violation: Forbidden SQL mutation on review_log ({matches[0]}) "
+                        f"in {py_file}"
+                    )
+            except Exception as e:
+                violations.append(f"R6 fail-closed: Failed to read {py_file}: {e}")
+    except Exception as e:
+        violations.append(f"R6 fail-closed: {e}")
+
+    return violations
+
+
 def check_r7(repo_root: Path) -> list[str]:
     """Check AGENTS Rule R7: Zero coupling to the lecture app.
 
@@ -423,12 +505,167 @@ def check_r7(repo_root: Path) -> list[str]:
     return violations
 
 
+def check_r12(repo_root: Path) -> list[str]:
+    """Check AGENTS Rule R12: Browser-facing localhost requests are origin/host guarded.
+
+    Enforces:
+    1. create_app rejects wildcard '*' cors origins at creation.
+    2. app/api.py has structural host-and-origin security middleware.
+    3. X-Flashcards-Request guard covers every non-GET /vocab route by parsing the route table.
+    """
+    violations: list[str] = []
+    api_path = repo_root / "app" / "api.py"
+    if not api_path.exists() or not api_path.is_file():
+        violations.append(f"R12 fail-closed: Required API file missing: {api_path}")
+        return violations
+
+    try:
+        source = api_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(api_path))
+    except Exception as e:
+        violations.append(f"R12 fail-closed: Failed to read/parse {api_path}: {e}")
+        return violations
+
+    # 1. Wildcard origin rejection check in create_app
+    has_wildcard_rejection = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "create_app":
+            func_segment = ast.get_source_segment(source, node) or ""
+            if (
+                re.search(r'["\']\*["\']\s+in\b', func_segment)
+                or re.search(r'==\s+["\']\*["\']', func_segment)
+                or re.search(r"wildcard origin is forbidden", func_segment, re.IGNORECASE)
+            ):
+                has_wildcard_rejection = True
+            break
+
+    if not has_wildcard_rejection:
+        violations.append(
+            "R12 violation: create_app does not reject wildcard '*' in cors_origins"
+        )
+
+    # 2. Structural host-and-origin middleware check
+    has_host_guard = (
+        "_is_loopback_host" in source
+        or ("127.0.0.1" in source and "localhost" in source)
+    )
+    has_origin_guard = "cors_origins" in source and "origin" in source.lower()
+    has_middleware_registration = (
+        "add_middleware" in source and "BrowserSecurityMiddleware" in source
+    )
+    if not (has_host_guard and has_origin_guard and has_middleware_registration):
+        violations.append(
+            "R12 violation: app/api.py missing structural host/origin security middleware"
+        )
+
+    # 3. Route table parsing and X-Flashcards-Request guard coverage
+    routes: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            for dec in node.decorator_list:
+                if isinstance(dec, ast.Call):
+                    func = dec.func
+                    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                        if func.value.id == "app" and func.attr in (
+                            "get",
+                            "post",
+                            "delete",
+                            "put",
+                            "patch",
+                        ):
+                            method = func.attr.upper()
+                            if dec.args and isinstance(dec.args[0], ast.Constant):
+                                path_val = str(dec.args[0].value)
+                                routes.append((method, path_val))
+
+    non_get_vocab_routes = [
+        (m, p) for m, p in routes if p.startswith("/vocab") and m != "GET"
+    ]
+    if not non_get_vocab_routes:
+        violations.append("R12 violation: No non-GET /vocab routes found in app/api.py")
+    else:
+        has_custom_header_guard = (
+            "x-flashcards-request" in source.lower()
+            and re.search(
+                r'path\.startswith\(["\']/vocab["\']\)\s+and\s+request\.method\s*!=\s*["\']GET["\']',
+                source,
+            )
+            is not None
+        )
+        if not has_custom_header_guard:
+            violations.append(
+                "R12 violation: Non-GET /vocab route table not fully covered by "
+                "X-Flashcards-Request guard in middleware"
+            )
+
+    return violations
+
+
+def check_r13(repo_root: Path) -> list[str]:
+    """Check AGENTS Rule R13: Dictionary numeric IDs are never durable semantic identity.
+
+    Enforces:
+    1. DictionaryRuntime in app/deck.py validates candidate dictionary on activation
+       and validates/relinks using durable semantic refs (lemma_semantic_ref, sense_semantic_ref).
+    2. app/api.py rejects stale picker asset tokens with HTTP 409 Conflict in note capture.
+    """
+    violations: list[str] = []
+
+    # 1. Verify app/deck.py activation and relink logic
+    deck_path = repo_root / "app" / "deck.py"
+    if not deck_path.exists() or not deck_path.is_file():
+        violations.append(f"R13 fail-closed: Required deck file missing: {deck_path}")
+    else:
+        try:
+            deck_source = deck_path.read_text(encoding="utf-8")
+            has_activate = "def activate_dictionary" in deck_source
+            has_candidate_validation = "validate_candidate_dictionary" in deck_source
+            has_semantic_ref_relink = (
+                "lemma_semantic_ref" in deck_source
+                and "sense_semantic_ref" in deck_source
+                and "binding_status" in deck_source
+            )
+
+            if not (has_activate and has_candidate_validation and has_semantic_ref_relink):
+                violations.append(
+                    "R13 violation: DictionaryRuntime activation missing candidate validation "
+                    "or stable semantic ref relink logic in app/deck.py"
+                )
+        except Exception as e:
+            violations.append(f"R13 fail-closed: Failed to read/parse {deck_path}: {e}")
+
+    # 2. Verify app/api.py stale asset token 409 rejection logic
+    api_path = repo_root / "app" / "api.py"
+    if not api_path.exists() or not api_path.is_file():
+        violations.append(f"R13 fail-closed: Required API file missing: {api_path}")
+    else:
+        try:
+            api_source = api_path.read_text(encoding="utf-8")
+            has_token_check = (
+                "asset_token" in api_source
+                and ("HTTP_409_CONFLICT" in api_source or "409" in api_source)
+                and "picker_token != active_token" in api_source
+            )
+            if not has_token_check:
+                violations.append(
+                    "R13 violation: app/api.py missing stale-token HTTP 409 rejection logic "
+                    "in note capture endpoint"
+                )
+        except Exception as e:
+            violations.append(f"R13 fail-closed: Failed to read/parse {api_path}: {e}")
+
+    return violations
+
+
 def check_all(repo_root: Path) -> list[str]:
-    """Run all scaffolded executable rule checks (R1, R3, R7)."""
+    """Run all scaffolded executable rule checks (R1, R3, R6, R7, R12, R13)."""
     violations: list[str] = []
     violations.extend(check_r1(repo_root))
     violations.extend(check_r3(repo_root))
+    violations.extend(check_r6(repo_root))
     violations.extend(check_r7(repo_root))
+    violations.extend(check_r12(repo_root))
+    violations.extend(check_r13(repo_root))
     return violations
 
 
@@ -445,10 +682,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     sys.stdout.write(
-        "AGENTS checks passed: R1 (runtime LLM), R3 (resolver cache key), R7 (lecture coupling)\n"
+        "AGENTS checks passed: R1 (runtime LLM), R3 (resolver cache key), "
+        "R6 (review log append-only), R7 (lecture coupling), "
+        "R12 (browser origin/host guards), R13 (durable semantic identity)\n"
     )
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+

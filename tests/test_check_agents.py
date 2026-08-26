@@ -13,7 +13,10 @@ from tools.check_agents import (
     check_all,
     check_r1,
     check_r3,
+    check_r6,
     check_r7,
+    check_r12,
+    check_r13,
     main,
     normalize_package_name,
 )
@@ -336,6 +339,332 @@ def test_fail_closed_on_syntax_error_in_app(tmp_path: Path) -> None:
     assert any("fail-closed" in v and "broken.py" in v for v in violations)
 
 
+# --- R6 Tests ---
+
+
+def _setup_valid_r6_project(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "reference"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    (ref_dir / "schema.sql").write_text(
+        """
+        CREATE TABLE IF NOT EXISTS review_log (
+          id             INTEGER PRIMARY KEY,
+          card_id        INTEGER NOT NULL REFERENCES card(id) ON DELETE RESTRICT,
+          confidence     INTEGER NOT NULL CHECK (confidence BETWEEN 1 AND 5),
+          rating         INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 4),
+          scheduled_days REAL NOT NULL,
+          elapsed_days   REAL NOT NULL,
+          reviewed_at    TEXT NOT NULL
+        );
+        """,
+        encoding="utf-8",
+    )
+    app_dir = tmp_path / "app"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    (app_dir / "deck.py").write_text(
+        """
+        def log_review(conn, card_id, confidence, rating):
+            conn.execute(
+                "INSERT INTO review_log (card_id, confidence, rating) VALUES (?, ?, ?)",
+                (card_id, confidence, rating),
+            )
+        """,
+        encoding="utf-8",
+    )
+
+
+def test_r6_clean_repo_passes() -> None:
+    """The repository reference/schema.sql and app/ pass R6 cleanly."""
+    assert check_r6(REPO_ROOT) == []
+
+
+def test_r6_clean_project_passes(tmp_path: Path) -> None:
+    _setup_valid_r6_project(tmp_path)
+    assert check_r6(tmp_path) == []
+
+
+def test_r6_detects_missing_schema_file(tmp_path: Path) -> None:
+    app_dir = tmp_path / "app"
+    app_dir.mkdir(parents=True)
+    (app_dir / "deck.py").write_text("pass\n", encoding="utf-8")
+    violations = check_r6(tmp_path)
+    assert len(violations) >= 1
+    assert any("R6 fail-closed" in v and "Missing required schema file" in v for v in violations)
+
+
+def test_r6_detects_missing_table(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "reference"
+    ref_dir.mkdir(parents=True)
+    (ref_dir / "schema.sql").write_text(
+        "CREATE TABLE deck (id INTEGER PRIMARY KEY);", encoding="utf-8"
+    )
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    violations = check_r6(tmp_path)
+    assert len(violations) >= 1
+    assert any("R6 violation" in v and "missing CREATE TABLE review_log" in v for v in violations)
+
+
+def test_r6_detects_missing_confidence_constraint(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "reference"
+    ref_dir.mkdir(parents=True)
+    (ref_dir / "schema.sql").write_text(
+        """
+        CREATE TABLE review_log (
+          id INTEGER PRIMARY KEY,
+          confidence INTEGER NOT NULL,
+          rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 4)
+        );
+        """,
+        encoding="utf-8",
+    )
+    violations = check_r6(tmp_path)
+    assert len(violations) >= 1
+    assert any("R6 violation" in v and "confidence BETWEEN 1 AND 5" in v for v in violations)
+
+
+def test_r6_detects_missing_rating_constraint(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "reference"
+    ref_dir.mkdir(parents=True)
+    (ref_dir / "schema.sql").write_text(
+        """
+        CREATE TABLE review_log (
+          id INTEGER PRIMARY KEY,
+          confidence INTEGER NOT NULL CHECK (confidence BETWEEN 1 AND 5),
+          rating INTEGER NOT NULL
+        );
+        """,
+        encoding="utf-8",
+    )
+    violations = check_r6(tmp_path)
+    assert len(violations) >= 1
+    assert any("R6 violation" in v and "rating BETWEEN 1 AND 4" in v for v in violations)
+
+
+@pytest.mark.parametrize(
+    "mutation_sql",
+    [
+        'conn.execute("UPDATE review_log SET rating = 1 WHERE id = ?", (log_id,))',
+        'conn.execute("DELETE FROM review_log WHERE card_id = ?", (card_id,))',
+        'conn.execute("update review_log set confidence = 5")',
+        'conn.execute("delete from review_log where id = 1")',
+    ],
+)
+def test_r6_detects_mutation_queries_in_app(tmp_path: Path, mutation_sql: str) -> None:
+    _setup_valid_r6_project(tmp_path)
+    (tmp_path / "app" / "bad.py").write_text(
+        f"def bad(conn):\n    {mutation_sql}\n", encoding="utf-8"
+    )
+    violations = check_r6(tmp_path)
+    assert len(violations) >= 1
+    assert any(
+        "R6 violation" in v and "Forbidden SQL mutation on review_log" in v for v in violations
+    )
+
+
+# --- R12 Tests ---
+
+
+def _setup_valid_r12_project(tmp_path: Path) -> None:
+    app_dir = tmp_path / "app"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    (app_dir / "api.py").write_text(
+        '''
+from fastapi import FastAPI, Request
+from starlette.middleware.base import BaseHTTPMiddleware
+
+def _is_loopback_host(host: str | None) -> bool:
+    return host in ("127.0.0.1", "localhost", "[::1]")
+
+class BrowserSecurityMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, cors_origins):
+        super().__init__(app)
+        self.cors_origins = cors_origins
+
+    async def dispatch(self, request: Request, call_next):
+        host = request.headers.get("host")
+        if not _is_loopback_host(host):
+            return None
+        origin = request.headers.get("origin")
+        if origin and origin not in self.cors_origins:
+            return None
+        path = request.url.path
+        if path.startswith("/vocab") and request.method != "GET":
+            if request.headers.get("x-flashcards-request") != "1":
+                return None
+        return await call_next(request)
+
+def create_app(cors_origins):
+    for orig in cors_origins:
+        if "*" in orig:
+            raise ValueError("Wildcard origin is forbidden")
+    app = FastAPI()
+    app.add_middleware(BrowserSecurityMiddleware, cors_origins=set(cors_origins))
+
+    @app.post("/vocab/notes")
+    def capture_note():
+        pass
+
+    return app
+''',
+        encoding="utf-8",
+    )
+
+
+def test_r12_clean_repo_passes() -> None:
+    """The repository app/api.py passes R12 cleanly."""
+    assert check_r12(REPO_ROOT) == []
+
+
+def test_r12_clean_project_passes(tmp_path: Path) -> None:
+    _setup_valid_r12_project(tmp_path)
+    assert check_r12(tmp_path) == []
+
+
+def test_r12_detects_missing_api_file(tmp_path: Path) -> None:
+    violations = check_r12(tmp_path)
+    assert len(violations) >= 1
+    assert any("R12 fail-closed" in v and "Required API file missing" in v for v in violations)
+
+
+def test_r12_detects_wildcard_origin_acceptance(tmp_path: Path) -> None:
+    _setup_valid_r12_project(tmp_path)
+    api_source = (tmp_path / "app" / "api.py").read_text(encoding="utf-8")
+    assert 'if "*" in orig:' in api_source
+    bad_source = api_source.replace(
+        '        if "*" in orig:\n            raise ValueError("Wildcard origin is forbidden")',
+        "        pass",
+    )
+    assert 'if "*" in orig:' not in bad_source
+    (tmp_path / "app" / "api.py").write_text(bad_source, encoding="utf-8")
+    violations = check_r12(tmp_path)
+    assert len(violations) >= 1
+    assert any(
+        "R12 violation" in v and "does not reject wildcard '*'" in v for v in violations
+    )
+
+
+def test_r12_detects_missing_middleware_marker(tmp_path: Path) -> None:
+    _setup_valid_r12_project(tmp_path)
+    api_source = (tmp_path / "app" / "api.py").read_text(encoding="utf-8")
+    bad_source = api_source.replace(
+        "app.add_middleware(BrowserSecurityMiddleware, cors_origins=set(cors_origins))",
+        "# no middleware",
+    )
+    (tmp_path / "app" / "api.py").write_text(bad_source, encoding="utf-8")
+    violations = check_r12(tmp_path)
+    assert len(violations) >= 1
+    assert any(
+        "R12 violation" in v and "missing structural host/origin security middleware" in v
+        for v in violations
+    )
+
+
+def test_r12_detects_uncovered_non_get_route(tmp_path: Path) -> None:
+    _setup_valid_r12_project(tmp_path)
+    api_source = (tmp_path / "app" / "api.py").read_text(encoding="utf-8")
+    bad_source = api_source.replace(
+        'request.headers.get("x-flashcards-request")',
+        'request.headers.get("x-other-header")',
+    )
+    (tmp_path / "app" / "api.py").write_text(bad_source, encoding="utf-8")
+    violations = check_r12(tmp_path)
+    assert len(violations) >= 1
+    assert any(
+        "R12 violation" in v and "X-Flashcards-Request guard" in v for v in violations
+    )
+
+
+# --- R13 Tests ---
+
+
+def _setup_valid_r13_project(tmp_path: Path) -> None:
+    app_dir = tmp_path / "app"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    (app_dir / "deck.py").write_text(
+        '''
+def validate_candidate_dictionary(path):
+    pass
+
+class DictionaryRuntime:
+    def activate_dictionary(self, path):
+        asset = validate_candidate_dictionary(path)
+        self._relink_part_b(None, asset, "now")
+
+    def _relink_part_b(self, conn, asset, now_text):
+        # references lemma_semantic_ref and sense_semantic_ref
+        # sets binding_status
+        pass
+''',
+        encoding="utf-8",
+    )
+    (app_dir / "api.py").write_text(
+        '''
+from fastapi import FastAPI, status
+from fastapi.responses import JSONResponse
+
+def register_routes(app, runtime):
+    @app.post("/vocab/notes")
+    def capture_note(picker_token: str):
+        active_token = runtime.asset_token
+        if picker_token != active_token:
+            return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={})
+''',
+        encoding="utf-8",
+    )
+
+
+def test_r13_clean_repo_passes() -> None:
+    """The repository app/deck.py and app/api.py pass R13 cleanly."""
+    assert check_r13(REPO_ROOT) == []
+
+
+def test_r13_clean_project_passes(tmp_path: Path) -> None:
+    _setup_valid_r13_project(tmp_path)
+    assert check_r13(tmp_path) == []
+
+
+def test_r13_detects_missing_activation_ref_validation(tmp_path: Path) -> None:
+    _setup_valid_r13_project(tmp_path)
+    (tmp_path / "app" / "deck.py").write_text(
+        '''
+class DictionaryRuntime:
+    def activate_dictionary(self, path):
+        pass
+''',
+        encoding="utf-8",
+    )
+    violations = check_r13(tmp_path)
+    assert len(violations) >= 1
+    assert any(
+        "R13 violation" in v
+        and "missing candidate validation or stable semantic ref relink logic" in v
+        for v in violations
+    )
+
+
+def test_r13_detects_missing_stale_token_409_rejection(tmp_path: Path) -> None:
+    _setup_valid_r13_project(tmp_path)
+    (tmp_path / "app" / "api.py").write_text(
+        '''
+def register_routes(app, runtime):
+    @app.post("/vocab/notes")
+    def capture_note():
+        pass
+''',
+        encoding="utf-8",
+    )
+    violations = check_r13(tmp_path)
+    assert len(violations) >= 1
+    assert any(
+        "R13 violation" in v and "missing stale-token HTTP 409 rejection logic" in v
+        for v in violations
+    )
+
+
+# --- CLI and Generic Fail-Closed Tests ---
+
+
 def test_cli_success(capsys: pytest.CaptureFixture[str]) -> None:
     """CLI returns 0 on clean repository."""
     exit_code = main([str(REPO_ROOT)])
@@ -366,3 +695,4 @@ def test_cli_subprocess_invocation() -> None:
     )
     assert res.returncode == 0
     assert "AGENTS checks passed" in res.stdout
+
