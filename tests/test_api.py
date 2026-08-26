@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import io
 import sqlite3
+import threading
 import wave
 from collections.abc import Generator
 from hashlib import sha256
@@ -30,7 +31,8 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api import create_app
+from app.api import _render_input_from_observation, create_app
+from app.render import render_card
 from tools.build_dict import compute_lemma_semantic_ref, compute_sense_semantic_ref
 
 
@@ -1429,3 +1431,516 @@ def test_anki_export_sanitization(
     assert record_2[1] == ""  # Back face is empty
     tags_field = record_2[5]
     assert "needs_gloss" in tags_field
+
+
+def test_post_activation_consistency_regression(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """Post-activation consistency regression suite.
+
+    Builds dictionary A and dictionary B in a managed directory.
+    Creates the app with dictionary A.
+    Activates managed dictionary B with distinct content.
+    Asserts:
+    - GET /vocab/lookup returns the B token WITH B-only content
+      (a lemma present only in B appears; a lemma present only in A does not).
+    - cards/next renders meanings sourced from B.
+    - export emits B texts.
+    - capture submitting an A-era ref under the B token is rejected 422 with zero writes.
+    """
+    managed_dir = tmp_path / "managed_dictionaries"
+    managed_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Build Dictionary A
+    dict_a_path = managed_dir / "dict_a.sqlite"
+    conn_a = sqlite3.connect(dict_a_path)
+    conn_a.executescript(part_a_schema)
+
+    apfel_lem_ref = compute_lemma_semantic_ref("Apfel", "NOUN", "der")
+    apfel_sense_ref = compute_sense_semantic_ref(apfel_lem_ref, "wiktionary", "s_apfel_1")
+    haus_lem_ref = compute_lemma_semantic_ref("Haus", "NOUN", "das")
+    haus_sense_ref = compute_sense_semantic_ref(haus_lem_ref, "wiktionary", "s_haus_1")
+
+    # Insert Apfel (A-only) into Dict A
+    conn_a.execute(
+        """
+        INSERT INTO lemma (id, semantic_ref, lemma, pos, gender, source, license)
+        VALUES (1, ?, 'Apfel', 'NOUN', 'der', 'wiktionary', 'CC BY-SA')
+        """,
+        (apfel_lem_ref,),
+    )
+    conn_a.execute(
+        """
+        INSERT INTO sense (
+            id, lemma_id, semantic_ref, source_namespace, source_ref, source, license
+        )
+        VALUES (1, 1, ?, 'wiktionary', 's_apfel_1', 'wiktionary', 'CC BY-SA')
+        """,
+        (apfel_sense_ref,),
+    )
+    conn_a.execute(
+        """
+        INSERT INTO sense_meaning (
+            id, sense_id, language, kind, text, ord, source, license
+        )
+        VALUES (
+            1, 1, 'de', 'definition', 'Frucht des Apfelbaums (Dict A)', 1, 'wiktionary', 'CC BY-SA'
+        )
+        """
+    )
+    # Insert Haus into Dict A
+    conn_a.execute(
+        """
+        INSERT INTO lemma (id, semantic_ref, lemma, pos, gender, source, license)
+        VALUES (2, ?, 'Haus', 'NOUN', 'das', 'wiktionary', 'CC BY-SA')
+        """,
+        (haus_lem_ref,),
+    )
+    conn_a.execute(
+        """
+        INSERT INTO sense (
+            id, lemma_id, semantic_ref, source_namespace, source_ref, source, license
+        )
+        VALUES (2, 2, ?, 'wiktionary', 's_haus_1', 'wiktionary', 'CC BY-SA')
+        """,
+        (haus_sense_ref,),
+    )
+    conn_a.execute(
+        """
+        INSERT INTO sense_meaning (
+            id, sense_id, language, kind, text, ord, source, license
+        )
+        VALUES (
+            2, 2, 'de', 'definition', 'Gebäude zum Wohnen (Dict A)', 1, 'wiktionary', 'CC BY-SA'
+        )
+        """
+    )
+    conn_a.commit()
+    conn_a.close()
+
+    # 2. Build Dictionary B
+    dict_b_path = managed_dir / "dict_b.sqlite"
+    conn_b = sqlite3.connect(dict_b_path)
+    conn_b.executescript(part_a_schema)
+
+    birne_lem_ref = compute_lemma_semantic_ref("Birne", "NOUN", "die")
+    birne_sense_ref = compute_sense_semantic_ref(birne_lem_ref, "wiktionary", "s_birne_1")
+
+    # Insert Birne (B-only) into Dict B
+    conn_b.execute(
+        """
+        INSERT INTO lemma (id, semantic_ref, lemma, pos, gender, source, license)
+        VALUES (1, ?, 'Birne', 'NOUN', 'die', 'wiktionary', 'CC BY-SA')
+        """,
+        (birne_lem_ref,),
+    )
+    conn_b.execute(
+        """
+        INSERT INTO sense (
+            id, lemma_id, semantic_ref, source_namespace, source_ref, source, license
+        )
+        VALUES (1, 1, ?, 'wiktionary', 's_birne_1', 'wiktionary', 'CC BY-SA')
+        """,
+        (birne_sense_ref,),
+    )
+    conn_b.execute(
+        """
+        INSERT INTO sense_meaning (
+            id, sense_id, language, kind, text, ord, source, license
+        )
+        VALUES (1, 1, 'de', 'definition', 'Birnenfrucht (Dict B)', 1, 'wiktionary', 'CC BY-SA')
+        """
+    )
+    # Insert Haus into Dict B with updated B-era meaning
+    conn_b.execute(
+        """
+        INSERT INTO lemma (id, semantic_ref, lemma, pos, gender, source, license)
+        VALUES (2, ?, 'Haus', 'NOUN', 'das', 'wiktionary', 'CC BY-SA')
+        """,
+        (haus_lem_ref,),
+    )
+    conn_b.execute(
+        """
+        INSERT INTO sense (
+            id, lemma_id, semantic_ref, source_namespace, source_ref, source, license
+        )
+        VALUES (2, 2, ?, 'wiktionary', 's_haus_1', 'wiktionary', 'CC BY-SA')
+        """,
+        (haus_sense_ref,),
+    )
+    conn_b.execute(
+        """
+        INSERT INTO sense_meaning (
+            id, sense_id, language, kind, text, ord, source, license
+        )
+        VALUES (2, 2, 'de', 'definition', 'Modernes Wohnhaus (Dict B)', 1, 'wiktionary', 'CC BY-SA')
+        """
+    )
+    conn_b.commit()
+    conn_b.close()
+
+    # 3. Create app pointing to Dictionary A
+    app = create_app(
+        dict_path=dict_a_path,
+        user_db_path=user_db_path,
+        cors_origins=["http://localhost:3000"],
+    )
+    client = TestClient(app, base_url="http://localhost:3000")
+    headers = {"X-Flashcards-Request": "1", "Content-Type": "application/json"}
+
+    # Capture Haus note under Dict A
+    r_look_a = client.get("/vocab/lookup?q=Haus")
+    assert r_look_a.status_code == 200
+    token_a = r_look_a.json()["asset_token"]
+    assert token_a == sha256(dict_a_path.read_bytes()).hexdigest()
+
+    r_cap_haus = client.post(
+        "/vocab/notes",
+        json={
+            "asset_token": token_a,
+            "lemma_semantic_ref": haus_lem_ref,
+            "sense_semantic_ref": haus_sense_ref,
+            "meaning_languages": ["de"],
+        },
+        headers=headers,
+    )
+    assert r_cap_haus.status_code == 201
+    assert r_cap_haus.json()["status"] == "resolved"
+
+    # 4. Activate Dictionary B
+    r_act = client.post(
+        "/vocab/dictionary/activate",
+        json={"path": "dict_b.sqlite", "version": "v2"},
+        headers=headers,
+    )
+    assert r_act.status_code == 200
+    act_data = r_act.json()
+    assert act_data["status"] == "activated"
+    token_b = act_data["asset_token"]
+    assert token_b == sha256(dict_b_path.read_bytes()).hexdigest()
+    assert token_b != token_a
+
+    # 5. Assert GET /vocab/lookup returns B token WITH B-only content
+    # (Birne appears, Apfel does not)
+    r_look_birne = client.get("/vocab/lookup?q=Birne")
+    assert r_look_birne.status_code == 200
+    birne_data = r_look_birne.json()
+    assert birne_data["asset_token"] == token_b
+    assert len(birne_data["candidates"]) == 1
+    assert birne_data["candidates"][0]["lemma"] == "Birne"
+    assert (
+        birne_data["candidates"][0]["senses"][0]["meanings"][0]["text"]
+        == "Birnenfrucht (Dict B)"
+    )
+
+    r_look_apfel = client.get("/vocab/lookup?q=Apfel")
+    assert r_look_apfel.status_code == 200
+    apfel_data = r_look_apfel.json()
+    assert apfel_data["asset_token"] == token_b
+    assert len(apfel_data["candidates"]) == 0
+
+    # 6. Assert cards/next renders meanings sourced from Dictionary B
+    r_next = client.get("/vocab/cards/next")
+    assert r_next.status_code == 200
+    card_body = r_next.json()["card"]
+    assert card_body is not None
+    assert card_body["front"]["display_headword"] == "das Haus"
+    rendered_meanings = [
+        line
+        for mb in card_body["back"]["meanings"]
+        for line in mb["lines"]
+    ]
+    assert any("Modernes Wohnhaus (Dict B)" in m for m in rendered_meanings)
+    assert not any("Gebäude zum Wohnen (Dict A)" in m for m in rendered_meanings)
+
+    # 7. Assert export emits Dictionary B texts
+    r_export = client.get("/vocab/export/anki")
+    assert r_export.status_code == 200
+    export_content = r_export.text
+    assert "Modernes Wohnhaus (Dict B)" in export_content
+    assert "Gebäude zum Wohnen (Dict A)" not in export_content
+
+    # 8. Assert note capture submitting an A-era ref under token B is rejected 422 with zero writes
+    user_conn = sqlite3.connect(user_db_path)
+    notes_before = user_conn.execute("SELECT COUNT(*) FROM note").fetchone()[0]
+    cards_before = user_conn.execute("SELECT COUNT(*) FROM card").fetchone()[0]
+    user_conn.close()
+
+    r_stale_ref = client.post(
+        "/vocab/notes",
+        json={
+            "asset_token": token_b,
+            "lemma_semantic_ref": apfel_lem_ref,
+            "sense_semantic_ref": apfel_sense_ref,
+            "meaning_languages": ["de"],
+        },
+        headers=headers,
+    )
+    assert r_stale_ref.status_code == 422
+    assert "Unknown lemma semantic reference in active dictionary" in r_stale_ref.json()["detail"]
+
+    user_conn = sqlite3.connect(user_db_path)
+    notes_after = user_conn.execute("SELECT COUNT(*) FROM note").fetchone()[0]
+    cards_after = user_conn.execute("SELECT COUNT(*) FROM card").fetchone()[0]
+    user_conn.close()
+
+    assert notes_after == notes_before
+    assert cards_after == cards_before
+
+
+def test_concurrency_complete_old_observation_during_activation(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """Concurrency regression proving complete-old observation during activation.
+
+    Spans cards/next and export observations pinned on Generation A while a real activation
+    to Dictionary B commits and publishes, proving 100% Generation A consistency throughout.
+    """
+    managed_dir = tmp_path / "managed_dictionaries"
+    managed_dir.mkdir(parents=True, exist_ok=True)
+    dict_a_path = managed_dir / "dict_a.sqlite"
+    dict_b_path = managed_dir / "dict_b.sqlite"
+
+    haus_lem_ref = compute_lemma_semantic_ref("Haus", "NOUN", "das")
+    haus_sense_ref = compute_sense_semantic_ref(haus_lem_ref, "wiktionary", "s_haus_1")
+
+    # Build Dict A
+    conn_a = sqlite3.connect(dict_a_path)
+    conn_a.executescript(part_a_schema)
+    conn_a.execute(
+        """
+        INSERT INTO lemma (id, semantic_ref, lemma, pos, gender, source, license)
+        VALUES (1, ?, 'Haus', 'NOUN', 'das', 'wiktionary', 'CC BY-SA')
+        """,
+        (haus_lem_ref,),
+    )
+    conn_a.execute(
+        """
+        INSERT INTO sense (
+            id, lemma_id, semantic_ref, source_namespace, source_ref, source, license
+        )
+        VALUES (1, 1, ?, 'wiktionary', 's_haus_1', 'wiktionary', 'CC BY-SA')
+        """,
+        (haus_sense_ref,),
+    )
+    conn_a.execute(
+        """
+        INSERT INTO sense_meaning (
+            id, sense_id, language, kind, text, ord, source, license
+        )
+        VALUES (
+            1, 1, 'de', 'definition', 'Gebäude zum Wohnen (Dict A)', 1, 'wiktionary', 'CC BY-SA'
+        )
+        """
+    )
+    conn_a.commit()
+    conn_a.close()
+
+    # Build Dict B with different meaning
+    conn_b = sqlite3.connect(dict_b_path)
+    conn_b.executescript(part_a_schema)
+    conn_b.execute(
+        """
+        INSERT INTO lemma (id, semantic_ref, lemma, pos, gender, source, license)
+        VALUES (1, ?, 'Haus', 'NOUN', 'das', 'wiktionary', 'CC BY-SA')
+        """,
+        (haus_lem_ref,),
+    )
+    conn_b.execute(
+        """
+        INSERT INTO sense (
+            id, lemma_id, semantic_ref, source_namespace, source_ref, source, license
+        )
+        VALUES (1, 1, ?, 'wiktionary', 's_haus_1', 'wiktionary', 'CC BY-SA')
+        """,
+        (haus_sense_ref,),
+    )
+    conn_b.execute(
+        """
+        INSERT INTO sense_meaning (
+            id, sense_id, language, kind, text, ord, source, license
+        )
+        VALUES (
+            1, 1, 'de', 'definition', 'Modernes Wohnhaus (Dict B)', 1, 'wiktionary', 'CC BY-SA'
+        )
+        """
+    )
+    conn_b.commit()
+    conn_b.close()
+
+    app = create_app(dict_a_path, user_db_path, ["http://127.0.0.1:3000"])
+    client = TestClient(app, base_url="http://127.0.0.1:3000")
+    headers = {
+        "Host": "127.0.0.1:3000",
+        "Origin": "http://127.0.0.1:3000",
+        "X-Flashcards-Request": "1",
+    }
+
+    # 1. Lookup Haus to get active token A
+    r_lookup = client.get("/vocab/lookup?q=Haus")
+    assert r_lookup.status_code == 200
+    token_a = r_lookup.json()["asset_token"]
+
+    # 2. Capture Haus note under token A
+    r_cap = client.post(
+        "/vocab/notes",
+        json={
+            "asset_token": token_a,
+            "lemma_semantic_ref": haus_lem_ref,
+            "sense_semantic_ref": haus_sense_ref,
+            "meaning_languages": ["de"],
+        },
+        headers=headers,
+    )
+    assert r_cap.status_code == 201
+
+    runtime = app.state.runtime
+
+    # --- PART 1: cards/next observation concurrency test ---
+    obs_ready = threading.Event()
+    activation_commit_done = threading.Event()
+    obs_done = threading.Event()
+    obs_errors: list[Exception] = []
+    obs_card_holder: list[Any] = []
+
+    def observation_worker() -> None:
+        try:
+            with runtime.reading():
+                # Signal that we are pinned on Gen A
+                obs_ready.set()
+                # Wait until activation commit has occurred via seam probe
+                if not activation_commit_done.wait(timeout=5.0):
+                    raise TimeoutError("timed out waiting for activation commit")
+                card_obs = runtime.observe_card_render()
+                obs_card_holder.append(card_obs)
+        except Exception as exc:
+            obs_errors.append(exc)
+        finally:
+            obs_done.set()
+
+    t_obs = threading.Thread(target=observation_worker)
+    t_obs.start()
+    assert obs_ready.wait(timeout=5.0)
+
+    # Set up seam probe to signal when commit has happened in activation
+    def seam_probe_fn() -> None:
+        activation_commit_done.set()
+
+    runtime._seam_probe = seam_probe_fn
+    try:
+        # Drive real activation to Dictionary B
+        r_act = client.post(
+            "/vocab/dictionary/activate",
+            json={"path": "dict_b.sqlite", "version": "v2"},
+            headers=headers,
+        )
+        assert r_act.status_code == 200
+        token_b = r_act.json()["asset_token"]
+        assert token_b != token_a
+    finally:
+        runtime._seam_probe = None
+
+    t_obs.join(timeout=5.0)
+    assert not t_obs.is_alive()
+    assert not obs_errors
+    assert len(obs_card_holder) == 1
+    card_obs = obs_card_holder[0]
+    assert card_obs is not None
+    assert card_obs["asset_token"] == token_a
+    assert card_obs["note_status"] == "resolved"
+
+    render_input = _render_input_from_observation(card_obs)
+    rendered = render_card(render_input)
+    rendered_meanings = [
+        line
+        for mb in rendered.back.meanings
+        for line in mb.lines
+    ]
+    # Assert observation completes 100% Gen A consistent (0 mixed values)
+    assert any("Gebäude zum Wohnen (Dict A)" in m for m in rendered_meanings)
+    assert not any("Modernes Wohnhaus (Dict B)" in m for m in rendered_meanings)
+
+    # --- PART 2: export observation concurrency test ---
+    # Reactivate Dict A to establish baseline for export observation
+    r_act_a = client.post(
+        "/vocab/dictionary/activate",
+        json={"path": "dict_a.sqlite", "version": "v3"},
+        headers=headers,
+    )
+    assert r_act_a.status_code == 200
+    token_a3 = r_act_a.json()["asset_token"]
+    assert token_a3 == token_a
+
+    exp_ready = threading.Event()
+    exp_activation_commit_done = threading.Event()
+    exp_done = threading.Event()
+    exp_errors: list[Exception] = []
+    exp_holder: list[Any] = []
+
+    def export_worker() -> None:
+        try:
+            with runtime.reading():
+                exp_ready.set()
+                if not exp_activation_commit_done.wait(timeout=5.0):
+                    raise TimeoutError("timed out waiting for activation commit")
+                export_obs = runtime.observe_export_payload()
+                exp_holder.append(export_obs)
+        except Exception as exc:
+            exp_errors.append(exc)
+        finally:
+            exp_done.set()
+
+    t_exp = threading.Thread(target=export_worker)
+    t_exp.start()
+    assert exp_ready.wait(timeout=5.0)
+
+    def seam_probe_exp() -> None:
+        exp_activation_commit_done.set()
+
+    runtime._seam_probe = seam_probe_exp
+    try:
+        r_act_b2 = client.post(
+            "/vocab/dictionary/activate",
+            json={"path": "dict_b.sqlite", "version": "v4"},
+            headers=headers,
+        )
+        assert r_act_b2.status_code == 200
+    finally:
+        runtime._seam_probe = None
+
+    t_exp.join(timeout=5.0)
+    assert not t_exp.is_alive()
+    assert not exp_errors
+    assert len(exp_holder) == 1
+    export_obs = exp_holder[0]
+    assert len(export_obs) >= 1
+    card_exp = export_obs[0]
+    assert card_exp["asset_token"] == token_a3
+
+    render_exp_input = _render_input_from_observation(card_exp, with_audio=False)
+    rendered_exp = render_card(render_exp_input)
+    rendered_exp_meanings = [
+        line
+        for mb in rendered_exp.back.meanings
+        for line in mb.lines
+    ]
+    assert any("Gebäude zum Wohnen (Dict A)" in m for m in rendered_exp_meanings)
+    assert not any("Modernes Wohnhaus (Dict B)" in m for m in rendered_exp_meanings)
+
+    # --- PART 3: Verify fresh observations yield complete-new (Dict B) ---
+    r_fresh_next = client.get("/vocab/cards/next")
+    assert r_fresh_next.status_code == 200
+    fresh_card = r_fresh_next.json()["card"]
+    fresh_meanings = [
+        line
+        for mb in fresh_card["back"]["meanings"]
+        for line in mb["lines"]
+    ]
+    assert any("Modernes Wohnhaus (Dict B)" in m for m in fresh_meanings)
+    assert not any("Gebäude zum Wohnen (Dict A)" in m for m in fresh_meanings)
+
+    r_fresh_exp = client.get("/vocab/export/anki")
+    assert r_fresh_exp.status_code == 200
+    assert "Modernes Wohnhaus (Dict B)" in r_fresh_exp.text
+    assert "Gebäude zum Wohnen (Dict A)" not in r_fresh_exp.text
+

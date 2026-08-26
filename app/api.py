@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Final
+from types import MappingProxyType
+from typing import Any, Final, cast
 
 from fastapi import FastAPI, Query, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -37,16 +38,9 @@ from app.deck import (
     delete_deck,
     delete_user_meaning,
     review,
-    selected_meaning_languages,
     set_user_meaning,
 )
-from app.dictionary import (
-    Dictionary,
-    DictionaryAssetError,
-    ExampleEntry,
-    LemmaEntry,
-    SenseEntry,
-)
+from app.dictionary import DictionaryAssetError
 from app.render import (
     AudioTrigger,
     CardRenderInput,
@@ -163,6 +157,145 @@ class BrowserSecurityMiddleware(BaseHTTPMiddleware):
         return response
 
 
+def _to_json_compatible(val: Any) -> Any:
+    if isinstance(val, (MappingProxyType, dict)):
+        return {k: _to_json_compatible(v) for k, v in val.items()}
+    if isinstance(val, (tuple, list, set, frozenset)):
+        return [_to_json_compatible(item) for item in val]
+    return val
+
+
+def _render_input_from_observation(
+    obs: Mapping[str, Any],
+    *,
+    with_audio: bool = True,
+) -> CardRenderInput:
+    note_id = int(obs["note_id"])
+    note_status = str(obs["note_status"])
+    lemma_ref = str(obs["lemma_semantic_ref"])
+    sense_ref = str(obs["sense_semantic_ref"]) if obs["sense_semantic_ref"] else None
+    selected_langs = tuple(str(x) for x in obs["selected_languages"])
+    user_meanings_dict = cast(Mapping[str, str], obs["user_meanings"])
+    components = cast(Sequence[Mapping[str, Any]], obs["components"])
+    lem_map = cast(Mapping[str, Any] | None, obs["lemma"])
+    senses_list = cast(Sequence[Mapping[str, Any]], obs["senses"])
+    meanings_list = cast(Sequence[Mapping[str, Any]], obs["meanings"])
+    examples_list = cast(Sequence[Mapping[str, Any]], obs["examples"])
+
+    if lem_map is None:
+        raw_headword = lemma_ref.split(":")[-1]
+        lemma_data = RenderLemmaData(lemma=raw_headword, pos="NOUN")
+    else:
+        lemma_data = RenderLemmaData(
+            lemma=str(lem_map["lemma"]),
+            pos=str(lem_map["pos"]),
+            gender=lem_map["gender"],
+            plural=lem_map["plural"],
+            plural_none=int(lem_map["plural_none"]),
+            genitive_sg=lem_map["genitive_sg"],
+            aux=lem_map["aux"],
+            separable=int(lem_map["separable"]),
+            particle=lem_map["particle"],
+            reflexive=int(lem_map["reflexive"]),
+            praesens_3sg=lem_map["praesens_3sg"],
+            praeteritum_3sg=lem_map["praeteritum_3sg"],
+            partizip_ii=lem_map["partizip_ii"],
+            governs=lem_map["governs"],
+            comparative=lem_map["comparative"],
+            superlative=lem_map["superlative"],
+            ipa=lem_map["ipa"],
+        )
+
+    meaning_blocks: list[MeaningBlock] = []
+    if note_status == "derived_compound" and components:
+        for lang in ("de", "en"):
+            if lang in selected_langs:
+                if lang in user_meanings_dict:
+                    meaning_blocks.append(
+                        MeaningBlock(
+                            language=lang,
+                            origin="user",
+                            texts=(user_meanings_dict[lang],),
+                        )
+                    )
+                else:
+                    components_list = [
+                        DerivedComponent(
+                            lemma=str(c["lemma"]),
+                            text=cast(Mapping[str, str], c["meanings"]).get(lang),
+                        )
+                        for c in components
+                    ]
+                    if components_list:
+                        meaning_blocks.append(
+                            MeaningBlock(
+                                language=lang,
+                                origin="derived_component",
+                                components=tuple(components_list),
+                            )
+                        )
+    else:
+        for lang in ("de", "en"):
+            if lang in selected_langs:
+                if lang in user_meanings_dict:
+                    meaning_blocks.append(
+                        MeaningBlock(
+                            language=lang,
+                            origin="user",
+                            texts=(user_meanings_dict[lang],),
+                        )
+                    )
+                else:
+                    sense_match_ids = [
+                        s["id"] for s in senses_list if s["semantic_ref"] == sense_ref
+                    ]
+                    has_matching_sense = any(
+                        s["semantic_ref"] == sense_ref for s in senses_list
+                    )
+                    matching_m = [
+                        str(m["text"])
+                        for m in meanings_list
+                        if m["language"] == lang
+                        and (
+                            sense_ref is None
+                            or m["sense_id"] in sense_match_ids
+                            or not has_matching_sense
+                        )
+                    ]
+                    if matching_m:
+                        meaning_blocks.append(
+                            MeaningBlock(
+                                language=lang,
+                                origin="dictionary",
+                                texts=tuple(matching_m),
+                            )
+                        )
+
+    render_examples_list = tuple(
+        RenderExample(de=str(e["de"]), en=e.get("en"))
+        for e in examples_list
+    )
+
+    audio_trigger: AudioTrigger | None = None
+    if with_audio:
+        if obs.get("has_custom_audio", False):
+            audio_trigger = AudioTrigger(
+                available=True,
+                lemma=lemma_data.lemma,
+                token=f"custom:{note_id}",
+            )
+        else:
+            audio_trigger = AudioTrigger(available=True, lemma=lemma_data.lemma)
+
+    return CardRenderInput(
+        lemma=lemma_data,
+        selected_languages=selected_langs,
+        meanings=tuple(meaning_blocks),
+        examples=render_examples_list,
+        audio_trigger=audio_trigger,
+    )
+
+
 def _get_user_db_conn(app: FastAPI) -> sqlite3.Connection:
     conn = sqlite3.connect(app.state.user_db_path)
     conn.row_factory = sqlite3.Row
@@ -243,83 +376,15 @@ def create_app(
                 content={"detail": "Query parameter 'q' must not be empty"},
             )
 
-        with runtime.reading() as snapshot:
-            with Dictionary(app.state.dict_path) as dict_obj:
-                exact_lemmas = dict_obj.lookup_exact(clean_q)
-                surface_lemmas = (
-                    dict_obj.lookup_surface_form(clean_q) if not exact_lemmas else []
-                )
-
-                all_lemmas: list[LemmaEntry] = list(exact_lemmas)
-                seen_lemma_ids = {lem.id for lem in exact_lemmas}
-                for lem in surface_lemmas:
-                    if lem.id not in seen_lemma_ids:
-                        seen_lemma_ids.add(lem.id)
-                        all_lemmas.append(lem)
-
-                candidates: list[dict[str, Any]] = []
-                for lem in all_lemmas:
-                    entry = dict_obj.get_entry(lem.id)
-                    if entry is None:
-                        continue
-
-                    senses_data: list[dict[str, Any]] = []
-                    for s in entry.senses:
-                        meanings_data = [
-                            {
-                                "language": m.language,
-                                "kind": m.kind,
-                                "text": m.text,
-                                "ord": m.ord,
-                            }
-                            for m in entry.meanings
-                            if m.sense_id == s.id
-                        ]
-                        senses_data.append({
-                            "sense_id": s.id,
-                            "sense_semantic_ref": s.semantic_ref,
-                            "source_namespace": s.source_namespace,
-                            "source_ref": s.source_ref,
-                            "ord": s.ord,
-                            "register": s.register,
-                            "meanings": meanings_data,
-                        })
-
-                    candidates.append({
-                        "lemma_id": entry.lemma.id,
-                        "lemma_semantic_ref": entry.lemma.semantic_ref,
-                        "lemma": entry.lemma.lemma,
-                        "pos": entry.lemma.pos,
-                        "gender": entry.lemma.gender,
-                        "plural": entry.lemma.plural,
-                        "plural_none": entry.lemma.plural_none,
-                        "genitive_sg": entry.lemma.genitive_sg,
-                        "aux": entry.lemma.aux,
-                        "separable": entry.lemma.separable,
-                        "particle": entry.lemma.particle,
-                        "reflexive": entry.lemma.reflexive,
-                        "praesens_3sg": entry.lemma.praesens_3sg,
-                        "praeteritum_3sg": entry.lemma.praeteritum_3sg,
-                        "partizip_ii": entry.lemma.partizip_ii,
-                        "governs": entry.lemma.governs,
-                        "comparative": entry.lemma.comparative,
-                        "superlative": entry.lemma.superlative,
-                        "ipa": entry.lemma.ipa,
-                        "senses": senses_data,
-                        "examples": [
-                            {"de": ex.de, "en": ex.en}
-                            for ex in entry.examples
-                        ],
-                    })
-
-                return JSONResponse(
-                    status_code=status.HTTP_200_OK,
-                    content={
-                        "query": clean_q,
-                        "asset_token": snapshot.asset_token,
-                        "candidates": candidates,
-                    },
-                )
+        asset_token, candidates = runtime.materialize_lookup(clean_q)
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "query": clean_q,
+                "asset_token": asset_token,
+                "candidates": _to_json_compatible(candidates),
+            },
+        )
 
     @app.post("/vocab/notes")
     async def capture_note_endpoint(request: Request) -> JSONResponse:
@@ -327,114 +392,195 @@ def create_app(
 
         # 1. Stale picker token validation (ADR-0004 D47)
         picker_token = body.get("asset_token")
-        active_token = runtime.asset_token
-        if picker_token != active_token:
-            return JSONResponse(
-                status_code=status.HTTP_409_CONFLICT,
-                content={
-                    "detail": "Asset token mismatch; dictionary has changed",
-                    "picker_token": picker_token,
-                    "active_token": active_token,
-                },
-            )
 
-        # 2. Validate meaning languages
-        raw_langs = (
-            body.get("meaning_languages")
-            or body.get("meaning_langs")
-            or body.get("selected_languages")
-        )
-        if not raw_langs or not isinstance(raw_langs, (list, tuple)):
-            return JSONResponse(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                content={
-                    "detail": "meaning_languages must be non-empty list from {'de', 'en'}"
-                },
-            )
-
-        for lang in raw_langs:
-            if lang == "fa":
+        with runtime.reading() as snapshot:
+            active_token = snapshot.asset_token
+            if picker_token != active_token:
                 return JSONResponse(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    content={"detail": "Persian (fa) is deferred and unsupported in v1"},
-                )
-            if lang not in ("de", "en"):
-                return JSONResponse(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_409_CONFLICT,
                     content={
-                        "detail": f"Unsupported meaning language: {lang!r}; must be 'de' or 'en'"
+                        "detail": "Asset token mismatch; dictionary has changed",
+                        "picker_token": picker_token,
+                        "active_token": active_token,
                     },
                 )
 
-        try:
-            validated_langs = validate_selected_languages(raw_langs)
-        except ValueError as exc:
-            return JSONResponse(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                content={"detail": str(exc)},
+            # 2. Validate meaning languages
+            raw_langs = (
+                body.get("meaning_languages")
+                or body.get("meaning_langs")
+                or body.get("selected_languages")
             )
-
-        lemma_ref = body.get("lemma_semantic_ref") or body.get("ref")
-        if not lemma_ref or not isinstance(lemma_ref, str) or not lemma_ref.strip():
-            return JSONResponse(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                content={"detail": "lemma_semantic_ref is required"},
-            )
-
-        sense_ref = body.get("sense_semantic_ref")
-        status_val = body.get("status", "resolved")
-        if status_val not in ("resolved", "needs_gloss", "derived_compound", "orphaned"):
-            return JSONResponse(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                content={"detail": f"Invalid status: {status_val}"},
-            )
-
-        component_refs_raw = body.get("component_refs")
-        component_refs: Sequence[tuple[str, str]] | None = None
-        if component_refs_raw is not None:
-            comp_list: list[tuple[str, str]] = []
-            for item in component_refs_raw:
-                if isinstance(item, (list, tuple)) and len(item) == 2:
-                    comp_list.append((str(item[0]), str(item[1])))
-                elif (
-                    isinstance(item, dict)
-                    and "lemma_semantic_ref" in item
-                    and "sense_semantic_ref" in item
-                ):
-                    comp_list.append((
-                        str(item["lemma_semantic_ref"]),
-                        str(item["sense_semantic_ref"]),
-                    ))
-                else:
-                    return JSONResponse(
-                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        content={"detail": "Invalid component_refs format"},
-                    )
-            component_refs = tuple(comp_list)
-
-        user_meanings_input = body.get("user_meanings")
-        if user_meanings_input is not None:
-            if not isinstance(user_meanings_input, dict):
+            if not raw_langs or not isinstance(raw_langs, (list, tuple)):
                 return JSONResponse(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    content={"detail": "user_meanings must be an object"},
+                    content={
+                        "detail": "meaning_languages must be non-empty list from {'de', 'en'}"
+                    },
                 )
-            for um_lang, um_text in user_meanings_input.items():
-                if um_lang == "fa":
+
+            for lang in raw_langs:
+                if lang == "fa":
                     return JSONResponse(
                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                         content={"detail": "Persian (fa) is deferred and unsupported in v1"},
                     )
-                if um_lang not in ("de", "en"):
+                if lang not in ("de", "en"):
                     return JSONResponse(
                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        content={"detail": f"Unsupported user meaning language: {um_lang}"},
+                        content={
+                            "detail": (
+                                f"Unsupported meaning language: {lang!r}; must be 'de' or 'en'"
+                            )
+                        },
                     )
-                if not isinstance(um_text, str) or not um_text.strip():
+
+            try:
+                validated_langs = validate_selected_languages(raw_langs)
+            except ValueError as exc:
+                return JSONResponse(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    content={"detail": str(exc)},
+                )
+
+            lemma_ref = body.get("lemma_semantic_ref") or body.get("ref")
+            if not lemma_ref or not isinstance(lemma_ref, str) or not lemma_ref.strip():
+                return JSONResponse(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    content={"detail": "lemma_semantic_ref is required"},
+                )
+            clean_lemma_ref = lemma_ref.strip()
+
+            # Active ref validation for lemma
+            if clean_lemma_ref not in snapshot.lemma_ids:
+                return JSONResponse(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    content={
+                        "detail": (
+                            "Unknown lemma semantic reference in active dictionary: "
+                            f"{clean_lemma_ref}"
+                        )
+                    },
+                )
+
+            sense_ref = body.get("sense_semantic_ref")
+            clean_sense_ref = (
+                sense_ref.strip()
+                if sense_ref and isinstance(sense_ref, str)
+                else None
+            )
+
+            status_val = body.get("status", "resolved")
+            if status_val not in ("resolved", "needs_gloss", "derived_compound", "orphaned"):
+                return JSONResponse(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    content={"detail": f"Invalid status: {status_val}"},
+                )
+
+            if status_val == "resolved" and not clean_sense_ref:
+                return JSONResponse(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    content={"detail": "resolved notes require a sense semantic reference"},
+                )
+
+            # Active ref validation for sense
+            if clean_sense_ref is not None:
+                if clean_sense_ref not in snapshot.sense_ids:
                     return JSONResponse(
                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        content={"detail": "user_meaning text must not be empty"},
+                        content={
+                            "detail": (
+                                "Unknown sense semantic reference in active dictionary: "
+                                f"{clean_sense_ref}"
+                            )
+                        },
                     )
+
+            component_refs_raw = body.get("component_refs")
+            component_refs: Sequence[tuple[str, str]] | None = None
+            if component_refs_raw is not None:
+                comp_list: list[tuple[str, str]] = []
+                for item in component_refs_raw:
+                    if isinstance(item, (list, tuple)) and len(item) == 2:
+                        comp_list.append((str(item[0]), str(item[1])))
+                    elif (
+                        isinstance(item, dict)
+                        and "lemma_semantic_ref" in item
+                        and "sense_semantic_ref" in item
+                    ):
+                        comp_list.append((
+                            str(item["lemma_semantic_ref"]),
+                            str(item["sense_semantic_ref"]),
+                        ))
+                    else:
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={"detail": "Invalid component_refs format"},
+                        )
+                component_refs = tuple(comp_list)
+
+            if status_val == "derived_compound" and not component_refs:
+                return JSONResponse(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    content={"detail": "derived compounds require component bindings"},
+                )
+
+            # Active ref validation for component refs
+            if component_refs is not None:
+                for c_lem, c_sns in component_refs:
+                    c_lem_clean = c_lem.strip()
+                    c_sns_clean = c_sns.strip()
+                    if not c_lem_clean or not c_sns_clean:
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={
+                                "detail": "component bindings require non-blank semantic references"
+                            },
+                        )
+                    if c_lem_clean not in snapshot.lemma_ids:
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={
+                                "detail": (
+                                    "Unknown component lemma semantic reference in active "
+                                    f"dictionary: {c_lem_clean}"
+                                )
+                            },
+                        )
+                    if c_sns_clean not in snapshot.sense_ids:
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={
+                                "detail": (
+                                    "Unknown component sense semantic reference in active "
+                                    f"dictionary: {c_sns_clean}"
+                                )
+                            },
+                        )
+
+            user_meanings_input = body.get("user_meanings")
+            if user_meanings_input is not None:
+                if not isinstance(user_meanings_input, dict):
+                    return JSONResponse(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        content={"detail": "user_meanings must be an object"},
+                    )
+                for um_lang, um_text in user_meanings_input.items():
+                    if um_lang == "fa":
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={"detail": "Persian (fa) is deferred and unsupported in v1"},
+                        )
+                    if um_lang not in ("de", "en"):
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={"detail": f"Unsupported user meaning language: {um_lang}"},
+                        )
+                    if not isinstance(um_text, str) or not um_text.strip():
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={"detail": "user_meaning text must not be empty"},
+                        )
 
         conn = _get_user_db_conn(app)
         try:
@@ -450,14 +596,9 @@ def create_app(
                 else:
                     deck_id = create_deck(conn, clean_deck_name)
 
-            clean_sense_ref = (
-                sense_ref.strip()
-                if sense_ref and isinstance(sense_ref, str)
-                else None
-            )
             note_id = create_note(
                 conn,
-                lemma_semantic_ref=lemma_ref.strip(),
+                lemma_semantic_ref=clean_lemma_ref,
                 sense_semantic_ref=clean_sense_ref,
                 status=status_val,
                 component_bindings=component_refs or (),
@@ -498,249 +639,72 @@ def create_app(
 
     @app.get("/vocab/cards/next")
     def next_card_endpoint(deck_id: int | None = None) -> JSONResponse:
-        conn = _get_user_db_conn(app)
-        try:
-            if deck_id is not None:
-                row = conn.execute(
-                    """
-                    SELECT c.id AS card_id, c.note_id, c.due_at, c.state,
-                           c.stability, c.difficulty,
-                           n.lemma_semantic_ref, n.sense_semantic_ref,
-                           n.status AS note_status
-                    FROM card c
-                    JOIN note n ON n.id = c.note_id
-                    JOIN note_deck nd ON nd.note_id = n.id
-                    WHERE nd.deck_id = ?
-                    ORDER BY c.due_at ASC, c.id ASC
-                    LIMIT 1
-                    """,
-                    (deck_id,),
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    """
-                    SELECT c.id AS card_id, c.note_id, c.due_at, c.state,
-                           c.stability, c.difficulty,
-                           n.lemma_semantic_ref, n.sense_semantic_ref,
-                           n.status AS note_status
-                    FROM card c
-                    JOIN note n ON n.id = c.note_id
-                    ORDER BY c.due_at ASC, c.id ASC
-                    LIMIT 1
-                    """
-                ).fetchone()
-
-            if row is None:
-                return JSONResponse(
-                    status_code=status.HTTP_200_OK,
-                    content={"card": None},
-                )
-
-            card_id = int(row["card_id"])
-            note_id = int(row["note_id"])
-            lemma_ref = str(row["lemma_semantic_ref"])
-            sense_ref = (
-                str(row["sense_semantic_ref"])
-                if row["sense_semantic_ref"]
-                else None
+        card_obs = runtime.observe_card_render(deck_id=deck_id)
+        if card_obs is None:
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content={"card": None},
             )
-            note_status = str(row["note_status"])
 
-            selected_langs = selected_meaning_languages(conn, note_id)
-            if not selected_langs:
-                selected_langs = ("de", "en")
+        render_input = _render_input_from_observation(card_obs, with_audio=True)
+        rendered = render_card(render_input)
 
-            user_meanings_rows = conn.execute(
-                "SELECT lang, meaning_text FROM note_user_meaning WHERE note_id = ?",
-                (note_id,),
-            ).fetchall()
-            user_meanings_dict = {str(r[0]): str(r[1]) for r in user_meanings_rows}
-
-            with Dictionary(app.state.dict_path) as dict_obj:
-                lemma_cur = dict_obj._conn.execute(
-                    "SELECT id FROM lemma WHERE semantic_ref = ?", (lemma_ref,)
-                ).fetchone()
-
-                lemma_entry: LemmaEntry | None = None
-                senses: list[SenseEntry] = []
-                meanings: list[Any] = []
-                examples: list[ExampleEntry] = []
-
-                if lemma_cur is not None:
-                    lem_id = int(lemma_cur[0])
-                    lemma_entry = dict_obj.get_lemma_by_id(lem_id)
-                    senses = dict_obj.get_senses_for_lemma(lem_id)
-                    meanings = dict_obj.get_meanings_for_lemma(lem_id)
-                    examples = dict_obj.get_examples_for_lemma(lem_id)
-
-                if lemma_entry is None:
-                    raw_headword = lemma_ref.split(":")[-1]
-                    lemma_data = RenderLemmaData(lemma=raw_headword, pos="NOUN")
-                else:
-                    lemma_data = RenderLemmaData.from_lemma_entry(lemma_entry)
-
-                meaning_blocks: list[MeaningBlock] = []
-                for lang in ("de", "en"):
-                    if lang in selected_langs:
-                        if lang in user_meanings_dict:
-                            meaning_blocks.append(
-                                MeaningBlock(
-                                    language=lang,
-                                    origin="user",
-                                    texts=(user_meanings_dict[lang],),
-                                )
-                            )
-                        elif note_status == "derived_compound":
-                            comp_rows = conn.execute(
-                                """
-                                SELECT component_ord, lemma_semantic_ref, sense_semantic_ref
-                                FROM note_dictionary_binding
-                                WHERE note_id = ? AND role = 'component'
-                                ORDER BY component_ord ASC
-                                """,
-                                (note_id,),
-                            ).fetchall()
-                            components: list[DerivedComponent] = []
-                            for cr in comp_rows:
-                                c_lem_ref = str(cr["lemma_semantic_ref"])
-                                c_lem_row = dict_obj._conn.execute(
-                                    "SELECT lemma FROM lemma WHERE semantic_ref = ?",
-                                    (c_lem_ref,),
-                                ).fetchone()
-                                c_lemma_text = (
-                                    str(c_lem_row[0])
-                                    if c_lem_row
-                                    else c_lem_ref.split(":")[-1]
-                                )
-                                c_sense_ref = str(cr["sense_semantic_ref"])
-                                c_mean_row = dict_obj._conn.execute(
-                                    """
-                                    SELECT sm.text FROM sense_meaning sm
-                                    JOIN sense s ON s.id = sm.sense_id
-                                    WHERE s.semantic_ref = ? AND sm.language = ?
-                                    ORDER BY sm.ord ASC LIMIT 1
-                                    """,
-                                    (c_sense_ref, lang),
-                                ).fetchone()
-                                c_text = str(c_mean_row[0]) if c_mean_row else None
-                                components.append(
-                                    DerivedComponent(lemma=c_lemma_text, text=c_text)
-                                )
-                            if components:
-                                meaning_blocks.append(
-                                    MeaningBlock(
-                                        language=lang,
-                                        origin="derived_component",
-                                        components=tuple(components),
-                                    )
-                                )
-                        else:
-                            sense_match_ids = [
-                                s.id for s in senses if s.semantic_ref == sense_ref
-                            ]
-                            has_matching_sense = any(
-                                s.semantic_ref == sense_ref for s in senses
-                            )
-                            matching_m = [
-                                m.text
-                                for m in meanings
-                                if m.language == lang
-                                and (
-                                    sense_ref is None
-                                    or m.sense_id in sense_match_ids
-                                    or not has_matching_sense
-                                )
-                            ]
-                            if matching_m:
-                                meaning_blocks.append(
-                                    MeaningBlock(
-                                        language=lang,
-                                        origin="dictionary",
-                                        texts=tuple(matching_m),
-                                    )
-                                )
-
-                render_examples_list = tuple(
-                    RenderExample.from_example_entry(e) for e in examples
-                )
-
-                custom_rec = get_custom_pronunciation(conn, note_id)
-                if custom_rec is not None:
-                    audio_trigger = AudioTrigger(
-                        available=True,
-                        lemma=lemma_data.lemma,
-                        token=f"custom:{note_id}",
-                    )
-                else:
-                    audio_trigger = AudioTrigger(available=True, lemma=lemma_data.lemma)
-
-                render_input = CardRenderInput(
-                    lemma=lemma_data,
-                    selected_languages=selected_langs,
-                    meanings=tuple(meaning_blocks),
-                    examples=render_examples_list,
-                    audio_trigger=audio_trigger,
-                )
-                rendered = render_card(render_input)
-
-                return JSONResponse(
-                    status_code=status.HTTP_200_OK,
-                    content={
-                        "card": {
-                            "card_id": card_id,
-                            "note_id": note_id,
-                            "due_at": str(row["due_at"]),
-                            "state": row["state"],
-                            "front": {
-                                "headword": rendered.front.headword,
-                                "display_headword": rendered.front.display_headword,
-                                "pos": rendered.front.pos,
-                                "gender": rendered.front.gender,
-                                "article": rendered.front.article,
-                                "ipa": rendered.front.ipa,
-                                "text": rendered.front.text,
-                                "audio_trigger": {
-                                    "available": rendered.front.audio_trigger.available,
-                                    "lemma": rendered.front.audio_trigger.lemma,
-                                    "token": rendered.front.audio_trigger.token,
-                                },
-                            },
-                            "back": {
-                                "display_headword": rendered.back.display_headword,
-                                "pos": rendered.back.pos,
-                                "gender": rendered.back.gender,
-                                "article": rendered.back.article,
-                                "ipa": rendered.back.ipa,
-                                "plural": rendered.back.plural,
-                                "text": rendered.back.text,
-                                "grammar": {
-                                    "pos": rendered.back.grammar.pos,
-                                    "lines": list(rendered.back.grammar.lines),
-                                },
-                                "meanings": [
-                                    {
-                                        "language": mb.language,
-                                        "origin": mb.origin,
-                                        "is_user_authored": mb.is_user_authored,
-                                        "heading": mb.heading,
-                                        "lines": list(mb.lines),
-                                    }
-                                    for mb in rendered.back.meanings
-                                ],
-                                "examples": [
-                                    {
-                                        "de": ex.de,
-                                        "en": ex.en,
-                                        "lines": list(ex.lines),
-                                    }
-                                    for ex in rendered.back.examples
-                                ],
-                            },
-                        }
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "card": {
+                    "card_id": cast(int, card_obs["card_id"]),
+                    "note_id": cast(int, card_obs["note_id"]),
+                    "due_at": str(card_obs["due_at"]),
+                    "state": cast(int, card_obs["state"]),
+                    "front": {
+                        "headword": rendered.front.headword,
+                        "display_headword": rendered.front.display_headword,
+                        "pos": rendered.front.pos,
+                        "gender": rendered.front.gender,
+                        "article": rendered.front.article,
+                        "ipa": rendered.front.ipa,
+                        "text": rendered.front.text,
+                        "audio_trigger": {
+                            "available": rendered.front.audio_trigger.available,
+                            "lemma": rendered.front.audio_trigger.lemma,
+                            "token": rendered.front.audio_trigger.token,
+                        },
                     },
-                )
-        finally:
-            conn.close()
+                    "back": {
+                        "display_headword": rendered.back.display_headword,
+                        "pos": rendered.back.pos,
+                        "gender": rendered.back.gender,
+                        "article": rendered.back.article,
+                        "ipa": rendered.back.ipa,
+                        "plural": rendered.back.plural,
+                        "text": rendered.back.text,
+                        "grammar": {
+                            "pos": rendered.back.grammar.pos,
+                            "lines": list(rendered.back.grammar.lines),
+                        },
+                        "meanings": [
+                            {
+                                "language": mb.language,
+                                "origin": mb.origin,
+                                "is_user_authored": mb.is_user_authored,
+                                "heading": mb.heading,
+                                "lines": list(mb.lines),
+                            }
+                            for mb in rendered.back.meanings
+                        ],
+                        "examples": [
+                            {
+                                "de": ex.de,
+                                "en": ex.en,
+                                "lines": list(ex.lines),
+                            }
+                            for ex in rendered.back.examples
+                        ],
+                    },
+                }
+            },
+        )
 
     @app.post("/vocab/cards/{card_id}/review")
     async def review_card_endpoint(card_id: int, request: Request) -> JSONResponse:
@@ -1186,198 +1150,74 @@ def create_app(
 
     @app.get("/vocab/export/anki")
     def export_anki_endpoint(deck_id: int | None = None) -> Response:
-        conn = _get_user_db_conn(app)
-        try:
-            if deck_id is not None:
-                rows = conn.execute(
-                    """
-                    SELECT c.id AS card_id, n.id AS note_id, n.status,
-                           n.lemma_semantic_ref, n.sense_semantic_ref,
-                           GROUP_CONCAT(DISTINCT d.name) AS deck_names
-                    FROM card c
-                    JOIN note n ON n.id = c.note_id
-                    JOIN note_deck nd ON nd.note_id = n.id
-                    JOIN deck d ON d.id = nd.deck_id
-                    WHERE d.id = ?
-                    GROUP BY c.id, n.id, n.status, n.lemma_semantic_ref,
-                             n.sense_semantic_ref
-                    ORDER BY c.id ASC
-                    """,
-                    (deck_id,),
-                ).fetchall()
+        cards_obs = runtime.observe_export_payload(deck_id=deck_id)
+
+        tsv_lines: list[str] = [
+            "#separator:tab",
+            "#html:true",
+            "#notetype:German Vocabulary",
+            "#columns:Front\tBack\tGrammar\tExample\tIPA\tTags",
+        ]
+
+        def _sanitize(text: str | None) -> str:
+            if not text:
+                return ""
+            s = text.replace("\t", " ")
+            s = re.sub(r"\r\n|\r|\n", "<br>", s)
+            return s
+
+        for card_obs in cards_obs:
+            note_status = str(card_obs["note_status"])
+            deck_names_str = str(card_obs["deck_names"]) if card_obs.get("deck_names") else ""
+            render_input = _render_input_from_observation(card_obs, with_audio=False)
+            rendered = render_card(render_input)
+
+            front_text = _sanitize(rendered.front.text)
+            if note_status == "needs_gloss" or not rendered.back.meanings:
+                back_text = ""
             else:
-                rows = conn.execute(
-                    """
-                    SELECT c.id AS card_id, n.id AS note_id, n.status,
-                           n.lemma_semantic_ref, n.sense_semantic_ref,
-                           GROUP_CONCAT(DISTINCT d.name) AS deck_names
-                    FROM card c
-                    JOIN note n ON n.id = c.note_id
-                    LEFT JOIN note_deck nd ON nd.note_id = n.id
-                    LEFT JOIN deck d ON d.id = nd.deck_id
-                    GROUP BY c.id, n.id, n.status, n.lemma_semantic_ref,
-                             n.sense_semantic_ref
-                    ORDER BY c.id ASC
-                    """
-                ).fetchall()
+                back_sections: list[str] = []
+                for mb in rendered.back.meanings:
+                    if mb.lines:
+                        lines_formatted = [
+                            f"• {line}" if len(mb.lines) > 1 else line
+                            for line in mb.lines
+                        ]
+                        back_sections.append(
+                            f"{mb.heading}\n" + "\n".join(lines_formatted)
+                        )
+                back_text = _sanitize("\n\n".join(back_sections))
 
-            tsv_lines: list[str] = [
-                "#separator:tab",
-                "#html:true",
-                "#notetype:German Vocabulary",
-                "#columns:Front\tBack\tGrammar\tExample\tIPA\tTags",
-            ]
+            grammar_text = _sanitize("\n".join(rendered.back.grammar.lines))
+            ex_lines: list[str] = []
+            for ex in rendered.back.examples:
+                ex_lines.append(ex.de)
+                if ex.en:
+                    ex_lines.append(f"  {ex.en}")
+            example_text = _sanitize("\n".join(ex_lines))
+            ipa_text = _sanitize(rendered.front.ipa or "")
 
-            def _sanitize(text: str | None) -> str:
-                if not text:
-                    return ""
-                s = text.replace("\t", " ")
-                s = re.sub(r"\r\n|\r|\n", "<br>", s)
-                return s
+            tag_list: list[str] = []
+            if deck_names_str:
+                for dname in deck_names_str.split(","):
+                    clean_d = dname.strip().replace(" ", "_")
+                    if clean_d:
+                        tag_list.append(clean_d)
+            if note_status == "needs_gloss":
+                tag_list.append("needs_gloss")
+            if note_status == "orphaned":
+                tag_list.append("orphaned")
+            tags_text = _sanitize(" ".join(tag_list))
 
-            with Dictionary(app.state.dict_path) as dict_obj:
-                for row in rows:
-                    note_id = int(row["note_id"])
-                    note_status = str(row["status"])
-                    lemma_ref = str(row["lemma_semantic_ref"])
-                    sense_ref = (
-                        str(row["sense_semantic_ref"])
-                        if row["sense_semantic_ref"]
-                        else None
-                    )
-                    deck_names_str = str(row["deck_names"]) if row["deck_names"] else ""
-
-                    selected_langs = selected_meaning_languages(conn, note_id)
-                    if not selected_langs:
-                        selected_langs = ("de", "en")
-
-                    user_meanings_rows = conn.execute(
-                        "SELECT lang, meaning_text FROM note_user_meaning WHERE note_id = ?",
-                        (note_id,),
-                    ).fetchall()
-                    user_meanings_dict = {
-                        str(r[0]): str(r[1]) for r in user_meanings_rows
-                    }
-
-                    lemma_cur = dict_obj._conn.execute(
-                        "SELECT id FROM lemma WHERE semantic_ref = ?", (lemma_ref,)
-                    ).fetchone()
-
-                    lemma_entry: LemmaEntry | None = None
-                    senses: list[SenseEntry] = []
-                    meanings: list[Any] = []
-                    examples: list[ExampleEntry] = []
-
-                    if lemma_cur is not None:
-                        lem_id = int(lemma_cur[0])
-                        lemma_entry = dict_obj.get_lemma_by_id(lem_id)
-                        senses = dict_obj.get_senses_for_lemma(lem_id)
-                        meanings = dict_obj.get_meanings_for_lemma(lem_id)
-                        examples = dict_obj.get_examples_for_lemma(lem_id)
-
-                    if lemma_entry is None:
-                        raw_headword = lemma_ref.split(":")[-1]
-                        lemma_data = RenderLemmaData(lemma=raw_headword, pos="NOUN")
-                    else:
-                        lemma_data = RenderLemmaData.from_lemma_entry(lemma_entry)
-
-                    meaning_blocks: list[MeaningBlock] = []
-                    for lang in ("de", "en"):
-                        if lang in selected_langs:
-                            if lang in user_meanings_dict:
-                                meaning_blocks.append(
-                                    MeaningBlock(
-                                        language=lang,
-                                        origin="user",
-                                        texts=(user_meanings_dict[lang],),
-                                    )
-                                )
-                            else:
-                                sense_match_ids = [
-                                    s.id for s in senses if s.semantic_ref == sense_ref
-                                ]
-                                has_matching_sense = any(
-                                    s.semantic_ref == sense_ref for s in senses
-                                )
-                                matching_m = [
-                                    m.text
-                                    for m in meanings
-                                    if m.language == lang
-                                    and (
-                                        sense_ref is None
-                                        or m.sense_id in sense_match_ids
-                                        or not has_matching_sense
-                                    )
-                                ]
-                                if matching_m:
-                                    meaning_blocks.append(
-                                        MeaningBlock(
-                                            language=lang,
-                                            origin="dictionary",
-                                            texts=tuple(matching_m),
-                                        )
-                                    )
-
-                    render_examples_list = tuple(
-                        RenderExample.from_example_entry(e) for e in examples
-                    )
-
-                    render_input = CardRenderInput(
-                        lemma=lemma_data,
-                        selected_languages=selected_langs,
-                        meanings=tuple(meaning_blocks),
-                        examples=render_examples_list,
-                    )
-                    rendered = render_card(render_input)
-
-                    front_text = _sanitize(rendered.front.text)
-                    if note_status == "needs_gloss" or not rendered.back.meanings:
-                        back_text = ""
-                    else:
-                        back_sections: list[str] = []
-                        for mb in rendered.back.meanings:
-                            if mb.lines:
-                                lines_formatted = [
-                                    f"• {line}" if len(mb.lines) > 1 else line
-                                    for line in mb.lines
-                                ]
-                                back_sections.append(
-                                    f"{mb.heading}\n" + "\n".join(lines_formatted)
-                                )
-                        back_text = _sanitize("\n\n".join(back_sections))
-
-                    grammar_text = _sanitize("\n".join(rendered.back.grammar.lines))
-                    ex_lines: list[str] = []
-                    for ex in rendered.back.examples:
-                        ex_lines.append(ex.de)
-                        if ex.en:
-                            ex_lines.append(f"  {ex.en}")
-                    example_text = _sanitize("\n".join(ex_lines))
-                    ipa_text = _sanitize(rendered.front.ipa or "")
-
-                    tag_list: list[str] = []
-                    if deck_names_str:
-                        for dname in deck_names_str.split(","):
-                            clean_d = dname.strip().replace(" ", "_")
-                            if clean_d:
-                                tag_list.append(clean_d)
-                    if note_status == "needs_gloss":
-                        tag_list.append("needs_gloss")
-                    if note_status == "orphaned":
-                        tag_list.append("orphaned")
-                    tags_text = _sanitize(" ".join(tag_list))
-
-                    tsv_lines.append(
-                        f"{front_text}\t{back_text}\t{grammar_text}\t"
-                        f"{example_text}\t{ipa_text}\t{tags_text}"
-                    )
-
-            tsv_body = "\n".join(tsv_lines) + "\n"
-            return Response(
-                content=tsv_body,
-                media_type="text/tab-separated-values; charset=utf-8",
+            tsv_lines.append(
+                f"{front_text}\t{back_text}\t{grammar_text}\t"
+                f"{example_text}\t{ipa_text}\t{tags_text}"
             )
-        finally:
-            conn.close()
+
+        tsv_body = "\n".join(tsv_lines) + "\n"
+        return Response(
+            content=tsv_body,
+            media_type="text/tab-separated-values; charset=utf-8",
+        )
 
     return app

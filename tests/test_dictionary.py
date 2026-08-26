@@ -527,6 +527,8 @@ def _assert_payload_pure(obj: object) -> None:
         for slot in getattr(obj, "__slots__"):
             val = getattr(obj, slot)
             _check(val, slot)
+    elif isinstance(obj, (MappingProxyType, tuple)):
+        _check(obj, "root")
     else:
         raise AssertionError(f"Object {type(obj)} does not use __slots__")
 
@@ -559,6 +561,41 @@ def test_e1_reading_snapshot_payload_purity(
             _assert_payload_pure(snapshot)
             assert isinstance(snapshot.asset_token, str)
             assert len(snapshot.asset_token) == 64
+    finally:
+        runtime.close()
+
+
+def test_e1_observation_payload_purity(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """Certified payload purity walker over observation payloads."""
+    runtime, _ = _make_runtime(tmp_path, part_a_schema, user_db_path)
+    try:
+        # 1. Card render observation payload (empty DB returns None)
+        card_obs_none = runtime.observe_card_render()
+        assert card_obs_none is None
+
+        # 2. Export observation payload
+        export_obs = runtime.observe_export_payload()
+        _assert_payload_pure(export_obs)
+        assert isinstance(export_obs, tuple)
+
+        # 3. Lookup candidate payload
+        token, candidates = runtime.materialize_lookup("See")
+        assert isinstance(token, str)
+        assert isinstance(candidates, tuple)
+        _assert_payload_pure(candidates)
+
+        # 4. Materialize card render payload directly
+        lemma_ref = _stable_ref("lemma", ["de", "See", "NOUN", "der"])
+        mat_payload = runtime.materialize_card_render_payload(lemma_ref)
+        assert mat_payload is not None
+        _assert_payload_pure(mat_payload)
+
+        # 5. Compound components payload
+        comp_payload = runtime.materialize_compound_components([(lemma_ref, "sense:dummy")])
+        assert isinstance(comp_payload, tuple)
+        _assert_payload_pure(comp_payload)
     finally:
         runtime.close()
 

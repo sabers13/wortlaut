@@ -800,6 +800,10 @@ class DictionaryRuntime:
                 gen.pins += 1
                 depth = getattr(self._thread_local, "depth", 0)
                 self._thread_local.depth = depth + 1
+                prev_reader_conn = getattr(self._thread_local, "reader_conn", None)
+                prev_gen = getattr(self._thread_local, "pinned_generation", None)
+                self._thread_local.reader_conn = reader_conn
+                self._thread_local.pinned_generation = gen
             except Exception:
                 if reader_conn is not None:
                     try:
@@ -825,6 +829,9 @@ class DictionaryRuntime:
                 except Exception:
                     pass
 
+            self._thread_local.reader_conn = prev_reader_conn
+            self._thread_local.pinned_generation = prev_gen
+
             if gen is not None:
                 with self._lock:
                     depth = getattr(self._thread_local, "depth", 0)
@@ -836,6 +843,696 @@ class DictionaryRuntime:
                             gen.asset.close()
                         except Exception:
                             pass
+
+    def _materialize_lemma_under_gen(
+        self,
+        conn: sqlite3.Connection,
+        lemma_semantic_ref: str,
+    ) -> tuple[
+        MappingProxyType[str, object] | None,
+        tuple[MappingProxyType[str, object], ...],
+        tuple[MappingProxyType[str, object], ...],
+        tuple[MappingProxyType[str, object], ...],
+    ]:
+        lem_cur = conn.execute(
+            """
+            SELECT id, semantic_ref, lemma, pos, gender, plural, plural_none,
+                   genitive_sg, aux, separable, particle, reflexive, praesens_3sg,
+                   praeteritum_3sg, partizip_ii, governs, comparative, superlative,
+                   ipa, ipa_source, freq_rank, source, license
+            FROM lemma WHERE semantic_ref = ?
+            """,
+            (lemma_semantic_ref,),
+        )
+        lem = lem_cur.fetchone()
+        if lem is None:
+            return (None, (), (), ())
+
+        lem_id = int(lem["id"])
+
+        s_cur = conn.execute(
+            """
+            SELECT id, lemma_id, semantic_ref, source_namespace, source_ref, ord,
+                   register, source, license
+            FROM sense WHERE lemma_id = ?
+            ORDER BY ord ASC, semantic_ref ASC, id ASC
+            """,
+            (lem_id,),
+        )
+        sense_rows = s_cur.fetchall()
+
+        m_cur = conn.execute(
+            """
+            SELECT sm.id, sm.sense_id, sm.language, sm.kind, sm.ord, sm.text,
+                   sm.source, sm.license
+            FROM sense_meaning sm
+            JOIN sense s ON sm.sense_id = s.id
+            WHERE s.lemma_id = ?
+            ORDER BY sm.language ASC, sm.kind ASC, sm.ord ASC, sm.id ASC
+            """,
+            (lem_id,),
+        )
+        meaning_rows = m_cur.fetchall()
+
+        e_cur = conn.execute(
+            """
+            SELECT e.id, e.de, e.en, e.source, e.source_ref, e.license,
+                   e.token_count, e.has_proper
+            FROM example_lemma el
+            JOIN example e ON el.example_id = e.id
+            WHERE el.lemma_id = ?
+            ORDER BY e.id ASC
+            """,
+            (lem_id,),
+        )
+        example_rows = e_cur.fetchall()
+
+        lemma_map = MappingProxyType({
+            "id": lem_id,
+            "semantic_ref": str(lem["semantic_ref"]),
+            "lemma": str(lem["lemma"]),
+            "pos": str(lem["pos"]),
+            "gender": str(lem["gender"]) if lem["gender"] is not None else None,
+            "plural": str(lem["plural"]) if lem["plural"] is not None else None,
+            "plural_none": int(lem["plural_none"]),
+            "genitive_sg": (
+                str(lem["genitive_sg"]) if lem["genitive_sg"] is not None else None
+            ),
+            "aux": str(lem["aux"]) if lem["aux"] is not None else None,
+            "separable": int(lem["separable"]),
+            "particle": str(lem["particle"]) if lem["particle"] is not None else None,
+            "reflexive": int(lem["reflexive"]),
+            "praesens_3sg": (
+                str(lem["praesens_3sg"]) if lem["praesens_3sg"] is not None else None
+            ),
+            "praeteritum_3sg": (
+                str(lem["praeteritum_3sg"]) if lem["praeteritum_3sg"] is not None else None
+            ),
+            "partizip_ii": (
+                str(lem["partizip_ii"]) if lem["partizip_ii"] is not None else None
+            ),
+            "governs": str(lem["governs"]) if lem["governs"] is not None else None,
+            "comparative": (
+                str(lem["comparative"]) if lem["comparative"] is not None else None
+            ),
+            "superlative": (
+                str(lem["superlative"]) if lem["superlative"] is not None else None
+            ),
+            "ipa": str(lem["ipa"]) if lem["ipa"] is not None else None,
+        })
+        senses_tuple = tuple(
+            MappingProxyType({
+                "id": int(s["id"]),
+                "semantic_ref": str(s["semantic_ref"]),
+                "source_namespace": str(s["source_namespace"]),
+                "source_ref": str(s["source_ref"]),
+                "ord": int(s["ord"]),
+                "register": str(s["register"]) if s["register"] is not None else None,
+            })
+            for s in sense_rows
+        )
+        meanings_tuple = tuple(
+            MappingProxyType({
+                "id": int(m["id"]),
+                "sense_id": int(m["sense_id"]),
+                "language": str(m["language"]),
+                "kind": str(m["kind"]),
+                "ord": int(m["ord"]),
+                "text": str(m["text"]),
+            })
+            for m in meaning_rows
+        )
+        examples_tuple = tuple(
+            MappingProxyType({
+                "id": int(ex["id"]),
+                "de": str(ex["de"]),
+                "en": str(ex["en"]) if ex["en"] is not None else None,
+            })
+            for ex in example_rows
+        )
+        return (lemma_map, senses_tuple, meanings_tuple, examples_tuple)
+
+    def _materialize_components_under_gen(
+        self,
+        conn: sqlite3.Connection,
+        comp_rows: Sequence[sqlite3.Row] | Sequence[Mapping[str, str]],
+    ) -> tuple[MappingProxyType[str, object], ...]:
+        components: list[MappingProxyType[str, object]] = []
+        for cr in comp_rows:
+            c_lem_ref = str(cr["lemma_semantic_ref"])
+            c_sense_ref = str(cr["sense_semantic_ref"])
+            lem_cur = conn.execute(
+                "SELECT lemma FROM lemma WHERE semantic_ref = ?", (c_lem_ref,)
+            ).fetchone()
+            lemma_text = (
+                str(lem_cur[0])
+                if lem_cur is not None
+                else c_lem_ref.split(":")[-1]
+            )
+
+            meanings_by_lang: dict[str, str] = {}
+            for lang in ("de", "en"):
+                m_cur = conn.execute(
+                    """
+                    SELECT sm.text FROM sense_meaning sm
+                    JOIN sense s ON s.id = sm.sense_id
+                    WHERE s.semantic_ref = ? AND sm.language = ?
+                    ORDER BY sm.ord ASC LIMIT 1
+                    """,
+                    (c_sense_ref, lang),
+                ).fetchone()
+                if m_cur is not None:
+                    meanings_by_lang[lang] = str(m_cur[0])
+
+            components.append(
+                MappingProxyType({
+                    "lemma_ref": c_lem_ref,
+                    "sense_ref": c_sense_ref,
+                    "lemma": lemma_text,
+                    "meanings": MappingProxyType(meanings_by_lang),
+                })
+            )
+        return tuple(components)
+
+    def _observe_card_render_internal(
+        self,
+        reader_conn: sqlite3.Connection,
+        gen: _Generation,
+        *,
+        card_id: int | None = None,
+        deck_id: int | None = None,
+    ) -> MappingProxyType[str, object] | None:
+        if card_id is not None:
+            row = reader_conn.execute(
+                """
+                SELECT c.id AS card_id, c.note_id, c.due_at, c.state,
+                       c.stability, c.difficulty,
+                       n.lemma_semantic_ref, n.sense_semantic_ref,
+                       n.status AS note_status
+                FROM card c
+                JOIN note n ON n.id = c.note_id
+                WHERE c.id = ?
+                """,
+                (card_id,),
+            ).fetchone()
+        elif deck_id is not None:
+            row = reader_conn.execute(
+                """
+                SELECT c.id AS card_id, c.note_id, c.due_at, c.state,
+                       c.stability, c.difficulty,
+                       n.lemma_semantic_ref, n.sense_semantic_ref,
+                       n.status AS note_status
+                FROM card c
+                JOIN note n ON n.id = c.note_id
+                JOIN note_deck nd ON nd.note_id = n.id
+                WHERE nd.deck_id = ?
+                ORDER BY c.due_at ASC, c.id ASC
+                LIMIT 1
+                """,
+                (deck_id,),
+            ).fetchone()
+        else:
+            row = reader_conn.execute(
+                """
+                SELECT c.id AS card_id, c.note_id, c.due_at, c.state,
+                       c.stability, c.difficulty,
+                       n.lemma_semantic_ref, n.sense_semantic_ref,
+                       n.status AS note_status
+                FROM card c
+                JOIN note n ON n.id = c.note_id
+                ORDER BY c.due_at ASC, c.id ASC
+                LIMIT 1
+                """
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        c_id = int(row["card_id"])
+        n_id = int(row["note_id"])
+        due_at = str(row["due_at"])
+        state = int(row["state"])
+        stability = float(row["stability"]) if row["stability"] is not None else None
+        difficulty = float(row["difficulty"]) if row["difficulty"] is not None else None
+        lemma_ref = str(row["lemma_semantic_ref"])
+        sense_ref = (
+            str(row["sense_semantic_ref"])
+            if row["sense_semantic_ref"]
+            else None
+        )
+        note_status = str(row["note_status"])
+
+        lang_rows = reader_conn.execute(
+            "SELECT lang FROM note_meaning_lang WHERE note_id = ? ORDER BY lang",
+            (n_id,),
+        ).fetchall()
+        selected_langs = (
+            tuple(str(r[0]) for r in lang_rows)
+            if lang_rows
+            else ("de", "en")
+        )
+
+        user_meanings_rows = reader_conn.execute(
+            "SELECT lang, meaning_text FROM note_user_meaning WHERE note_id = ?",
+            (n_id,),
+        ).fetchall()
+        user_meanings_dict = MappingProxyType({
+            str(r[0]): str(r[1]) for r in user_meanings_rows
+        })
+
+        custom_row = reader_conn.execute(
+            "SELECT 1 FROM custom_pronunciation WHERE note_id = ?",
+            (n_id,),
+        ).fetchone()
+        has_custom_audio = custom_row is not None
+
+        comp_rows: list[sqlite3.Row] = []
+        if note_status == "derived_compound":
+            comp_rows = reader_conn.execute(
+                """
+                SELECT component_ord, lemma_semantic_ref, sense_semantic_ref
+                FROM note_dictionary_binding
+                WHERE note_id = ? AND role = 'component'
+                ORDER BY component_ord ASC
+                """,
+                (n_id,),
+            ).fetchall()
+
+        dict_conn = gen.asset.connection
+        components = (
+            self._materialize_components_under_gen(dict_conn, comp_rows)
+            if comp_rows
+            else ()
+        )
+
+        lemma_map, senses_tuple, meanings_tuple, examples_tuple = (
+            self._materialize_lemma_under_gen(dict_conn, lemma_ref)
+        )
+
+        payload_dict: dict[str, object] = {
+            "card_id": c_id,
+            "note_id": n_id,
+            "due_at": due_at,
+            "state": state,
+            "stability": stability,
+            "difficulty": difficulty,
+            "note_status": note_status,
+            "lemma_semantic_ref": lemma_ref,
+            "sense_semantic_ref": sense_ref,
+            "asset_token": str(gen.asset.asset_token),
+            "selected_languages": selected_langs,
+            "user_meanings": user_meanings_dict,
+            "has_custom_audio": has_custom_audio,
+            "components": components,
+            "lemma": lemma_map,
+            "senses": senses_tuple,
+            "meanings": meanings_tuple,
+            "examples": examples_tuple,
+        }
+        return MappingProxyType(payload_dict)
+
+    def _observe_export_payload_internal(
+        self,
+        reader_conn: sqlite3.Connection,
+        gen: _Generation,
+        *,
+        deck_id: int | None = None,
+    ) -> tuple[MappingProxyType[str, object], ...]:
+        if deck_id is not None:
+            rows = reader_conn.execute(
+                """
+                SELECT c.id AS card_id, n.id AS note_id, n.status,
+                       n.lemma_semantic_ref, n.sense_semantic_ref,
+                       GROUP_CONCAT(DISTINCT d.name) AS deck_names
+                FROM card c
+                JOIN note n ON n.id = c.note_id
+                JOIN note_deck nd ON nd.note_id = n.id
+                JOIN deck d ON d.id = nd.deck_id
+                WHERE d.id = ?
+                GROUP BY c.id, n.id, n.status, n.lemma_semantic_ref,
+                         n.sense_semantic_ref
+                ORDER BY c.id ASC
+                """,
+                (deck_id,),
+            ).fetchall()
+        else:
+            rows = reader_conn.execute(
+                """
+                SELECT c.id AS card_id, n.id AS note_id, n.status,
+                       n.lemma_semantic_ref, n.sense_semantic_ref,
+                       GROUP_CONCAT(DISTINCT d.name) AS deck_names
+                FROM card c
+                JOIN note n ON n.id = c.note_id
+                LEFT JOIN note_deck nd ON nd.note_id = n.id
+                LEFT JOIN deck d ON d.id = nd.deck_id
+                GROUP BY c.id, n.id, n.status, n.lemma_semantic_ref,
+                         n.sense_semantic_ref
+                ORDER BY c.id ASC
+                """
+            ).fetchall()
+
+        dict_conn = gen.asset.connection
+        token = str(gen.asset.asset_token)
+        export_items: list[MappingProxyType[str, object]] = []
+
+        for row in rows:
+            c_id = int(row["card_id"])
+            n_id = int(row["note_id"])
+            note_status = str(row["status"])
+            lemma_ref = str(row["lemma_semantic_ref"])
+            sense_ref = (
+                str(row["sense_semantic_ref"])
+                if row["sense_semantic_ref"]
+                else None
+            )
+            deck_names_str = str(row["deck_names"]) if row["deck_names"] else ""
+
+            lang_rows = reader_conn.execute(
+                "SELECT lang FROM note_meaning_lang WHERE note_id = ? ORDER BY lang",
+                (n_id,),
+            ).fetchall()
+            selected_langs = (
+                tuple(str(r[0]) for r in lang_rows)
+                if lang_rows
+                else ("de", "en")
+            )
+
+            user_meanings_rows = reader_conn.execute(
+                "SELECT lang, meaning_text FROM note_user_meaning WHERE note_id = ?",
+                (n_id,),
+            ).fetchall()
+            user_meanings_dict = MappingProxyType({
+                str(r[0]): str(r[1]) for r in user_meanings_rows
+            })
+
+            custom_row = reader_conn.execute(
+                "SELECT 1 FROM custom_pronunciation WHERE note_id = ?",
+                (n_id,),
+            ).fetchone()
+            has_custom_audio = custom_row is not None
+
+            comp_rows: list[sqlite3.Row] = []
+            if note_status == "derived_compound":
+                comp_rows = reader_conn.execute(
+                    """
+                    SELECT component_ord, lemma_semantic_ref, sense_semantic_ref
+                    FROM note_dictionary_binding
+                    WHERE note_id = ? AND role = 'component'
+                    ORDER BY component_ord ASC
+                    """,
+                    (n_id,),
+                ).fetchall()
+
+            components = (
+                self._materialize_components_under_gen(dict_conn, comp_rows)
+                if comp_rows
+                else ()
+            )
+
+            lemma_map, senses_tuple, meanings_tuple, examples_tuple = (
+                self._materialize_lemma_under_gen(dict_conn, lemma_ref)
+            )
+
+            card_dict: dict[str, object] = {
+                "card_id": c_id,
+                "note_id": n_id,
+                "due_at": "",
+                "state": 0,
+                "stability": None,
+                "difficulty": None,
+                "note_status": note_status,
+                "lemma_semantic_ref": lemma_ref,
+                "sense_semantic_ref": sense_ref,
+                "deck_names": deck_names_str,
+                "asset_token": token,
+                "selected_languages": selected_langs,
+                "user_meanings": user_meanings_dict,
+                "has_custom_audio": has_custom_audio,
+                "components": components,
+                "lemma": lemma_map,
+                "senses": senses_tuple,
+                "meanings": meanings_tuple,
+                "examples": examples_tuple,
+            }
+            export_items.append(MappingProxyType(card_dict))
+
+        return tuple(export_items)
+
+    def observe_card_render(
+        self,
+        card_id: int | None = None,
+        *,
+        deck_id: int | None = None,
+    ) -> MappingProxyType[str, object] | None:
+        """Observe next or specified card render payload inside a single read pin."""
+        active_reader_conn = getattr(self._thread_local, "reader_conn", None)
+        active_gen = getattr(self._thread_local, "pinned_generation", None)
+
+        if active_reader_conn is not None and active_gen is not None:
+            return self._observe_card_render_internal(
+                active_reader_conn, active_gen, card_id=card_id, deck_id=deck_id
+            )
+
+        with self.reading():
+            reader_conn = getattr(self._thread_local, "reader_conn", None)
+            gen = getattr(self._thread_local, "pinned_generation", None)
+            if reader_conn is None or gen is None:
+                raise DictionaryRuntimeError("reader connection not available")
+            return self._observe_card_render_internal(
+                reader_conn, gen, card_id=card_id, deck_id=deck_id
+            )
+
+    def observe_export_payload(
+        self,
+        deck_id: int | None = None,
+    ) -> tuple[MappingProxyType[str, object], ...]:
+        """Observe export card payloads inside a single read pin."""
+        active_reader_conn = getattr(self._thread_local, "reader_conn", None)
+        active_gen = getattr(self._thread_local, "pinned_generation", None)
+
+        if active_reader_conn is not None and active_gen is not None:
+            return self._observe_export_payload_internal(
+                active_reader_conn, active_gen, deck_id=deck_id
+            )
+
+        with self.reading():
+            reader_conn = getattr(self._thread_local, "reader_conn", None)
+            gen = getattr(self._thread_local, "pinned_generation", None)
+            if reader_conn is None or gen is None:
+                raise DictionaryRuntimeError("reader connection not available")
+            return self._observe_export_payload_internal(reader_conn, gen, deck_id=deck_id)
+
+    def materialize_lookup(
+        self, query: str
+    ) -> tuple[str, tuple[MappingProxyType[str, object], ...]]:
+        """Look up exact and surface lemmas, returning (asset_token, candidate_entries)."""
+        clean_q = query.strip()
+        if not clean_q:
+            return ("", ())
+
+        with self._lock:
+            if self._closed:
+                raise DictionaryClosedError("runtime is closed")
+            gen = self._current_generation
+            token = gen.asset.asset_token
+            conn = gen.asset.connection
+
+            # 1. Exact lemmas
+            cur = conn.execute(
+                """
+                SELECT id, semantic_ref, lemma, pos, gender, plural, plural_none,
+                       genitive_sg, aux, separable, particle, reflexive, praesens_3sg,
+                       praeteritum_3sg, partizip_ii, governs, comparative, superlative,
+                       ipa, ipa_source, freq_rank, source, license
+                FROM lemma
+                WHERE (lemma = ? OR lower(lemma) = ?)
+                ORDER BY freq_rank ASC NULLS LAST, pos ASC, gender ASC NULLS LAST, semantic_ref ASC
+                """,
+                (clean_q, clean_q.lower()),
+            )
+            exact_rows = cur.fetchall()
+
+            # 2. Surface lemmas (if no exact lemmas)
+            surface_rows: list[sqlite3.Row] = []
+            if not exact_rows:
+                cur = conn.execute(
+                    """
+                    SELECT l.id, l.semantic_ref, l.lemma, l.pos, l.gender, l.plural,
+                           l.plural_none, l.genitive_sg, l.aux, l.separable, l.particle,
+                           l.reflexive, l.praesens_3sg, l.praeteritum_3sg, l.partizip_ii,
+                           l.governs, l.comparative, l.superlative, l.ipa, l.ipa_source,
+                           l.freq_rank, l.source, l.license
+                    FROM surface_form sf
+                    JOIN lemma l ON sf.lemma_id = l.id
+                    WHERE (sf.form = ? OR lower(sf.form) = ?)
+                    ORDER BY l.freq_rank ASC NULLS LAST, l.pos ASC, l.gender ASC NULLS LAST,
+                             l.semantic_ref ASC
+                    """,
+                    (clean_q, clean_q.lower()),
+                )
+                seen_ids: set[int] = set()
+                for r in cur.fetchall():
+                    lid = int(r["id"])
+                    if lid not in seen_ids:
+                        seen_ids.add(lid)
+                        surface_rows.append(r)
+
+            all_lemma_rows = exact_rows if exact_rows else surface_rows
+            if not all_lemma_rows:
+                return (token, ())
+
+            candidates: list[MappingProxyType[str, object]] = []
+            for lem in all_lemma_rows:
+                lem_id = int(lem["id"])
+
+                # Senses
+                s_cur = conn.execute(
+                    """
+                    SELECT id, lemma_id, semantic_ref, source_namespace, source_ref, ord,
+                           register, source, license
+                    FROM sense WHERE lemma_id = ?
+                    ORDER BY ord ASC, semantic_ref ASC, id ASC
+                    """,
+                    (lem_id,),
+                )
+                sense_rows = s_cur.fetchall()
+
+                # Meanings
+                m_cur = conn.execute(
+                    """
+                    SELECT sm.id, sm.sense_id, sm.language, sm.kind, sm.ord, sm.text,
+                           sm.source, sm.license
+                    FROM sense_meaning sm
+                    JOIN sense s ON sm.sense_id = s.id
+                    WHERE s.lemma_id = ?
+                    ORDER BY sm.language ASC, sm.kind ASC, sm.ord ASC, sm.id ASC
+                    """,
+                    (lem_id,),
+                )
+                meaning_rows = m_cur.fetchall()
+
+                # Examples
+                e_cur = conn.execute(
+                    """
+                    SELECT e.id, e.de, e.en, e.source, e.source_ref, e.license,
+                           e.token_count, e.has_proper
+                    FROM example_lemma el
+                    JOIN example e ON el.example_id = e.id
+                    WHERE el.lemma_id = ?
+                    ORDER BY e.id ASC
+                    """,
+                    (lem_id,),
+                )
+                example_rows = e_cur.fetchall()
+
+                senses_data: list[MappingProxyType[str, object]] = []
+                for s in sense_rows:
+                    sid = int(s["id"])
+                    meanings_data = tuple(
+                        MappingProxyType({
+                            "language": str(m["language"]),
+                            "kind": str(m["kind"]),
+                            "text": str(m["text"]),
+                            "ord": int(m["ord"]),
+                        })
+                        for m in meaning_rows
+                        if int(m["sense_id"]) == sid
+                    )
+                    senses_data.append(
+                        MappingProxyType({
+                            "sense_id": sid,
+                            "sense_semantic_ref": str(s["semantic_ref"]),
+                            "source_namespace": str(s["source_namespace"]),
+                            "source_ref": str(s["source_ref"]),
+                            "ord": int(s["ord"]),
+                            "register": str(s["register"]) if s["register"] is not None else None,
+                            "meanings": meanings_data,
+                        })
+                    )
+
+                candidates.append(
+                    MappingProxyType({
+                        "lemma_id": lem_id,
+                        "lemma_semantic_ref": str(lem["semantic_ref"]),
+                        "lemma": str(lem["lemma"]),
+                        "pos": str(lem["pos"]),
+                        "gender": str(lem["gender"]) if lem["gender"] is not None else None,
+                        "plural": str(lem["plural"]) if lem["plural"] is not None else None,
+                        "plural_none": int(lem["plural_none"]),
+                        "genitive_sg": (
+                            str(lem["genitive_sg"]) if lem["genitive_sg"] is not None else None
+                        ),
+                        "aux": str(lem["aux"]) if lem["aux"] is not None else None,
+                        "separable": int(lem["separable"]),
+                        "particle": str(lem["particle"]) if lem["particle"] is not None else None,
+                        "reflexive": int(lem["reflexive"]),
+                        "praesens_3sg": (
+                            str(lem["praesens_3sg"]) if lem["praesens_3sg"] is not None else None
+                        ),
+                        "praeteritum_3sg": (
+                            str(lem["praeteritum_3sg"])
+                            if lem["praeteritum_3sg"] is not None
+                            else None
+                        ),
+                        "partizip_ii": (
+                            str(lem["partizip_ii"]) if lem["partizip_ii"] is not None else None
+                        ),
+                        "governs": str(lem["governs"]) if lem["governs"] is not None else None,
+                        "comparative": (
+                            str(lem["comparative"]) if lem["comparative"] is not None else None
+                        ),
+                        "superlative": (
+                            str(lem["superlative"]) if lem["superlative"] is not None else None
+                        ),
+                        "ipa": str(lem["ipa"]) if lem["ipa"] is not None else None,
+                        "senses": tuple(senses_data),
+                        "examples": tuple(
+                            MappingProxyType({
+                                "de": str(ex["de"]),
+                                "en": str(ex["en"]) if ex["en"] is not None else None,
+                            })
+                            for ex in example_rows
+                        ),
+                    })
+                )
+
+            return (token, tuple(candidates))
+
+    def materialize_card_render_payload(
+        self, lemma_semantic_ref: str
+    ) -> MappingProxyType[str, object] | None:
+        """Materialize immutable lemma data, senses, meanings, and examples for card rendering."""
+        with self._lock:
+            if self._closed:
+                raise DictionaryClosedError("runtime is closed")
+            gen = self._current_generation
+            conn = gen.asset.connection
+            lemma_map, senses_tuple, meanings_tuple, examples_tuple = (
+                self._materialize_lemma_under_gen(conn, lemma_semantic_ref)
+            )
+            if lemma_map is None:
+                return None
+            return MappingProxyType({
+                "lemma": lemma_map,
+                "senses": senses_tuple,
+                "meanings": meanings_tuple,
+                "examples": examples_tuple,
+            })
+
+    def materialize_compound_components(
+        self, component_refs: Sequence[tuple[str, str]]
+    ) -> tuple[MappingProxyType[str, object], ...]:
+        """Materialize immutable compound component lemma texts and meanings for languages."""
+        with self._lock:
+            if self._closed:
+                raise DictionaryClosedError("runtime is closed")
+            gen = self._current_generation
+            conn = gen.asset.connection
+            comp_rows = [
+                {"lemma_semantic_ref": cr[0], "sense_semantic_ref": cr[1]}
+                for cr in component_refs
+            ]
+            return self._materialize_components_under_gen(conn, comp_rows)
 
     def activate_dictionary(
         self,
