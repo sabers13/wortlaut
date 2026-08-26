@@ -14,10 +14,19 @@ Never accesses, writes, or references PART B user tables (AGENTS R9 / C2).
 
 from __future__ import annotations
 
+import json
+import os
+import re
 import sqlite3
+import stat
+import tempfile
+import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Sequence
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from app.resolve import (
     LemmaRecord,
@@ -110,6 +119,322 @@ class DictionaryEntry:
     examples: list[ExampleEntry]
     surface_forms: list[str]
     meanings: list[MeaningEntry] = field(default_factory=list)
+
+
+class DictionaryAssetError(ValueError):
+    """Raised when a candidate dictionary cannot safely be activated later."""
+
+
+_REQUIRED_PART_A_COLUMNS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "lemma": frozenset(
+            {
+                "id", "semantic_ref", "lemma", "pos", "gender", "plural",
+                "plural_none", "genitive_sg", "aux", "separable", "particle",
+                "reflexive", "praesens_3sg", "praeteritum_3sg", "partizip_ii",
+                "governs", "comparative", "superlative", "ipa", "ipa_source",
+                "freq_rank", "source", "license",
+            }
+        ),
+        "surface_form": frozenset({"form", "lemma_id"}),
+        "sense": frozenset(
+            {
+                "id", "lemma_id", "semantic_ref", "source_namespace", "source_ref",
+                "ord", "register", "source", "license",
+            }
+        ),
+        "sense_meaning": frozenset(
+            {"id", "sense_id", "language", "kind", "ord", "text", "source", "license"}
+        ),
+        "sense_meaning_derivation": frozenset(
+            {"generated_meaning_id", "source_meaning_id"}
+        ),
+        "example": frozenset(
+            {"id", "de", "en", "source", "source_ref", "license", "token_count", "has_proper"}
+        ),
+        "example_lemma": frozenset({"lemma_id", "example_id"}),
+    }
+)
+_LEMMA_REF_RE = re.compile(r"lemma:v1:[0-9a-f]{64}\Z")
+_SENSE_REF_RE = re.compile(r"sense:v1:[0-9a-f]{64}\Z")
+
+
+def _canonical_payload(values: Sequence[str]) -> bytes:
+    """Serialize exact persisted fields for a D47 identity hash."""
+    return json.dumps(list(values), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _identity_fingerprint(values: Sequence[str]) -> str:
+    """Return the SHA-256 fingerprint of one exact stable-identity tuple."""
+    return sha256(_canonical_payload(values)).hexdigest()
+
+
+def _required_text(value: object, field_name: str) -> str:
+    """Return exact canonical text without coercion, trimming, or normalization."""
+    if (
+        not isinstance(value, str)
+        or value == ""
+        or value[0].isspace()
+        or value[-1].isspace()
+        or not unicodedata.is_normalized("NFC", value)
+    ):
+        raise DictionaryAssetError(f"candidate has invalid {field_name}")
+    return value
+
+
+def _optional_text(value: object, field_name: str) -> str | None:
+    """Return exact nullable text, rejecting all non-text SQLite values."""
+    return None if value is None else _required_text(value, field_name)
+
+
+def _required_id(value: object, field_name: str) -> int:
+    """Return an uncoerced SQLite integer identifier."""
+    if type(value) is not int:
+        raise DictionaryAssetError(f"candidate has invalid {field_name}")
+    return value
+
+
+def _has_unique_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Check for the required single-column unique constraint/index."""
+    for index in conn.execute(f"PRAGMA index_list({table})"):
+        if int(index[2]) != 1:
+            continue
+        index_name = str(index[1]).replace("'", "''")
+        columns = conn.execute(f"PRAGMA index_info('{index_name}')").fetchall()
+        if [str(index_column[2]) for index_column in columns] == [column]:
+            return True
+    return False
+
+
+def _has_foreign_key(
+    conn: sqlite3.Connection, table: str, column: str, target_table: str
+) -> bool:
+    """Check a required PART-A foreign-key link."""
+    return any(
+        str(row[2]) == target_table and str(row[3]) == column
+        for row in conn.execute(f"PRAGMA foreign_key_list({table})")
+    )
+
+
+def _validate_part_a_schema(conn: sqlite3.Connection) -> None:
+    """Validate the PART-A shape and D47 constraints needed for safe relinking."""
+    tables = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    for table, required_columns in _REQUIRED_PART_A_COLUMNS.items():
+        if table not in tables:
+            raise DictionaryAssetError(f"candidate lacks PART-A table {table}")
+        columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+        if missing := required_columns - columns:
+            raise DictionaryAssetError(
+                f"candidate table {table} lacks columns: {', '.join(sorted(missing))}"
+            )
+
+    lemma_info = {str(row[1]): row for row in conn.execute("PRAGMA table_info(lemma)")}
+    sense_info = {str(row[1]): row for row in conn.execute("PRAGMA table_info(sense)")}
+    if int(lemma_info["id"][5]) != 1:
+        raise DictionaryAssetError("candidate lemma.id is not a primary key")
+    if int(sense_info["id"][5]) != 1:
+        raise DictionaryAssetError("candidate sense.id is not a primary key")
+    if int(lemma_info["semantic_ref"][3]) != 1 or not _has_unique_column(
+        conn, "lemma", "semantic_ref"
+    ):
+        raise DictionaryAssetError("candidate lemma.semantic_ref must be NOT NULL and UNIQUE")
+    if (
+        int(sense_info["lemma_id"][3]) != 1
+        or int(sense_info["semantic_ref"][3]) != 1
+        or int(sense_info["source_namespace"][3]) != 1
+        or int(sense_info["source_ref"][3]) != 1
+        or not _has_unique_column(conn, "sense", "semantic_ref")
+        or not _has_foreign_key(conn, "sense", "lemma_id", "lemma")
+    ):
+        raise DictionaryAssetError("candidate sense D47 identity constraints are incomplete")
+
+
+def _build_lemma_ref_maps(
+    rows: Iterable[tuple[object, object, object, object, object]],
+) -> tuple[dict[str, int], dict[str, str], dict[int, str]]:
+    """Verify lemma refs and build indexes from exact persisted row values."""
+    lemma_ids: dict[str, int] = {}
+    fingerprints: dict[str, str] = {}
+    refs_by_id: dict[int, str] = {}
+    for raw_id, raw_ref, raw_lemma, raw_pos, raw_gender in rows:
+        lemma_id = _required_id(raw_id, "lemma.id")
+        ref = _required_text(raw_ref, "lemma.semantic_ref")
+        lemma = _required_text(raw_lemma, "lemma.lemma")
+        pos = _required_text(raw_pos, "lemma.pos")
+        gender = _optional_text(raw_gender, "lemma.gender")
+        fingerprint = _identity_fingerprint(("de", lemma, pos, gender or "<null>"))
+        if not _LEMMA_REF_RE.fullmatch(ref) or ref != f"lemma:v1:{fingerprint}":
+            raise DictionaryAssetError("candidate lemma semantic_ref is malformed or mismatched")
+        if ref in lemma_ids or lemma_id in refs_by_id:
+            raise DictionaryAssetError("candidate has duplicate or ambiguous lemma semantic_ref")
+        lemma_ids[ref] = lemma_id
+        fingerprints[ref] = fingerprint
+        refs_by_id[lemma_id] = ref
+    return lemma_ids, fingerprints, refs_by_id
+
+
+def _build_sense_ref_maps(
+    rows: Iterable[tuple[object, object, object, object, object]],
+    lemma_refs_by_id: Mapping[int, str],
+) -> tuple[dict[str, tuple[int, int]], dict[str, str]]:
+    """Verify sense refs and build indexes from exact persisted row values."""
+    sense_ids: dict[str, tuple[int, int]] = {}
+    fingerprints: dict[str, str] = {}
+    for raw_id, raw_lemma_id, raw_ref, raw_namespace, raw_source_ref in rows:
+        sense_id = _required_id(raw_id, "sense.id")
+        lemma_id = _required_id(raw_lemma_id, "sense.lemma_id")
+        ref = _required_text(raw_ref, "sense.semantic_ref")
+        namespace = _required_text(raw_namespace, "sense.source_namespace")
+        source_ref = _required_text(raw_source_ref, "sense.source_ref")
+        lemma_ref = lemma_refs_by_id.get(lemma_id)
+        if lemma_ref is None:
+            raise DictionaryAssetError("candidate sense references an unknown lemma")
+        fingerprint = _identity_fingerprint((lemma_ref, namespace, source_ref))
+        if not _SENSE_REF_RE.fullmatch(ref) or ref != f"sense:v1:{fingerprint}":
+            raise DictionaryAssetError("candidate sense semantic_ref is malformed or mismatched")
+        if ref in sense_ids:
+            raise DictionaryAssetError("candidate has duplicate or ambiguous sense semantic_ref")
+        sense_ids[ref] = (sense_id, lemma_id)
+        fingerprints[ref] = fingerprint
+    return sense_ids, fingerprints
+
+
+class _AssetLease:
+    """Own one private byte snapshot and its read-only SQLite connection."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+        self._released = False
+
+    def release(self) -> None:
+        """Release both resources; safe to call more than once."""
+        if self._released:
+            return
+        self._released = True
+        self.connection.close()
+
+
+@dataclass(frozen=True, slots=True)
+class DictionaryAsset:
+    """Validated immutable snapshot plus D47 indexes for a later atomic swap."""
+
+    path: Path
+    sha256: str
+    lemma_ids: Mapping[str, int]
+    sense_ids: Mapping[str, tuple[int, int]]
+    lemma_identity_fingerprints: Mapping[str, str]
+    sense_identity_fingerprints: Mapping[str, str]
+    _lease: _AssetLease = field(repr=False, compare=False)
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Return the prevalidated read-only handle for the hashed snapshot."""
+        return self._lease.connection
+
+    @property
+    def asset_token(self) -> str:
+        """Return the digest token a later activation owner will publish."""
+        return self.sha256
+
+    def close(self) -> None:
+        """Close/release the candidate snapshot when it is not installed."""
+        self._lease.release()
+
+    def release(self) -> None:
+        """Alias for close, for activation rollback paths."""
+        self.close()
+
+
+def _snapshot_candidate(path: Path) -> tuple[sqlite3.Connection, str]:
+    """Copy candidate bytes once into an unlinked private snapshot and open it read-only."""
+    sidecars = (Path(f"{path}-journal"), Path(f"{path}-wal"), Path(f"{path}-shm"))
+    if any(sidecar.exists() for sidecar in sidecars):
+        raise DictionaryAssetError("candidate has SQLite sidecar state outside its asset bytes")
+    try:
+        # This is deliberately the sole read of candidate content: the digest,
+        # validation, indexes, and retained handle all derive from these bytes.
+        candidate_bytes = path.read_bytes()
+    except OSError as exc:
+        raise DictionaryAssetError(f"candidate cannot be read: {path}") from exc
+    digest = sha256(candidate_bytes).hexdigest()
+    descriptor, snapshot_name = tempfile.mkstemp(suffix=".sqlite")
+    snapshot_path = Path(snapshot_name)
+    connection: sqlite3.Connection | None = None
+    try:
+        with os.fdopen(descriptor, "wb") as snapshot:
+            snapshot.write(candidate_bytes)
+            snapshot.flush()
+            os.fsync(snapshot.fileno())
+            if not stat.S_ISREG(os.fstat(snapshot.fileno()).st_mode):
+                raise DictionaryAssetError("candidate snapshot is not a regular file")
+        connection = sqlite3.connect(
+            f"{snapshot_path.as_uri()}?mode=ro&immutable=1",
+            uri=True,
+            check_same_thread=False,
+        )
+        connection.row_factory = sqlite3.Row
+        snapshot_path.unlink()
+        return connection, digest
+    except (OSError, sqlite3.Error, DictionaryAssetError) as exc:
+        if connection is not None:
+            connection.close()
+        snapshot_path.unlink(missing_ok=True)
+        if isinstance(exc, DictionaryAssetError):
+            raise
+        raise DictionaryAssetError(
+            "candidate cannot be opened as a read-only SQLite asset"
+        ) from exc
+
+
+def validate_candidate_dictionary(path: Path | str) -> DictionaryAsset:
+    """Validate a candidate PART-A asset against one immutable byte snapshot.
+
+    The reported digest is over the one source read. The SQLite checks, D47 map
+    construction, and retained handle all operate on an unlinked temporary copy
+    of those exact bytes, never the candidate pathname after that read.
+    """
+    candidate_path = Path(path)
+    if not candidate_path.is_file():
+        raise DictionaryAssetError(f"candidate dictionary file not found: {candidate_path}")
+    connection, asset_sha256 = _snapshot_candidate(candidate_path)
+    try:
+        integrity_rows = connection.execute("PRAGMA integrity_check").fetchall()
+        if not integrity_rows or any(str(row[0]).lower() != "ok" for row in integrity_rows):
+            raise DictionaryAssetError("candidate integrity_check failed")
+        if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise DictionaryAssetError("candidate foreign_key_check failed")
+        _validate_part_a_schema(connection)
+        lemma_ids, lemma_fingerprints, lemma_refs_by_id = _build_lemma_ref_maps(
+            connection.execute("SELECT id, semantic_ref, lemma, pos, gender FROM lemma")
+        )
+        sense_ids, sense_fingerprints = _build_sense_ref_maps(
+            connection.execute(
+                "SELECT id, lemma_id, semantic_ref, source_namespace, source_ref FROM sense"
+            ),
+            lemma_refs_by_id,
+        )
+        return DictionaryAsset(
+            path=candidate_path,
+            sha256=asset_sha256,
+            lemma_ids=MappingProxyType(lemma_ids),
+            sense_ids=MappingProxyType(sense_ids),
+            lemma_identity_fingerprints=MappingProxyType(lemma_fingerprints),
+            sense_identity_fingerprints=MappingProxyType(sense_fingerprints),
+            _lease=_AssetLease(connection),
+        )
+    except (sqlite3.Error, ValueError, TypeError) as exc:
+        connection.close()
+        if isinstance(exc, DictionaryAssetError):
+            raise
+        raise DictionaryAssetError("candidate PART-A validation failed") from exc
+
+
+def inspect_dictionary_asset(path: Path | str) -> DictionaryAsset:
+    """Backward-compatible name for candidate validation without activation."""
+    return validate_candidate_dictionary(path)
 
 
 def _row_to_lemma(row: sqlite3.Row) -> LemmaEntry:

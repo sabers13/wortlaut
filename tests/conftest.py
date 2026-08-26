@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -11,6 +11,35 @@ import pytest
 
 from app.resolve import LemmaRecord, LookupProtocol, SenseRecord
 from tools.build_dict import compute_lemma_semantic_ref
+
+
+@pytest.fixture
+def user_db_path(tmp_path: Path) -> Path:
+    """Create an isolated PART-B user database from the reference schema."""
+    schema = (Path(__file__).parents[1] / "reference" / "schema.sql").read_text()
+    _, marker, part_b = schema.partition("-- PART B")
+    assert marker, "reference schema must contain a PART B section"
+    path = tmp_path / "user_test.sqlite"
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript("-- PART B" + part_b)
+        conn.execute("PRAGMA foreign_keys = ON")
+    finally:
+        conn.close()
+    return path
+
+
+@pytest.fixture
+def user_db(user_db_path: Path) -> Generator[sqlite3.Connection, None, None]:
+    """Open the isolated user database with foreign-key enforcement enabled."""
+    conn = sqlite3.connect(user_db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        yield conn
+    finally:
+        conn.close()
+
 
 PART_A_SCHEMA_SQL = """
 -- Numeric IDs (lemma.id, sense.id, etc.) are local per-asset keys only.

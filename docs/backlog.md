@@ -91,6 +91,13 @@ them. REJECTED items are listed so they do not resurface.
 
 ## Standing
 
+- **PART-B defense-in-depth note (RN1, slice-7 full-diff review #1 finding 4):**
+  `note_meaning_lang` non-emptiness is deliberately enforced at the commit/API
+  layer per ADR-0004 §6.2 — SQLite cannot express at-least-one-child-row
+  declaratively (no commit-time triggers; an AFTER INSERT trigger fires before
+  sibling rows exist). Direct-SQL writers are outside the single-user trust
+  model. If future tooling adds deferred constraints, a schema backstop may be
+  reconsidered; no current requirement.
 - Convert `[reviewed]` AGENTS rules to `[executable]` gate checks (R2, R8, R9,
   R10 are candidates). Of the `[executable]` rules, R1 and R7 are scaffolded in
   slice-0; R3, R6, R12 and R13 are deferred to the slices that create what they
