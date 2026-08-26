@@ -670,3 +670,48 @@ remainder of the slice.
 - Next: S3 rendering (A4) → S4 audio (A6) → S5 app factory/API/guards (A7) →
   S6 executable checks + report (A8/A10) → mandatory full-diff T3 review over
   `main...slice/7` → slice-7 acceptance → mechanical closure.
+
+## Stages S3–S6 accepted; mandatory full-diff review cycle PASS (2026-08-26)
+
+- S3 rendering (`run_19bad9ddb1` attempt-1 candidate `3692498`, finalized via
+  single-package run `run_b9cc59780f` → `3e3e9d8`): gate PASS; independent
+  review PASS (`run_1d4185b4f4`, VERDICT `b1b3489`). Planner note: paragraph-
+  split planning created redundant `no_changes` packages on multi-section
+  prompts; single-paragraph prompts dispatch cleanly. Accepted.
+- S4 audio domain layer (`run_d2b3ca2e69` → `35c70c9`): gate PASS; review PASS
+  (`run_92ddebd648`, VERDICT `242e12b`). Accepted.
+- S5 app factory/API/R12 guards (`run_e625f78f8e` → `b5b7e93`): gate PASS;
+  review PASS (`run_720efd5b46`, VERDICT `f2b71ab`). Environment measure:
+  fastapi==0.141.1 + uvicorn==0.52.4 installed into the authoritative venv and
+  pinned in pyproject (framework was never frozen by any ADR). Accepted.
+- S6 executable checks + report (`run_b6c0b94fad` → `c6cdb8f`): gate PASS with
+  R6/R12/R13 active; review PASS (`run_0c66131946`, VERDICT `12c8259`).
+  Accepted.
+- MANDATORY FULL-DIFF REVIEW (owner directive: terra as last reviewer each
+  cycle; gemini/ox prompts travel as argv — keep <32KiB, batch if larger):
+  - Review #1 (`run_7e973d5853`, gpt-5.6-terra, VERDICT `8556b31`): BLOCK, 5
+    findings. Orchestrator classification: F1 dictionary.py-vs-main and F2
+    governance-paths REJECTED (dictionary.py byte-identical to accepted S2a
+    `8cf6367`; governance/STATE records are orchestrator-owned WORKFLOW/
+    PROMPTS-mandated artifacts predating or accompanying this session under
+    owner-mandated startup HEAD); F4 schema-level note-language non-emptiness
+    REJECTED as RB1 (ADR-0004 §6.2 explicitly assigns it to commit/API layer;
+    recorded as backlog hardening note); F3 API stale-path reads CONFIRMED
+    RB2-critical; F5 git diff --check EOF blanks CONFIRMED mechanical.
+  - Bounded repair (`run_27ee44ac8a` → `d6fbcda`): gate PASS.
+  - Review #2 (`run_795e7ec93b`, terra, VERDICT committed in run): BLOCK on
+    ONE residual RB1 (cards/next + export read PART-B outside reading()
+    scope, then materialized from the then-current generation → mixed-
+    observation window; mutable dict payloads); both rejections affirmed;
+    F5 verified fixed.
+  - Final mechanical repair (`run_804b032976` → `3e6898b`; an earlier ox
+    dispatch of the same directive failed transport/base-ref-declaration and
+    was re-dispatched on gemini after quota reset): gate PASS.
+  - Review #3 FINAL CONVERGENCE (`run_0894d07c49`, terra, VERDICT `b880304`):
+    **PASS** — residual fixed-verified (single-scope pinned observations,
+    immutable primitive payloads, non-vacuous complete-old concurrency
+    regression), rejections affirmed, regression sweep clean, no test
+    weakening. Terminal for the lineage; no review #4.
+- **Slice-7 accepted at `3e6898b`** (post-integration gate PASS; fresh gate:
+  ruff clean, mypy strict, 667 tests, AGENTS R1/R3/R6/R7/R12/R13).
+  Mechanical closure follows per WORKFLOW §11.
