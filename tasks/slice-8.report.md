@@ -228,3 +228,109 @@ rendering chunks (1)...computing gzip size (0)...computing gzip size (1)...compu
 #### C. Git Diff Check
 Command: `git diff --check`
 Exit code: 0 (clean, no trailing whitespace or merge conflict markers)
+
+---
+
+## S8B-2 Evidence
+
+### 1. Typed `/vocab` Client Implementation Details
+- **Type Definitions (`frontend/src/api/types.ts`)**:
+  - Full TypeScript types for all `/vocab` endpoints matching `app/api.py`: `LookupResponse`, `HighlightRequest`, `HighlightResponse`, `CaptureCardsRequest`, `CaptureCardsResponse`, `ImportCsvRequest`, `ImportCsvResponse`, `CreateNoteRequest`, `CreateNoteResponse`, `NextCardResponse`, `ReviewCardRequest`, `ReviewCardResponse`, `SetGlossRequest`, `SetGlossResponse`, `DeleteGlossResponse`, `UploadAudioResponse`, `RevertAudioResponse`, `ActivateDictionaryRequest`, `ActivateDictionaryResponse`, `DeckSummary`, `CreateDeckRequest`, `CreateDeckResponse`, `DeleteDeckResponse`.
+  - Strictly typed language unions (`'de' | 'en'`), note statuses (`'resolved' | 'derived_compound' | 'needs_gloss' | 'orphaned'`), and audio/grammar structures.
+- **Typed Error Handling (`frontend/src/api/errors.ts`)**:
+  - Custom `ApiError` class exposing HTTP `status`, `statusText`, `detail`, `body`, and ADR-0004 D47 token mismatches (`pickerToken`, `activeToken`).
+  - Helper predicates: `isConflict` (409), `isNotFound` (404), `isUnprocessable` (422), `isForbidden` (403), `isBadRequest` (400).
+  - Robust `parseApiError` response parser extracting FastAPI validation detail strings/arrays and dictionary asset tokens.
+- **Stateless Fetch Client (`frontend/src/api/client.ts`)**:
+  - `VocabClient` with configurable `baseUrl` and optional custom `fetch` injection.
+  - Automatically enforces AGENTS R12 / ADR-0002 §4.1: every non-GET request sends `X-Flashcards-Request: 1`; JSON requests send `Content-Type: application/json`.
+  - Uses only the `/vocab` prefix across all methods.
+  - Ephemeral and stateless: zero scheduler, FSRS/rating mapping, due state, authoritative card cache, IndexedDB, or persistence.
+- **Client Unit Test Suite (`frontend/src/api/client.test.ts`)**:
+  - 24 unit tests covering header enforcement (`X-Flashcards-Request: 1` on non-GET, omitted on GET, `Content-Type: application/json`), all 19 API methods, query string encoding, audio binary transfer, and typed error parsing (400, 403, 404, 409 with picker/active tokens, 422, 500).
+- **Sub-slice Boundaries Maintained**:
+  - No alteration of backend/API, `.gitignore`, report history, generated `app/frontend/`, or unrelated paths.
+  - No runtime LLM, fa/Persian, lecture, React-family framework, ts-fsrs, or donor/schema/ADR changes.
+
+### 2. Verification Commands Output
+
+#### A. Frontend Typecheck
+Command: `npm run --prefix frontend typecheck`
+Exit code: 0
+Output:
+```
+> flashcard-frontend@0.1.0 typecheck
+> tsc --noEmit
+```
+
+#### B. Frontend Unit Tests
+Command: `npm test --prefix frontend`
+Exit code: 0
+Output:
+```
+> flashcard-frontend@0.1.0 test
+> node --experimental-strip-types --test src/api/client.test.ts
+
+▶ VocabClient
+  ✔ instantiates cleanly via factory and constructor with default or custom options (1.892846ms)
+  ▶ Security guards & headers (AGENTS R12 / ADR-0002)
+    ✔ does NOT send X-Flashcards-Request on GET requests (47.664122ms)
+    ✔ sends X-Flashcards-Request: 1 and Content-Type: application/json on non-GET JSON requests (2.42331ms)
+    ✔ sends X-Flashcards-Request: 1 on DELETE requests (0.89447ms)
+  ✔ Security guards & headers (AGENTS R12 / ADR-0002) (51.565491ms)
+  ▶ Lookup & Dictionary endpoints
+    ✔ executes GET /vocab/lookup with query param encoding (1.367106ms)
+    ✔ executes POST /vocab/lookup with query body (1.014983ms)
+    ✔ executes POST /vocab/dictionary/activate (0.944875ms)
+  ✔ Lookup & Dictionary endpoints (3.847131ms)
+  ▶ Capture workflows
+    ✔ executes POST /vocab/highlight (Stage 1 candidate resolution) (0.931715ms)
+    ✔ executes POST /vocab/cards (Stage 2 atomic card creation) (0.801301ms)
+    ✔ executes POST /vocab/import/csv for batch imports (0.931112ms)
+    ✔ executes POST /vocab/notes for single note creation (1.031495ms)
+  ✔ Capture workflows (4.106656ms)
+  ▶ Review & Study endpoints
+    ✔ executes GET /vocab/cards/next with optional deck_id (0.881428ms)
+    ✔ executes POST /vocab/cards/{card_id}/review with raw confidence (0.555349ms)
+  ✔ Review & Study endpoints (1.618668ms)
+  ▶ Gloss & User meaning endpoints
+    ✔ executes POST /vocab/notes/{note_id}/gloss (0.80062ms)
+    ✔ executes DELETE /vocab/notes/{note_id}/gloss?language=... (0.631714ms)
+  ✔ Gloss & User meaning endpoints (1.635223ms)
+  ▶ Audio endpoints
+    ✔ generates audio URL via getAudioUrl (0.314658ms)
+    ✔ fetches audio binary blob via fetchAudio (22.321639ms)
+    ✔ uploads custom pronunciation audio via uploadAudio (0.824767ms)
+    ✔ reverts custom pronunciation audio via revertAudio (0.527297ms)
+  ✔ Audio endpoints (24.371468ms)
+  ▶ Export Anki endpoint
+    ✔ executes GET /vocab/export/anki with text response (0.615273ms)
+  ✔ Export Anki endpoint (0.743076ms)
+  ▶ Error handling & typed ApiError
+    ✔ throws ApiError on 404 with parsed detail (1.525004ms)
+    ✔ throws ApiError on 409 Conflict with picker_token and active_token (0.787188ms)
+    ✔ throws ApiError on 422 Unprocessable Entity with error list or string detail (0.680291ms)
+    ✔ throws ApiError on non-JSON error response (0.633775ms)
+  ✔ Error handling & typed ApiError (3.958839ms)
+✔ VocabClient (96.235782ms)
+ℹ tests 24
+ℹ suites 9
+ℹ pass 24
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 301.726492
+```
+
+#### C. Git Diff Check
+Command: `git diff --check`
+Exit code: 0 (clean, no trailing whitespace or merge conflict markers)
+
+#### D. Python Reference Smoke Test
+Command: `/home/saber/projects/flashcard/.venv/bin/python reference/smoke_test.py`
+Exit code: 0 (OK)
+
+#### E. Pytest Test Suites
+Command: `/home/saber/projects/flashcard/.venv/bin/pytest -q tests/test_capture.py tests/test_examples.py tests/test_smoke_baseline.py`
+Exit code: 0 (17 passed)
