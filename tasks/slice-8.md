@@ -1,243 +1,415 @@
-# Slice 8 — Smoke baseline repair, two-stage capture/import flows, and pronunciation end-to-end smoke
+# Slice 8 — Standalone browser product completion
 
-Task:        Repair the `reference/smoke_test.py` baseline (path defect and
-             stale contracts) and remove the `reference/` tool exclusions from
-             `pyproject.toml` in the same change; implement the remaining
-             ADR-0002 §6 order-9 capture flows — D27 two-stage highlight
-             (`POST /vocab/highlight`, `POST /vocab/cards`) and D19 CSV
-             word-list import — on top of the accepted Slice-7 runtime;
-             add deterministic example ranking (`app/examples.py`, ADR-0001
-             §11 as amended by ADR-0002 §5); amend the smoke baseline's
-             assertions to exactly ADR-0002 §4/§5, ADR-0003 §5, ADR-0004 D47,
-             and ADR-0005 §10 including the end-to-end pronunciation smoke;
-             keep every accepted Slice-7 behavior intact.
+Task:        Complete the existing standalone FastAPI runtime as an independently
+             usable browser product. Preserve and finish the order-9 backend/smoke
+             work, then add the Lit browser client, real APKG export, one-service
+             production serving, and deterministic browser E2E. The lecture app is
+             explicitly out of scope; slice-9 remains its later composition work.
 
 Depends:     slice-7
 
-## Entry condition
+## Binding product contract
 
-slice-7 must be ACCEPTED, merged, closed, and pushed before implementation
-dispatch. The authoritative starting point is the closed `main` HEAD recorded
-in `STATE.md` and the handoff manifest.
+This brief implements ADR-0002 §6 order 9 on the accepted Slice-7 runtime. The
+controlling requirements are ADR-0001 §7, §11 and D11/D13/D19; ADR-0002 §4,
+§5, D24/D25/D27; ADR-0003 §5; ADR-0004 §6.6 D47 and §10; ADR-0005 §10;
+ADR-0007 D72/D80; and AGENTS R1, R4–R6, R9–R13 and C1–C3.
 
-## Authority
+The five stages are one slice on one `slice/8` branch. A later stage may begin
+only after its predecessor has recorded its listed acceptance evidence. Do not
+start the slice until slice-7 is accepted, merged, closed, and pushed from the
+main HEAD verified by the fresh Slice-8 orchestrator.
 
-The binding architecture is:
+### Frozen frontend and ownership rules
 
-- `docs/plan.md` slice-8 row (§6 order 9);
-- ADR-0002 §4 (two-stage capture and commit contract, normative) and §5
-  (smoke-baseline amendment list), D24/D25/D27;
-- ADR-0001 §11 (example ranking; `known = deck lemmas ∪ known_lemmas` when
-  supplied by value, else deck lemmas), D11 (picker defaults/multi-select),
-  D13/D19 (manual entry and CSV import share the pipeline), §7 (export);
-- ADR-0003 §5 (`deck.review(db, card_id, confidence)` baseline signature;
-  both raw confidence and mapped rating asserted);
-- ADR-0004 §6.6 D47 replacement/stale-picker smoke scenarios and §10 card
-  behaviour; ADR-0007 D80 ({de,en} only, fa → 422 zero writes);
-- ADR-0005 §10 required implementation verification (pronunciation E2E items);
-- AGENTS R1, R4, R5, R6, R9, R10, R12, R13; C1/C2/C3;
-- The FINAL accepted Slice-7 contract as shipped on `main`: `create_app`
-  factory with R12 ASGI guards; `DictionaryRuntime` (path-only activation,
-  value-snapshot reads, observe_card_render/observe_export_payload
-  single-scope observations); `deck.create_note/review/delete_deck`;
-  `app/render.py`; `app/audio.py`; PART-B schema in `reference/schema.sql`.
+- Browser source is Lit + TypeScript + Web Components + Vite, using CSS design
+  tokens. Playwright is the browser E2E runner. Web Awesome is optional and, if
+  used, limited to generic primitives (`wa-button`, `wa-dialog`, `wa-spinner`,
+  `wa-callout`/toast); native semantic controls remain preferred.
+- `frontend/` is the only authoritative handwritten browser source. Its tests,
+  package manifest, and lockfile are source too.
+- `app/frontend/` is generated Vite output only. It is never hand-maintained,
+  must be cleaned/rebuilt from `frontend/`, and must not be treated as authored
+  source or a review substitute. Production images build it; local production
+  E2E builds it before starting FastAPI.
+- Do not adopt React, Next.js, Vue, Angular, Svelte, `ts-fsrs`, browser-owned
+  scheduling, IndexedDB as authoritative flashcard storage, or a second
+  scheduler. The client submits raw confidence `1..5`; Python maps it to FSRS
+  and owns every durable mutation.
+- All APIs remain under `/vocab`. Development may use a Vite `/vocab` proxy;
+  production is one loopback FastAPI service that serves the compiled client at
+  `/`. It requires neither a lecture app nor a separate frontend server, and it
+  adds no runtime LLM path.
 
-## Allowlist
+## S8A — Smoke baseline + capture/import/ranking
 
-Implementation may modify/create only:
+### Outcome
+
+Repair the executable smoke baseline and remove its tool exclusions; implement
+the stateless two-stage capture endpoints, CSV word-list import, and pure,
+deterministic example ranking. Preserve all accepted Slice-7 behavior.
+
+### Dependencies
+
+Slice-7 closed on the expected main HEAD; its factory, R12 middleware,
+`DictionaryRuntime`, rendering, FSRS review, and pronunciation runtime are the
+starting contract.
+
+### Exhaustive allowlist
 
 - `reference/smoke_test.py`
-- `pyproject.toml` (ONLY: remove `reference` from the mypy/ruff/pytest
-  exclusion lists; no other pyproject change)
+- `pyproject.toml` (at this stage, remove only the `reference` tool exclusions)
 - `app/api.py`
 - `app/deck.py`
-- `app/examples.py`
+- `app/examples.py` (new)
 - `tests/conftest.py`
 - `tests/test_capture.py` (new)
+- `tests/test_examples.py` (new)
 - `tests/test_smoke_baseline.py` (new)
+- `tasks/slice-8.report.md` (new; create the required scaffold before close)
+
+### Acceptance evidence
+
+1. `reference/smoke_test.py` imports the repository `app` package and opens
+   `reference/schema.sql` explicitly; `reference` is no longer excluded from
+   ruff, mypy, or pytest traversal. A subprocess smoke test runs it using the
+   project venv and proves exit 0.
+2. `POST /vocab/highlight` accepts `{sentence_text, selected_span,
+   lesson_label, lesson_id?, known_lemmas?}`, bounds-validates the span, resolves
+   locally, returns candidates with stable refs/grammar/current asset token plus
+   normalized self-contained `capture_context`, and makes no user-db writes.
+3. `POST /vocab/cards` accepts selected candidate refs, optional sense refs,
+   allowed overrides, capture context, deck target, and asset token; revalidates
+   all values and atomically creates/reuses notes and memberships. A stale token
+   returns `409 dictionary_changed` with zero writes. Absent active-generation
+   semantic refs, duplicate same-identity selections, unknown overrides, invalid
+   spans, invalid deck data, and every validation failure return 422 with zero
+   writes. It freezes the chosen primary dictionary sentence into `example_de`;
+   ordinary rendering never reranks an existing note.
+4. The only editable keys are `front_override`, `back_override`,
+   `meaning_langs`, and `user_meanings`; `meaning_langs` is a non-empty subset
+   of `{de,en}`. `user_meanings` follows D44 exactly (string upsert, null delete,
+   omission no mutation, `{}`/blank invalid). `fa` is 422 zero-write. Reuse
+   preserves omitted values and user meanings across deselect/reselect.
+5. `POST /vocab/import/csv` accepts `{csv_text, deck_name, meaning_languages}`;
+   processes one word per line through the same resolver/candidate pipeline,
+   defaults to the top candidate, creates `needs_gloss` notes for misses, and
+   commits atomically per request or performs zero writes on 422.
+6. `app/examples.py` is pure and deterministic: target length near nine tokens;
+   penalties for unknown/rare unknown lemmas, proper nouns, and untranslated
+   examples; a small question bonus; and `known = deck lemmas ∪ known_lemmas`
+   when supplied by value, otherwise deck lemmas.
+7. Smoke and focused tests prove the complete ADR-0002 §5 capture matrix, the
+   ADR-0003 raw-confidence/mapped-rating evidence, D47 renumber/relink,
+   ambiguity/disappearance/mid-observation activation and stale-token cases, and
+   ADR-0005 override/revert, media validation, cache-corruption, fallback,
+   stable-identity, and no-deletion cases. Fakes provide zero network and zero
+   subprocess dependencies.
+
+### Risk
+
+`public-api`, `data-loss` — new HTTP writes create/reuse durable notes and decks.
+
+### Model
+
+`antigravity/gemini-3.7-flash / T3 / high`
+
+### Why
+
+WORKFLOW §4 highest row: cross-cutting public API transactions, durable user
+state, and several accepted ADR failure contracts require design judgment.
+
+### Fallback
+
+`codex/gpt-5.6-terra / T3 / high` (Gemini/GPT routes only; exact route names
+come from the current routing file).
+
+### STOP conditions
+
+Stop for an unmet slice-7 closure/preflight, any needed path outside this
+allowlist, any accepted-ADR conflict, a proposal to persist rendered faces or
+cascade-delete reviewed notes, a non-DE/EN meaning request, a failed required
+test/gate, or a need for a runtime LLM/dependency beyond this stage's scope.
+
+## S8B — Frontend foundation
+
+### Outcome
+
+Establish the authoritative, reproducible Lit/Vite browser source tree and the
+foundation for a server-authoritative standalone client. No product workflow is
+claimed complete in this stage.
+
+### Dependencies
+
+S8A acceptance is recorded; its `/vocab` capture/import contracts are stable.
+
+### Exhaustive allowlist
+
+- `frontend/**` (new authoritative source, including lockfile and only the
+  foundation application, typed client, token styles, and test configuration)
+- `.gitignore` (only generated client output/dependency ignores)
 - `tasks/slice-8.report.md`
 
-No other tracked path is allowed. In particular do NOT modify: ADRs,
-AGENTS.md, WORKFLOW.md, PROMPTS.md, STATE.md, docs/, tools/,
-`reference/schema.sql`, `app/render.py`, `app/audio.py`, `app/dictionary.py`,
-`app/resolve.py`, Dockerfile.
+### Acceptance evidence
 
-## Acceptance
+1. `frontend/` has a locked TypeScript/Lit/Vite/Playwright toolchain, strict
+   TypeScript configuration, CSS design tokens, a root app element, and a typed
+   `/vocab` fetch client.
+2. The client attaches `X-Flashcards-Request: 1` to every non-GET request and
+   sends JSON content types where required by R12. Development configuration
+   proxies `/vocab` to loopback FastAPI; it never invents another API prefix.
+3. The only retained browser state is ephemeral UI state: active view/current
+   card/reveal state/picker selections/form fields/unsaved recording Blob and
+   loading-error-toast state. No scheduler, due date, FSRS state, authoritative
+   card cache, or IndexedDB persistence exists.
+4. `vite build` creates `app/frontend/` from `frontend/` with a clean output
+   directory. The generated directory is ignored/not hand-maintained and the
+   source/build ownership is documented in the stage report.
 
-### A1 — Smoke baseline repair (paths + tooling inclusion)
+### Risk
 
-1. `reference/smoke_test.py` imports the repo-root `app` package correctly
-   (no `sys.path.insert(dirname(__file__))` defect) and opens
-   `reference/schema.sql` explicitly;
-2. `pyproject.toml` removes `reference` from `[tool.mypy] exclude`,
-   `[tool.ruff] exclude`, and `[tool.pytest.ini_options] norecursedirs` in the
-   SAME change; `reference/smoke_test.py` passes ruff and `mypy --strict`;
-3. `tests/test_smoke_baseline.py::test_smoke_baseline_runs_green` executes the
-   repaired baseline as a subprocess (`<venv python> reference/smoke_test.py`)
-   and asserts exit 0 with empty stderr tail tolerance only for warnings.
+`none` — isolated, reversible source/tooling foundation with no backend or user
+data mutation.
 
-### A2 — Two-stage capture (D27) on the accepted factory
+### Model
 
-1. `POST /vocab/highlight` receives `{sentence_text, selected_span,
-   lesson_label, lesson_id?, known_lemmas?}`, validates the span in bounds,
-   resolves locally through the accepted dictionary ladder, returns picker
-   candidates (stable refs + grammar data + current asset token) plus the
-   normalized self-contained `capture_context`, and performs ZERO writes;
-2. `POST /vocab/cards` receives `{selections:[{ref, sense_ref?, overrides}],
-   capture_context, deck:{kind,name,lesson_id?}, asset_token}`; revalidates
-   everything; returns HTTP 409 `dictionary_changed` with zero writes on any
-   stale asset token; validates `meaning_langs` non-empty subset of {de,en}
-   and `user_meanings` per ADR-0004 D44 (string upsert / null delete /
-   omission = no mutation / {} invalid / blank invalid); permits exactly
-   `front_override`, `back_override`, `meaning_langs`, `user_meanings`
-   (scalar `gloss_user` stays superseded); atomically creates/reuses notes and
-   memberships in ONE transaction; any validation failure → HTTP 422 with
-   zero writes; duplicate selections revalidating to the same note identity →
-   422; submitted semantic refs absent from the active generation → 422 zero
-   writes (Slice-7 rule carries over);
-3. Manual entry and CSV import freeze the chosen primary dictionary sentence
-   into the note by value at creation (`example_de`), never re-ranked on
-   ordinary render; existing notes keep their first frozen example;
-4. `POST /vocab/import/csv` accepts `{csv_text, deck_name,
-   meaning_languages}`; one word per line through the same ladder; top
-   candidate default-selected (D11); misses become `needs_gloss` notes;
-   atomic per-request commit with 422 zero-write validation failures.
+`antigravity/gemini-3.7-flash / T2 / high`
 
-### A3 — Deterministic example ranking (ADR-0001 §11)
+### Why
 
-`app/examples.py`: pure ranking over dictionary examples — length toward 9
-tokens, penalise unknown lemmas (i+1; rare unknowns harder), proper nouns,
-untranslated; small bonus for questions; `known = deck lemmas ∪ known_lemmas`
-when supplied by value, else deck lemmas; fully deterministic; unit-tested.
+WORKFLOW §4: a new but bounded frontend pattern needs judgment; the exhaustive
+source boundary and build/type checks keep the blast radius contained.
 
-### A4 — Smoke assertions amended to the final contracts
+### Fallback
 
-The repaired baseline asserts, at minimum:
+`codex/gpt-5.6-luna / T2 / high`.
 
-1. ADR-0002 §5: explicit `meaning_langs` required at creation; omission =
-   no mutation on reuse; add/update/delete one language without touching
-   others; user meaning survives deselection/reselection; no implicit English;
-   unsupported language → 422 zero writes; blank user meaning → 422 zero
-   writes; malformed `user_meanings` → 422 zero writes; atomic rollback of the
-   entire `/vocab/cards` request; multi-select with distinct valid overrides;
-   unknown/invalid override → 422 zero writes; `/vocab/highlight` performs no
-   note/membership write;
-2. ADR-0003 §5: `deck.review(db, card_id, confidence)` persists BOTH raw
-   confidence and mapped rating; client `rating` rejected at the API;
-3. ADR-0004 D47: dictionary replacement with numeric-ID renumbering where
-   stable refs bind correctly; unrelated recycled numeric ID does not bind;
-   disappeared sense fails closed to `needs_gloss` preserving user meanings
-   and history; duplicate/ambiguous stable refs abort activation; derived
-   compound component disappearance renders the whole derived block
-   unavailable; `meaning_state` consults only validated current bindings;
-   stale picker asset token → 409 zero writes; no mixed old-binding/new-asset
-   state observable (use the runtime seam probe for a mid-observation
-   activation);
-4. ADR-0005 §10 pronunciation E2E: custom override wins; Revert restores
-   automatic; failed validation preserves the previous override; unsafe media
-   rejected; human-cache corruption falls through to Piper; offline/remote
-   `/speak` failure falls back silently to Piper (injectable fakes, zero
-   network, zero subprocesses); custom audio survives cache deletion and
-   numeric-ID renumbering; disappeared stable target fails closed without
-   deleting learner media.
+### STOP conditions
 
-### A5 — Gate and report
+Stop if the foundation requires a framework or dependency outside the frozen
+stack, needs a persistent browser store or client scheduler, changes a backend
+contract, hand-edits generated `app/frontend/`, or changes a path outside the
+allowlist.
 
-1. `make gate` passes (ruff incl. `reference/`, `mypy --strict .` incl.
-   `reference/smoke_test.py`, full pytest, check_agents R1/R3/R6/R7/R12/R13);
-2. `git diff --check` passes;
-3. New non-GET routes are covered by the structural R12 middleware (verified
-   by the existing R12 checker and by guard tests);
-4. `tasks/slice-8.report.md` created with the exact scaffold (line 1
-   `# Slice 8 report`, line 3 `## NARRATIVE`) documenting: baseline repair,
-   capture/import flows, ranking, assertion coverage map, pronunciation E2E
-   evidence, and full gate numbers.
+## S8C — Standalone product workflows
 
-## Stop-and-ask
+### Outcome
 
-STOP and return to the slice-8 orchestrator if: `Depends: slice-7` is not
-merged/closed; any requirement needs a file outside the Allowlist; any
-requirement conflicts with an accepted ADR or the accepted Slice-7 contract;
-implementing capture would require storing rendered faces (R4) or cascade-
-deleting reviewed notes (R5); Persian activation is proposed (ADR-0007); any
-mandatory test or gate check fails.
+Turn the foundation into the usable standalone product UI: navigation, decks,
+manual/capture/import workflows, review, meanings, audio controls, and clear
+failure states backed solely by the FastAPI service.
 
-## Risk
+### Dependencies
 
-Risk: public-api, data-loss
+S8A and S8B acceptance evidence, including the built typed client and stable
+capture/import API contracts.
 
-## Why-risk
+### Exhaustive allowlist
 
-WORKFLOW §6 lookup: new externally callable HTTP routes (`app/api.py`) →
-public-api; capture commits, note reuse, and import write durable user state →
-data-loss. Pre-committed T3 full-diff review of `main...slice/8` before merge.
+- `frontend/**`
+- `app/api.py`
+- `app/deck.py`
+- `tests/test_api.py`
+- `tests/test_capture.py`
+- `tasks/slice-8.report.md`
 
-## Model
+### Acceptance evidence
 
-Model: gemini-3.7-flash / T3 / high
+1. The shell supplies navigable deck list/create/delete, deck opening, manual
+   vocabulary creation, CSV import, import/export entry points, and explicit
+   loading/empty/error/success states.
+2. The capture view performs highlight → picker → `/vocab/cards`, supports D11
+   multi-select and supported override/DE/EN meaning edits, surfaces stale asset
+   `409` without pretending a write succeeded, and never relies on lecture data.
+3. Review fetches server due cards, reveals the answer explicitly, and submits
+   raw confidence buttons `1..5` (with documented keyboard behavior) to Python;
+   it neither maps ratings nor calculates scheduling values in the browser.
+4. Card presentation displays selected DE/EN meanings and supported user-meaning
+   editing, preserves display-time render semantics, and leaves German grammar
+   independent of meaning selection.
+5. Pronunciation playback uses the server audio endpoint. Upload/record keeps an
+   unsaved Blob browser-local until explicit Save; Revert to automatic is a
+   deliberate server request. Conflict, validation, unavailable-audio, and save
+   errors are clear and do not discard unsaved audio silently.
+6. Backend changes, if genuinely required to expose an already accepted runtime
+   capability to the client, retain R12, C1/C2, append-only review logging,
+   zero-write validation, and existing endpoint compatibility; focused tests
+   cover them.
 
-## Why
+### Risk
 
-WORKFLOW §4: blast radius crosses the public API and durable user data;
-novelty in the two-stage commit transaction; judgment across five ADR
-assertion suites. Highest triggered row → T3 high.
+`public-api`, `data-loss` — this stage exercises durable deck/note/audio writes
+through browser-facing API contracts.
 
-## Fallback
+### Model
 
-Fallback: ox-alpha-free / T3 / high. Independent review: gpt-5.6-terra as the
-LAST reviewer of each review cycle (owner directive, 2026-08-26); prompts to
-gemini/ox travel as argv and must stay under 32 KiB — batch larger briefs.
+`codex/gpt-5.6-terra / T3 / high`
 
-## Worker implementation constraints
+### Why
 
-1. Start only after the slice-8 orchestrator supplies the exact verified
-   expected `main` HEAD; create `slice/8` from that HEAD; mismatch is STOP.
-2. Read `AGENTS.md`, `docs/adr/0001..0005`, `docs/adr/0007`,
-   `tasks/slice-8.md`, the accepted `app/*` modules, and
-   `reference/smoke_test.py` before editing.
-3. Zero module-level state; no env reads at import time; dependency direction
-   `api -> deck -> render -> dictionary -> resolve` unchanged; `examples.py`
-   sits beside `render.py` (pure, below deck).
-4. All new non-GET routes inherit the R12 middleware structurally; do not add
-   per-route guard bypasses.
-5. No runtime LLM; no new third-party dependencies.
-6. Create `tasks/slice-8.report.md` before Worker CLOSE.
+WORKFLOW §4 highest row: cross-cutting product behavior touches public API,
+durable data, R12 security guards, and user-media lifecycle.
 
-## Exact report scaffold
+### Fallback
 
-```markdown
-# Slice 8 report
+`antigravity/gemini-3.7-flash / T3 / high`.
 
-## NARRATIVE
-```
+### STOP conditions
 
-Populate only `## NARRATIVE`.
+Stop for a required schema/ADR change, changed server authority for scheduling,
+browser persistence of authoritative data, an R12 bypass, a lecture-app
+dependency, non-DE/EN support, any path outside the allowlist, or any failing
+required verification.
 
-## Required terminal verification before Worker CLOSE
+## S8D — APKG/audio export + production serving/package boundary
 
-The slice-8 orchestrator supplies `EXPECTED_MAIN_HEAD`.
+### Outcome
 
-```sh
-: "${EXPECTED_MAIN_HEAD:?STOP: EXPECTED_MAIN_HEAD was not supplied}"
-test "$(git branch --show-current)" = "slice/8" || { echo "STOP: not on slice/8"; exit 1; }
-test "$(git rev-parse main)" = "$EXPECTED_MAIN_HEAD" || { echo "STOP: main differs"; exit 1; }
-test "$(git merge-base slice/8 main)" = "$EXPECTED_MAIN_HEAD" || { echo "STOP: base differs"; exit 1; }
-make gate
-git diff --check "$EXPECTED_MAIN_HEAD"...HEAD
-outside="$({
-  git diff --name-only "$EXPECTED_MAIN_HEAD"...HEAD
-  git ls-files --others --exclude-standard
-} | grep -vxF \
-  -e reference/smoke_test.py \
-  -e pyproject.toml \
-  -e app/api.py \
-  -e app/deck.py \
-  -e app/examples.py \
-  -e tests/conftest.py \
-  -e tests/test_capture.py \
-  -e tests/test_smoke_baseline.py \
-  -e tasks/slice-8.report.md || true)"
-test -z "$outside" || { echo "STOP: scope violation:"; printf '%s\n' "$outside"; exit 1; }
-test "$(sed -n '1p' tasks/slice-8.report.md)" = "# Slice 8 report" || { echo "STOP: report header"; exit 1; }
-test "$(sed -n '3p' tasks/slice-8.report.md)" = "## NARRATIVE" || { echo "STOP: report NARRATIVE heading"; exit 1; }
-```
+Add real, semantically verified `.apkg` export and package the browser product
+as one FastAPI-served production service.
+
+### Dependencies
+
+S8A–S8C acceptance is recorded; export consumes server observations and the
+accepted audio precedence without taking ownership of scheduling or reviews.
+
+### Exhaustive allowlist
+
+- `app/export.py` (new)
+- `app/api.py`
+- `pyproject.toml` (add only the exact export dependency and necessary tooling
+  integration)
+- `Dockerfile`
+- `frontend/**`
+- `app/frontend/**` (generated Vite output only; never hand-maintained)
+- `.gitignore` (generated-output/dependency ignores only)
+- `tests/test_export.py` (new)
+- `tests/test_api.py`
+- `tests/test_container.py` (new, if needed for deterministic packaging checks)
+- `tasks/slice-8.report.md`
+
+### Acceptance evidence
+
+1. `pyproject.toml` pins `genanki==0.13.1`, unless implementation-time
+   validation selects another exact version and records the evidence/reason in
+   the report. `genanki` is imported only by the export boundary, never review,
+   card creation, or scheduling code.
+2. `app/export.py` produces `.apkg` bytes from server export observations and
+   stable semantic refs. It preserves generated display values without persisting
+   rendered card faces or creating a second due/scheduling model.
+3. APKG audio precedence is custom learner audio > export-eligible human audio
+   > Piper audio > absent. Fields use basename-only `[sound:filename.ext]`
+   references; no paths leak into Anki fields.
+4. Tests validate semantics, not package bytes: valid ZIP, `collection.anki2`,
+   readable SQLite, expected deck/model/note records, stable GUIDs, media
+   manifest, correct media basenames, and expected audio bytes.
+5. The FastAPI factory serves generated `app/frontend/` at `/` after all `/vocab`
+   routes are registered. Production needs no separate frontend server; Vite's
+   proxy remains development-only. Static serving retains loopback host/origin
+   protection. The Docker image builds the authoritative frontend, contains its
+   generated output, starts the service rather than only a readiness script, and
+   introduces no runtime LLM dependency or lecture-app requirement.
+
+### Risk
+
+`public-api`, `data-loss` — export can expose user content/media and production
+serving changes a browser-facing deployment boundary.
+
+### Model
+
+`codex/gpt-5.6-terra / T3 / high`
+
+### Why
+
+WORKFLOW §4 highest row: a new archive/media format and production serving
+boundary cross public API, user media, and deployment behavior.
+
+### Fallback
+
+`antigravity/gemini-3.7-flash / T3 / high`.
+
+### STOP conditions
+
+Stop if export owns review/scheduling/due state, media precedence violates
+ADR-0005, Anki references are non-basename paths, generated output is edited by
+hand, static serving weakens R12/loopback policy, a second server is required in
+production, a path outside the allowlist is needed, or verification fails.
+
+## S8E — Playwright product E2E + final acceptance
+
+### Outcome
+
+Prove the actual compiled, FastAPI-served standalone product works end to end,
+then complete the mandated risk review and slice acceptance evidence.
+
+### Dependencies
+
+S8A–S8D acceptance is recorded; the production image/service boundary and
+generated client build are available locally.
+
+### Exhaustive allowlist
+
+- `frontend/tests/e2e/**`
+- `frontend/playwright.config.ts`
+- `frontend/**` (only where a testability/accessibility correction is required
+  by a failing specified E2E)
+- `tests/test_api.py`
+- `tests/test_export.py`
+- `tasks/slice-8.report.md`
+
+### Acceptance evidence
+
+1. Playwright starts the actual FastAPI-served product, not Vite alone, and
+   deterministically executes: launch → create/open deck → manually add or CSV
+   import vocabulary → review → reveal → confidence submission → pronunciation
+   → TSV/APKG export.
+2. E2E also covers two-stage picker multi-select, stale asset-token conflict
+   messaging and zero-write recovery, loading/empty/error states, audio custom
+   override with browser-local preview/explicit Save/Revert, and deterministic
+   unavailable/corrupt automatic-audio fallback behavior. It uses fakes/local
+   assets only: no external-network dependency.
+3. The full Python gate passes with `reference/` included; frontend lockfile
+   install, type/build checks, and Playwright all pass. `git diff --check` is
+   clean. The report maps every S8A–S8E requirement to tests/gate evidence and
+   begins exactly `# Slice 8 report` then `## NARRATIVE`.
+4. Because the slice contains `public-api` and `data-loss` paths, a fresh T3
+   reviewer performs the mandatory full-diff review of `main...slice/8` before
+   merge. Any finding follows WORKFLOW §5 / AGENTS G7; no closure occurs while
+   review is pending or blocked.
+
+### Risk
+
+`public-api`, `data-loss` — final acceptance covers the full browser/API/export
+surface and durable user state.
+
+### Model
+
+`codex/gpt-5.6-terra / T3 / high`
+
+### Why
+
+WORKFLOW §6 mandates a T3 full-diff review for these path-based risks; product
+E2E also spans the cross-cutting serving, API, media, and durable-data boundary.
+
+### Fallback
+
+`antigravity/gemini-3.7-flash / T3 / high` for implementation evidence; the
+mandatory independent final review remains a fresh T3 Gemini/GPT session.
+
+### STOP conditions
+
+Stop for any nondeterministic external dependency, a failing Python/frontend/
+Playwright verification, an unreviewed risk diff, a scope expansion into lecture
+integration or Compose, an accepted-ADR conflict, or any changed path outside
+the stage allowlist.
+
+## Required closure evidence
+
+Before Worker CLOSE, the Slice-8 orchestrator supplies `EXPECTED_MAIN_HEAD` and
+the worker verifies the branch/base, runs the project gate using the authoritative
+venv paths supplied by the orchestrator, runs frontend build/type/Playwright
+checks, and proves only the union of the five stage allowlists plus the report
+changed. Then it records the exact commands, gate numbers, generated-output
+policy, E2E evidence, APKG semantic evidence, and mandatory T3 review result in
+`tasks/slice-8.report.md`. The closure worker alone performs the mechanical merge,
+post-closure gate, handoff, and push under WORKFLOW §11.

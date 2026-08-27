@@ -70,10 +70,10 @@ Updated only at session CLOSE from repository/gate evidence.
 
 ## Next three actions
 
-1. Fresh orchestrator opens slice-8 per `tasks/slice-8.md` (smoke baseline
-   repair including pyproject reference-exclusion removal, two-stage capture
-   plus CSV import, example ranking, pronunciation E2E smoke).
-2. Slice-8 reviewer: gpt-5.6-terra as last reviewer of each cycle; keep
-   gemini/ox prompts under the 32 KiB argv limit.
-3. After slice-8: read-only donor inspection then compose integration
-   (slice-9).
+1. Fresh Slice-8 orchestrator: S8A → S8B → S8C → S8D → S8E → mandatory final
+   full-diff review → closure. Slice 8 is not started.
+2. Route Slice-8 workers and reviewers through Gemini/GPT entries permitted by
+   `/home/saber/.config/orchestrator-v2/routing.json`; do not use stale forward
+   routes. No lecture integration yet.
+3. Only after Slice-8 closure: read-only donor inspection, then the separately
+   gated lecture-app composition/integration work in slice-9.
