@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from app import deck
 from app.api import create_app
-from tools.build_dict import compute_lemma_semantic_ref, compute_sense_semantic_ref
+from tools.build_dict import compute_lemma_semantic_ref
 
 AUTH_HEADERS = {
     "Host": "127.0.0.1:8000",

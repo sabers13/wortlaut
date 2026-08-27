@@ -14,18 +14,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app import deck
-from app.dictionary import Dictionary
-from app.render import (
+from app import deck  # noqa: E402
+from app.dictionary import Dictionary  # noqa: E402
+from app.render import (  # noqa: E402
     CardRenderInput,
     DerivedComponent,
     MeaningBlock,
+    RenderedCard,
     RenderExample,
     RenderLemmaData,
-    RenderedCard,
     render_card,
 )
-from app.resolve import split_compound
+from app.resolve import split_compound  # noqa: E402
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 SCHEMA_TEXT = SCHEMA_PATH.read_text(encoding="utf-8")
@@ -43,7 +43,8 @@ def seed_dict(path: str = "/tmp/dict.sqlite") -> str:
     rows = [
         # id, semantic_ref, lemma, pos, gender, plural_none, plural, genitive_sg,
         # aux, separable, particle, reflexive, praesens_3sg, praeteritum_3sg,
-        # partizip_ii, governs, comparative, superlative, ipa, ipa_source, freq_rank, source, license
+        # partizip_ii, governs, comparative, superlative, ipa, ipa_source, freq_rank,
+        # source, license
         (
             1,
             "lemma:v1:haus_noun_das",
