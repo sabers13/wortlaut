@@ -175,3 +175,56 @@ Exit code: 0 (OK)
 #### D. Pytest Test Suites
 Command: `/home/saber/projects/flashcard/.venv/bin/pytest -q tests/test_capture.py tests/test_examples.py tests/test_smoke_baseline.py`
 Exit code: 0 (17 passed)
+
+---
+
+## S8B-1b Evidence
+
+### 1. Root Shell, Design Tokens & Build Proof
+- **CSS Design Tokens (`frontend/src/styles/tokens.css`)**:
+  - Color system: base background, surfaces, borders, text hierarchy (primary, secondary, muted, inverse), brand/primary accents, and status feedback (success, warning, danger).
+  - Typography: system font stack, monospace font stack, modular scale font sizes (`xs` to `3xl`), font weights, and line heights.
+  - Geometry & Motion: spacing scale (`0.5` to `12`), border radii (`sm` to `full`), elevation shadows (`sm`, `md`, `lg`), and transition curves.
+  - Global CSS reset and baseline body setup.
+- **Minimal Lit Root Component (`frontend/src/app.ts`)**:
+  - Registered custom element `<flashcard-app>` extending `LitElement`.
+  - Scoped component styles referencing CSS custom properties with fallbacks.
+  - Ephemeral component state (`@state() private appTitle`), with zero local persistence, scheduler, or IndexedDB storage.
+  - Global type augmentation in `HTMLElementTagNameMap`.
+- **Application Entrypoint & HTML (`frontend/src/main.ts`, `frontend/index.html`)**:
+  - Entrypoint importing CSS tokens and root component.
+  - `index.html` referencing entrypoint module `<script type="module" src="/src/main.ts"></script>`.
+- **Sub-slice Boundaries Maintained**:
+  - No typed `/vocab` client, product workflows, scheduler/FSRS, IndexedDB, generated files, or tests beyond toolchain added.
+  - No React-family framework, ts-fsrs, runtime LLM, fa/Persian, lecture, donor/schema/ADR, backend, or .gitignore touched.
+
+### 2. Verification Commands Output
+
+#### A. Frontend Typecheck
+Command: `npm run --prefix frontend typecheck`
+Exit code: 0
+Output:
+```
+> flashcard-frontend@0.1.0 typecheck
+> tsc --noEmit
+```
+
+#### B. Frontend Build & Output Proof
+Command: `npm run --prefix frontend build`
+Exit code: 0
+Output:
+```
+> flashcard-frontend@0.1.0 build
+> tsc && vite build
+
+vite v6.4.3 building for production...
+transforming (1) src/main.ts✓ 22 modules transformed.
+rendering chunks (1)...computing gzip size (0)...computing gzip size (1)...computing gzip size (2)...computing gzip size (3)...../app/frontend/index.html                  0.41 kB │ gzip: 0.27 kB
+../app/frontend/assets/index-B7pGa7di.css   2.00 kB │ gzip: 0.83 kB
+../app/frontend/assets/index-DGAbqAPX.js   20.74 kB │ gzip: 7.64 kB
+✓ built in 261ms
+```
+
+#### C. Git Diff Check
+Command: `git diff --check`
+Exit code: 0 (clean, no trailing whitespace or merge conflict markers)
