@@ -33,14 +33,17 @@ from app.deck import (
     DictionaryClosedError,
     DictionaryRuntime,
     DictionaryRuntimeError,
+    add_note_to_deck,
     create_deck,
     create_note,
     delete_deck,
     delete_user_meaning,
     review,
+    set_meaning_languages,
     set_user_meaning,
 )
 from app.dictionary import DictionaryAssetError
+from app.examples import rank_examples
 from app.render import (
     AudioTrigger,
     CardRenderInput,
@@ -51,6 +54,293 @@ from app.render import (
     render_card,
     validate_selected_languages,
 )
+from app.resolve import LemmaRecord, LookupProtocol, Ref, SenseRecord, resolve_token, resolve_word
+
+_NLP_MODEL: Any = None
+_NLP_INITIALIZED: bool = False
+
+
+def _get_nlp() -> Any | None:
+    global _NLP_MODEL, _NLP_INITIALIZED
+    if not _NLP_INITIALIZED:
+        _NLP_INITIALIZED = True
+        try:
+            import spacy
+
+            _NLP_MODEL = spacy.load("de_core_news_md")
+        except Exception:
+            _NLP_MODEL = None
+    return _NLP_MODEL
+
+
+class _ConnectionLookupOracle(LookupProtocol):
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def lookup_exact(
+        self, lemma: str, pos: str | None = None, gender: str | None = None
+    ) -> Sequence[LemmaRecord]:
+        query = (
+            "SELECT id, semantic_ref, lemma, pos, gender, freq_rank "
+            "FROM lemma WHERE (lemma = ? OR lower(lemma) = ?) "
+        )
+        params: list[Any] = [lemma, lemma.lower()]
+        if pos is not None:
+            query += "AND pos = ? "
+            params.append(pos)
+        if gender is not None:
+            query += "AND gender = ? "
+            params.append(gender)
+        query += (
+            "ORDER BY freq_rank ASC NULLS LAST, pos ASC, "
+            "gender ASC NULLS LAST, semantic_ref ASC"
+        )
+        cur = self.conn.execute(query, params)
+        return [
+            LemmaRecord(
+                id=int(r[0]),
+                semantic_ref=str(r[1]),
+                lemma=str(r[2]),
+                pos=str(r[3]),
+                gender=str(r[4]) if r[4] is not None else None,
+                freq_rank=int(r[5]) if r[5] is not None else None,
+            )
+            for r in cur.fetchall()
+        ]
+
+    def lookup_surface_form(self, form: str) -> Sequence[LemmaRecord]:
+        cur = self.conn.execute(
+            """
+            SELECT l.id, l.semantic_ref, l.lemma, l.pos, l.gender, l.freq_rank
+            FROM surface_form sf
+            JOIN lemma l ON sf.lemma_id = l.id
+            WHERE (sf.form = ? OR lower(sf.form) = ?)
+            ORDER BY l.freq_rank ASC NULLS LAST, l.pos ASC,
+                     l.gender ASC NULLS LAST, l.semantic_ref ASC
+            """,
+            (form, form.lower()),
+        )
+
+        seen: set[int] = set()
+        res: list[LemmaRecord] = []
+        for r in cur.fetchall():
+            lid = int(r[0])
+            if lid not in seen:
+                seen.add(lid)
+                res.append(
+                    LemmaRecord(
+                        id=lid,
+                        semantic_ref=str(r[1]),
+                        lemma=str(r[2]),
+                        pos=str(r[3]),
+                        gender=str(r[4]) if r[4] is not None else None,
+                        freq_rank=int(r[5]) if r[5] is not None else None,
+                    )
+                )
+        return res
+
+    def lookup_senses(self, lemma_id: int) -> Sequence[SenseRecord]:
+        cur = self.conn.execute(
+            """
+            SELECT id, lemma_id, ord, semantic_ref
+            FROM sense WHERE lemma_id = ?
+            ORDER BY ord ASC, semantic_ref ASC, id ASC
+            """,
+            (lemma_id,),
+        )
+        return [
+            SenseRecord(
+                id=int(r[0]),
+                lemma_id=int(r[1]),
+                ord=int(r[2]),
+                semantic_ref=str(r[3]) if r[3] is not None else None,
+            )
+            for r in cur.fetchall()
+        ]
+
+
+def _materialize_candidate_from_ref(
+    ref: Ref,
+    dict_conn: sqlite3.Connection,
+    oracle: _ConnectionLookupOracle,
+    *,
+    known_lemmas: Sequence[str] | None = None,
+) -> dict[str, Any] | None:
+    if ref.status == "resolved":
+        cur = dict_conn.execute(
+            """
+            SELECT id, semantic_ref, lemma, pos, gender, plural, plural_none,
+                   genitive_sg, aux, separable, particle, reflexive, praesens_3sg,
+                   praeteritum_3sg, partizip_ii, governs, comparative, superlative,
+                   ipa, ipa_source, freq_rank, source, license
+            FROM lemma
+            WHERE (lemma = ? OR lower(lemma) = ?)
+            ORDER BY freq_rank ASC NULLS LAST, pos ASC, gender ASC NULLS LAST, semantic_ref ASC
+            """,
+            (ref.lemma, ref.lemma.lower()),
+        )
+        lem_rows = cur.fetchall()
+        if not lem_rows:
+            return None
+        lem = lem_rows[0]
+        lem_id = int(lem[0])
+        lem_ref = str(lem[1])
+
+        s_cur = dict_conn.execute(
+            """
+            SELECT id, lemma_id, semantic_ref, source_namespace, source_ref, ord,
+                   register, source, license
+            FROM sense WHERE lemma_id = ?
+            ORDER BY ord ASC, semantic_ref ASC, id ASC
+            """,
+            (lem_id,),
+        )
+        sense_rows = s_cur.fetchall()
+
+        m_cur = dict_conn.execute(
+            """
+            SELECT sm.id, sm.sense_id, sm.language, sm.kind, sm.ord, sm.text,
+                   sm.source, sm.license
+            FROM sense_meaning sm
+            JOIN sense s ON sm.sense_id = s.id
+            WHERE s.lemma_id = ?
+            ORDER BY sm.language ASC, sm.kind ASC, sm.ord ASC, sm.id ASC
+            """,
+            (lem_id,),
+        )
+        meaning_rows = m_cur.fetchall()
+
+        meanings_by_sense: dict[int, list[dict[str, Any]]] = {}
+        for mr in meaning_rows:
+            sid = int(mr[1])
+            meanings_by_sense.setdefault(sid, []).append({
+                "language": str(mr[2]),
+                "kind": str(mr[3]),
+                "ord": int(mr[4]),
+                "text": str(mr[5]),
+                "source": str(mr[6]),
+                "license": str(mr[7]),
+            })
+
+        senses_list: list[dict[str, Any]] = []
+        for sr in sense_rows:
+            sid = int(sr[0])
+            s_sref = str(sr[2])
+            s_means = meanings_by_sense.get(sid, [])
+            gloss_text = s_means[0]["text"] if s_means else ""
+            senses_list.append({
+                "sense_id": sid,
+                "sense_semantic_ref": s_sref,
+                "ref": s_sref,
+                "ord": int(sr[5]),
+                "gloss": gloss_text,
+                "meanings": s_means,
+            })
+
+        ex_cur = dict_conn.execute(
+            """
+            SELECT e.id, e.de, e.en, e.source, e.source_ref, e.license, e.token_count, e.has_proper
+            FROM example e
+            JOIN example_lemma el ON e.id = el.example_id
+            WHERE el.lemma_id = ?
+            ORDER BY e.id ASC
+            """,
+            (lem_id,),
+        )
+        raw_examples = [
+            {
+                "id": int(er[0]),
+                "de": str(er[1]),
+                "en": str(er[2]) if er[2] is not None else None,
+                "source": str(er[3]),
+                "license": str(er[5]),
+                "token_count": int(er[6]) if er[6] is not None else None,
+                "has_proper": bool(er[7]),
+            }
+            for er in ex_cur.fetchall()
+        ]
+        ranked_exs = rank_examples(raw_examples, known_lemmas=known_lemmas)
+
+        grammar_data = {
+            "pos": str(lem[3]),
+            "gender": str(lem[4]) if lem[4] is not None else None,
+            "plural": str(lem[5]) if lem[5] is not None else None,
+            "genitive_sg": str(lem[7]) if lem[7] is not None else None,
+            "aux": str(lem[8]) if lem[8] is not None else None,
+            "separable": bool(lem[9]),
+            "particle": str(lem[10]) if lem[10] is not None else None,
+            "reflexive": bool(lem[11]),
+            "praesens_3sg": str(lem[12]) if lem[12] is not None else None,
+            "praeteritum_3sg": str(lem[13]) if lem[13] is not None else None,
+            "partizip_ii": str(lem[14]) if lem[14] is not None else None,
+            "governs": str(lem[15]) if lem[15] is not None else None,
+            "comparative": str(lem[16]) if lem[16] is not None else None,
+            "superlative": str(lem[17]) if lem[17] is not None else None,
+            "ipa": str(lem[18]) if lem[18] is not None else None,
+        }
+
+        return {
+            "ref": lem_ref,
+            "lemma_semantic_ref": lem_ref,
+            "lemma": str(lem[2]),
+            "pos": str(lem[3]),
+            "gender": str(lem[4]) if lem[4] is not None else None,
+            "status": "resolved",
+            "senses": senses_list,
+            "grammar": grammar_data,
+            "examples": ranked_exs,
+        }
+
+    elif ref.status == "derived_compound":
+        comp_refs = (
+            [(cb.lemma_ref, cb.sense_ref) for cb in ref.component_bindings]
+            if ref.component_bindings
+            else []
+        )
+        comp_data = []
+        if ref.component_bindings:
+            for cb in ref.component_bindings:
+                comp_data.append({
+                    "lemma": cb.lemma,
+                    "lemma_ref": cb.lemma_ref,
+                    "sense_ref": cb.sense_ref,
+                })
+        lem_ref_str = (
+            f"lemma:v1:{ref.lemma.lower()}_{ref.pos.lower()}_{ref.gender.lower()}"
+            if ref.gender
+            else f"lemma:v1:{ref.lemma.lower()}_{ref.pos.lower()}"
+        )
+        return {
+            "ref": lem_ref_str,
+            "lemma_semantic_ref": lem_ref_str,
+            "lemma": ref.lemma,
+            "pos": ref.pos,
+            "gender": ref.gender,
+            "status": "derived_compound",
+            "component_refs": comp_refs,
+            "components": comp_data,
+            "senses": [],
+            "grammar": {
+                "pos": ref.pos,
+                "gender": ref.gender,
+            },
+            "examples": [],
+        }
+
+    else:
+        lem_ref_str = f"lemma:v1:{ref.lemma.lower()}_{ref.pos.lower()}"
+        return {
+            "ref": lem_ref_str,
+            "lemma_semantic_ref": lem_ref_str,
+            "lemma": ref.lemma,
+            "pos": ref.pos,
+            "gender": ref.gender,
+            "status": "needs_gloss",
+            "senses": [],
+            "grammar": {},
+            "examples": [],
+        }
+
 
 LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({
     "127.0.0.1",
@@ -386,6 +676,777 @@ def create_app(
             },
         )
 
+    @app.post("/vocab/lookup")
+    async def lookup_post_endpoint(request: Request) -> JSONResponse:
+        body = await request.json()
+        query = body.get("query") or body.get("q")
+        if not query or not isinstance(query, str) or not query.strip():
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": "query must not be empty"},
+            )
+        clean_q = query.strip()
+        asset_token, candidates = runtime.materialize_lookup(clean_q)
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "query": clean_q,
+                "asset_token": asset_token,
+                "candidates": _to_json_compatible(candidates),
+            },
+        )
+
+    @app.post("/vocab/highlight")
+    async def highlight_endpoint(request: Request) -> JSONResponse:
+        body = await request.json()
+
+        # 1. Validate sentence_text
+        sentence_text = body.get("sentence_text")
+        if not sentence_text or not isinstance(sentence_text, str) or not sentence_text.strip():
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": "sentence_text is required and must not be empty"},
+            )
+
+        # 2. Validate selected_span
+        selected_span = body.get("selected_span")
+        if not isinstance(selected_span, dict):
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": "selected_span must be an object with start and end"},
+            )
+
+        start = selected_span.get("start")
+        end = selected_span.get("end")
+        if (
+            start is None
+            or end is None
+            or isinstance(start, bool)
+            or isinstance(end, bool)
+            or not isinstance(start, int)
+            or not isinstance(end, int)
+        ):
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": "selected_span start and end must be integers"},
+            )
+
+        if not (0 <= start <= end <= len(sentence_text)):
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": "selected_span bounds are invalid for sentence_text"},
+            )
+
+        # 3. Validate lesson_label
+        lesson_label = body.get("lesson_label")
+        if not lesson_label or not isinstance(lesson_label, str) or not lesson_label.strip():
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": "lesson_label is required and must not be blank"},
+            )
+
+        lesson_id = body.get("lesson_id")
+        known_lemmas_raw = body.get("known_lemmas")
+        known_lemmas: Sequence[str] | None = None
+        if known_lemmas_raw is not None and isinstance(known_lemmas_raw, (list, tuple)):
+            known_lemmas = [str(lem) for lem in known_lemmas_raw]
+
+        selected_text = sentence_text[start:end].strip()
+
+        with runtime.reading() as snapshot:
+            token = snapshot.asset_token
+            # Perform candidate resolution
+            dict_conn = runtime._current_generation.asset.connection
+            oracle = _ConnectionLookupOracle(dict_conn)
+
+            # Try spacy token resolution if possible
+            refs: list[Ref] = []
+            nlp = _get_nlp()
+            if nlp is not None:
+                try:
+                    doc = nlp(sentence_text)
+                    target_tokens = [
+                        t for t in doc if t.idx < end and (t.idx + len(t.text)) > start
+                    ]
+                    for tok in target_tokens:
+                        for r in resolve_token(tok, oracle):
+                            if r not in refs:
+                                refs.append(r)
+                except Exception:
+                    refs = []
+
+            if not refs and selected_text:
+                refs = list(resolve_word(selected_text, oracle))
+
+            if not refs and selected_text:
+                refs = [
+                    Ref(
+                        lemma=selected_text,
+                        pos="UNKNOWN",
+                        gender=None,
+                        status="needs_gloss",
+                    )
+                ]
+
+            candidates: list[dict[str, Any]] = []
+            for r in refs:
+                cand = _materialize_candidate_from_ref(
+                    r, dict_conn, oracle, known_lemmas=known_lemmas
+                )
+                if cand is not None:
+                    candidates.append(cand)
+
+            provenance: dict[str, Any] = {
+                "char_start": start,
+                "char_end": end,
+            }
+            if lesson_id and isinstance(lesson_id, str) and lesson_id.strip():
+                provenance["lesson_id"] = lesson_id.strip()
+
+            capture_context: dict[str, Any] = {
+                "sentence_text": sentence_text,
+                "selected_span": {"start": start, "end": end},
+                "lesson_label": lesson_label.strip(),
+                "provenance": provenance,
+            }
+
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content={
+                    "asset_token": token,
+                    "candidates": _to_json_compatible(candidates),
+                    "capture_context": capture_context,
+                },
+            )
+
+    @app.post("/vocab/cards")
+    async def capture_cards_endpoint(request: Request) -> JSONResponse:
+        body = await request.json()
+
+        picker_token = body.get("asset_token")
+        if not picker_token or not isinstance(picker_token, str):
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": "asset_token is required"},
+            )
+
+        selections_raw = body.get("selections")
+        if not isinstance(selections_raw, list) or len(selections_raw) == 0:
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": "selections must be a non-empty list"},
+            )
+
+        deck_input = body.get("deck")
+        if not deck_input:
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": "deck target is required"},
+            )
+        if isinstance(deck_input, dict):
+            deck_name = deck_input.get("name") or deck_input.get("lesson_label")
+        elif isinstance(deck_input, str):
+            deck_name = deck_input
+        else:
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": "deck must be an object or string"},
+            )
+        if not deck_name or not isinstance(deck_name, str) or not deck_name.strip():
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": "deck name is required and must not be blank"},
+            )
+        clean_deck_name = deck_name.strip()
+
+        capture_context = body.get("capture_context")
+        if capture_context is not None:
+            if not isinstance(capture_context, dict):
+                return JSONResponse(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    content={"detail": "capture_context must be an object"},
+                )
+            sent_text = capture_context.get("sentence_text")
+            span_raw = capture_context.get("selected_span")
+            if span_raw is not None:
+                if not isinstance(span_raw, dict):
+                    return JSONResponse(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        content={"detail": "selected_span must be an object"},
+                    )
+                st = span_raw.get("start")
+                en = span_raw.get("end")
+                if (
+                    st is None
+                    or en is None
+                    or isinstance(st, bool)
+                    or isinstance(en, bool)
+                    or not isinstance(st, int)
+                    or not isinstance(en, int)
+                ):
+                    return JSONResponse(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        content={"detail": "selected_span start and end must be integers"},
+                    )
+                if sent_text is not None and isinstance(sent_text, str):
+                    if not (0 <= st <= en <= len(sent_text)):
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={"detail": "selected_span out of bounds"},
+                        )
+
+        with runtime.reading() as snapshot:
+            active_token = snapshot.asset_token
+            if picker_token != active_token:
+                return JSONResponse(
+                    status_code=status.HTTP_409_CONFLICT,
+                    content={
+                        "detail": "Asset token mismatch; dictionary has changed",
+                        "picker_token": picker_token,
+                        "active_token": active_token,
+                    },
+                )
+
+            seen_identities: set[tuple[Any, ...]] = set()
+            validated_selections: list[dict[str, Any]] = []
+
+            for sel in selections_raw:
+                if not isinstance(sel, dict):
+                    return JSONResponse(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        content={"detail": "Each selection must be an object"},
+                    )
+
+                lem_ref = sel.get("ref") or sel.get("lemma_semantic_ref")
+                if not lem_ref or not isinstance(lem_ref, str) or not lem_ref.strip():
+                    return JSONResponse(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        content={"detail": "ref / lemma_semantic_ref is required for selection"},
+                    )
+                clean_lem_ref = lem_ref.strip()
+                if clean_lem_ref not in snapshot.lemma_ids:
+                    return JSONResponse(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        content={
+                            "detail": (
+                                "Unknown lemma semantic reference in active dictionary: "
+                                f"{clean_lem_ref}"
+                            )
+                        },
+                    )
+                expected_lem_id = snapshot.lemma_ids[clean_lem_ref]
+
+                status_val = sel.get("status")
+                sense_ref = sel.get("sense_semantic_ref") or sel.get("sense_ref")
+                clean_sense_ref = (
+                    sense_ref.strip()
+                    if (sense_ref and isinstance(sense_ref, str) and sense_ref.strip())
+                    else None
+                )
+
+                if clean_sense_ref is not None:
+                    if clean_sense_ref not in snapshot.sense_ids:
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={
+                                "detail": (
+                                    "Unknown sense semantic reference in active dictionary: "
+                                    f"{clean_sense_ref}"
+                                )
+                            },
+                        )
+                    _, actual_lem_id = snapshot.sense_ids[clean_sense_ref]
+                    if actual_lem_id != expected_lem_id:
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={
+                                "detail": (
+                                    f"Sense {clean_sense_ref} does not belong to lemma "
+                                    f"{clean_lem_ref}"
+                                )
+                            },
+                        )
+                    if status_val is None:
+                        status_val = "resolved"
+
+                comp_refs_raw = sel.get("component_refs") or sel.get("component_bindings")
+                comp_bindings: list[tuple[str, str]] = []
+                if comp_refs_raw is not None:
+                    for item in comp_refs_raw:
+                        if isinstance(item, (list, tuple)) and len(item) == 2:
+                            c_l, c_s = str(item[0]).strip(), str(item[1]).strip()
+                        elif (
+                            isinstance(item, dict)
+                            and "lemma_semantic_ref" in item
+                            and "sense_semantic_ref" in item
+                        ):
+                            c_l = str(item["lemma_semantic_ref"]).strip()
+                            c_s = str(item["sense_semantic_ref"]).strip()
+                        elif (
+                            isinstance(item, dict)
+                            and "lemma_ref" in item
+                            and "sense_ref" in item
+                        ):
+                            c_l = str(item["lemma_ref"]).strip()
+                            c_s = str(item["sense_ref"]).strip()
+                        else:
+                            return JSONResponse(
+                                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                content={"detail": "Invalid component_refs format"},
+                            )
+                        if c_l not in snapshot.lemma_ids:
+                            return JSONResponse(
+                                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                content={"detail": f"Unknown component lemma ref: {c_l}"},
+                            )
+                        if c_s not in snapshot.sense_ids:
+                            return JSONResponse(
+                                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                content={"detail": f"Unknown component sense ref: {c_s}"},
+                            )
+                        c_exp_lid = snapshot.lemma_ids[c_l]
+                        _, c_act_lid = snapshot.sense_ids[c_s]
+                        if c_act_lid != c_exp_lid:
+                            return JSONResponse(
+                                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                content={
+                                    "detail": (
+                                        f"Component sense {c_s} does not belong to "
+                                        f"component lemma {c_l}"
+                                    )
+                                },
+                            )
+                        comp_bindings.append((c_l, c_s))
+                    if status_val is None and comp_bindings:
+                        status_val = "derived_compound"
+
+                if status_val is None:
+                    status_val = "resolved" if clean_sense_ref else "needs_gloss"
+
+                if status_val == "derived_compound" and not comp_bindings:
+                    return JSONResponse(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        content={"detail": "derived compounds require component bindings"},
+                    )
+                if status_val == "resolved" and not clean_sense_ref:
+                    return JSONResponse(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        content={"detail": "resolved notes require a sense semantic reference"},
+                    )
+
+                # Identity for duplicate check
+                if status_val == "resolved":
+                    identity_key: tuple[Any, ...] = ("resolved", clean_sense_ref)
+                elif status_val == "derived_compound":
+                    identity_key = ("derived_compound", tuple(comp_bindings))
+                else:
+                    identity_key = ("needs_gloss", clean_lem_ref)
+
+                if identity_key in seen_identities:
+                    return JSONResponse(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        content={
+                            "detail": (
+                                f"Duplicate same-identity selection in request: {identity_key}"
+                            )
+                        },
+                    )
+                seen_identities.add(identity_key)
+
+                # Validate overrides
+                overrides = sel.get("overrides", {})
+                if not isinstance(overrides, dict):
+                    return JSONResponse(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        content={"detail": "overrides must be an object"},
+                    )
+
+                allowed_override_keys = {
+                    "front_override",
+                    "back_override",
+                    "meaning_langs",
+                    "user_meanings",
+                }
+                for k in overrides:
+                    if k not in allowed_override_keys:
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={"detail": f"Unknown override key: {k}"},
+                        )
+
+                front_ov = overrides.get("front_override")
+                if front_ov is not None:
+                    if not isinstance(front_ov, str) or not front_ov.strip():
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={"detail": "front_override must be non-empty string or null"},
+                        )
+
+                back_ov = overrides.get("back_override")
+                if back_ov is not None:
+                    if not isinstance(back_ov, str) or not back_ov.strip():
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={"detail": "back_override must be non-empty string or null"},
+                        )
+
+                raw_ml = overrides.get("meaning_langs")
+                validated_ml: tuple[str, ...] | None = None
+                if raw_ml is not None:
+                    if not isinstance(raw_ml, (list, tuple)) or not raw_ml:
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={"detail": "meaning_langs must be a non-empty list"},
+                        )
+                    for lang_code in raw_ml:
+                        if lang_code == "fa":
+                            return JSONResponse(
+                                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                content={
+                                    "detail": "Persian (fa) is deferred and unsupported in v1"
+                                },
+                            )
+                        if lang_code not in ("de", "en"):
+                            return JSONResponse(
+                                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                content={"detail": f"Unsupported meaning language: {lang_code}"},
+                            )
+                    if len(set(raw_ml)) != len(raw_ml):
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={"detail": "Duplicate meaning languages"},
+                        )
+                    validated_ml = tuple(raw_ml)
+
+                raw_um = overrides.get("user_meanings")
+                validated_um: dict[str, str | None] | None = None
+                if raw_um is not None:
+                    if not isinstance(raw_um, dict) or not raw_um:
+                        return JSONResponse(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            content={"detail": "user_meanings must be a non-empty object"},
+                        )
+                    validated_um = {}
+                    for um_l, um_v in raw_um.items():
+                        if um_l == "fa":
+                            return JSONResponse(
+                                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                content={
+                                    "detail": "Persian (fa) is deferred and unsupported in v1"
+                                },
+                            )
+                        if um_l not in ("de", "en"):
+                            return JSONResponse(
+                                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                content={"detail": f"Unsupported user meaning language: {um_l}"},
+                            )
+                        if um_v is not None:
+                            if not isinstance(um_v, str) or not um_v.strip():
+                                return JSONResponse(
+                                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                    content={"detail": "user_meaning text must not be empty"},
+                                )
+                            validated_um[um_l] = um_v.strip()
+                        else:
+                            validated_um[um_l] = None
+
+                validated_selections.append({
+                    "lemma_semantic_ref": clean_lem_ref,
+                    "sense_semantic_ref": clean_sense_ref,
+                    "status": status_val,
+                    "component_bindings": tuple(comp_bindings),
+                    "meaning_langs": validated_ml,
+                    "user_meanings": validated_um,
+                    "front_override": front_ov.strip() if front_ov is not None else None,
+                    "back_override": back_ov.strip() if back_ov is not None else None,
+                    "identity_key": identity_key,
+                })
+
+            # All validations complete; execute atomic DB transaction
+            conn = _get_user_db_conn(app)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                deck_row = conn.execute(
+                    "SELECT id FROM deck WHERE name = ?", (clean_deck_name,)
+                ).fetchone()
+                if deck_row is not None:
+                    deck_id = int(deck_row[0])
+                else:
+                    deck_id = create_deck(conn, clean_deck_name, _manage_transaction=False)
+
+                result_notes: list[dict[str, Any]] = []
+                for vsel in validated_selections:
+                    st_val = vsel["status"]
+                    l_ref = vsel["lemma_semantic_ref"]
+                    s_ref = vsel["sense_semantic_ref"]
+                    c_binds = vsel["component_bindings"]
+                    m_langs = vsel["meaning_langs"]
+                    u_means = vsel["user_meanings"]
+
+                    existing_note_id: int | None = None
+                    if st_val == "resolved" and s_ref is not None:
+                        row = conn.execute(
+                            "SELECT id FROM note WHERE status = 'resolved' "
+                            "AND sense_semantic_ref = ?",
+                            (s_ref,),
+                        ).fetchone()
+                        if row is not None:
+                            existing_note_id = int(row[0])
+                    elif st_val == "derived_compound" and c_binds:
+                        c_count = len(c_binds)
+                        candidate_notes = conn.execute(
+                            """
+                            SELECT note_id FROM note_dictionary_binding
+                            WHERE role = 'component' AND component_count = ?
+                            GROUP BY note_id HAVING COUNT(*) = ?
+                            """,
+                            (c_count, c_count),
+                        ).fetchall()
+                        for cn in candidate_notes:
+                            nid_cand = int(cn[0])
+                            b_rows = conn.execute(
+                                """
+                                SELECT component_ord, lemma_semantic_ref, sense_semantic_ref
+                                FROM note_dictionary_binding
+                                WHERE note_id = ? AND role = 'component'
+                                ORDER BY component_ord ASC
+                                """,
+                                (nid_cand,),
+                            ).fetchall()
+                            if (
+                                len(b_rows) == c_count
+                                and tuple((str(r[1]), str(r[2])) for r in b_rows) == c_binds
+                            ):
+                                existing_note_id = nid_cand
+                                break
+                    elif st_val == "needs_gloss":
+                        row = conn.execute(
+                            "SELECT id FROM note WHERE status = 'needs_gloss' "
+                            "AND lemma_semantic_ref = ?",
+                            (l_ref,),
+                        ).fetchone()
+                        if row is not None:
+                            existing_note_id = int(row[0])
+
+                    if existing_note_id is not None:
+                        note_id = existing_note_id
+                        is_created = False
+                        if m_langs is not None:
+                            set_meaning_languages(
+                                conn, note_id, m_langs, _manage_transaction=False
+                            )
+                        if u_means is not None:
+                            for um_l, um_t in u_means.items():
+                                if um_t is not None:
+                                    set_user_meaning(
+                                        conn, note_id, um_l, um_t, _manage_transaction=False
+                                    )
+                                else:
+                                    delete_user_meaning(
+                                        conn, note_id, um_l, _manage_transaction=False
+                                    )
+                    else:
+                        is_created = True
+                        initial_langs = m_langs if m_langs is not None else ("de", "en")
+                        note_id = create_note(
+                            conn,
+                            lemma_semantic_ref=l_ref,
+                            sense_semantic_ref=s_ref,
+                            status=st_val,
+                            component_bindings=c_binds,
+                            meaning_languages=initial_langs,
+                            _manage_transaction=False,
+                        )
+                        if u_means is not None:
+                            for um_l, um_t in u_means.items():
+                                if um_t is not None:
+                                    set_user_meaning(
+                                        conn, note_id, um_l, um_t, _manage_transaction=False
+                                    )
+
+                    add_note_to_deck(conn, note_id, deck_id, _manage_transaction=False)
+                    result_notes.append({
+                        "note_id": note_id,
+                        "status": st_val,
+                        "created": is_created,
+                        "deck_id": deck_id,
+                    })
+
+                conn.commit()
+                return JSONResponse(
+                    status_code=status.HTTP_201_CREATED,
+                    content={
+                        "notes": result_notes,
+                        "deck_id": deck_id,
+                    },
+                )
+            except Exception as exc:
+                conn.rollback()
+                if isinstance(exc, DeckError):
+                    return JSONResponse(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        content={"detail": str(exc)},
+                    )
+                raise
+            finally:
+                conn.close()
+
+    @app.post("/vocab/import/csv")
+    async def import_csv_endpoint(request: Request) -> JSONResponse:
+        body = await request.json()
+        csv_text = body.get("csv_text")
+        if not csv_text or not isinstance(csv_text, str) or not csv_text.strip():
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": "csv_text is required and must not be empty"},
+            )
+
+        deck_name = body.get("deck_name")
+        if not deck_name or not isinstance(deck_name, str) or not deck_name.strip():
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": "deck_name is required and must not be blank"},
+            )
+        clean_deck_name = deck_name.strip()
+
+        raw_langs = body.get("meaning_languages") or body.get("meaning_langs")
+        if raw_langs is not None:
+            if not isinstance(raw_langs, (list, tuple)) or not raw_langs:
+                return JSONResponse(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    content={"detail": "meaning_languages must be non-empty list"},
+                )
+            for lang_code in raw_langs:
+                if lang_code == "fa":
+                    return JSONResponse(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        content={"detail": "Persian (fa) is deferred and unsupported in v1"},
+                    )
+                if lang_code not in ("de", "en"):
+                    return JSONResponse(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        content={"detail": f"Unsupported meaning language: {lang_code}"},
+                    )
+            meaning_languages = tuple(raw_langs)
+        else:
+            meaning_languages = ("de", "en")
+
+        lines = [line.strip() for line in csv_text.splitlines() if line.strip()]
+        if not lines:
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={"detail": "csv_text contains no valid lines"},
+            )
+
+        with runtime.reading():
+            dict_conn = runtime._current_generation.asset.connection
+            oracle = _ConnectionLookupOracle(dict_conn)
+
+            conn = _get_user_db_conn(app)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                deck_row = conn.execute(
+                    "SELECT id FROM deck WHERE name = ?", (clean_deck_name,)
+                ).fetchone()
+                if deck_row is not None:
+                    deck_id = int(deck_row[0])
+                else:
+                    deck_id = create_deck(conn, clean_deck_name, _manage_transaction=False)
+
+                created_count = 0
+                reused_count = 0
+
+                for word in lines:
+                    refs = list(resolve_word(word, oracle))
+                    if refs:
+                        top_ref = refs[0]
+                    else:
+                        top_ref = Ref(
+                            lemma=word,
+                            pos="UNKNOWN",
+                            gender=None,
+                            status="needs_gloss",
+                        )
+
+                    st_val = top_ref.status
+                    exact_lemmas = oracle.lookup_exact(top_ref.lemma, pos=top_ref.pos)
+                    if exact_lemmas and exact_lemmas[0].semantic_ref:
+                        clean_lem_ref = str(exact_lemmas[0].semantic_ref)
+                    else:
+                        clean_lem_ref = f"lemma:v1:{top_ref.lemma.lower()}_{top_ref.pos.lower()}"
+
+                    clean_sense_ref = None
+                    c_binds: tuple[tuple[str, str], ...] = ()
+
+                    if st_val == "resolved":
+                        senses = oracle.lookup_senses(top_ref.lemma_id or 0)
+                        if senses and senses[0].semantic_ref:
+                            clean_sense_ref = str(senses[0].semantic_ref)
+                        else:
+                            st_val = "needs_gloss"
+                    elif st_val == "derived_compound" and top_ref.component_bindings:
+                        c_binds = tuple(
+                            (cb.lemma_ref, cb.sense_ref)
+                            for cb in top_ref.component_bindings
+                        )
+
+                    # Check existence
+                    existing_id: int | None = None
+                    if st_val == "resolved" and clean_sense_ref is not None:
+                        row = conn.execute(
+                            "SELECT id FROM note WHERE status = 'resolved' "
+                            "AND sense_semantic_ref = ?",
+                            (clean_sense_ref,),
+                        ).fetchone()
+                        if row is not None:
+                            existing_id = int(row[0])
+                    elif st_val == "needs_gloss":
+                        row = conn.execute(
+                            "SELECT id FROM note WHERE status = 'needs_gloss' "
+                            "AND lemma_semantic_ref = ?",
+                            (clean_lem_ref,),
+                        ).fetchone()
+                        if row is not None:
+                            existing_id = int(row[0])
+
+                    if existing_id is not None:
+                        note_id = existing_id
+                        reused_count += 1
+                    else:
+                        note_id = create_note(
+                            conn,
+                            lemma_semantic_ref=clean_lem_ref,
+                            sense_semantic_ref=clean_sense_ref,
+                            status=st_val,
+                            component_bindings=c_binds,
+                            meaning_languages=meaning_languages,
+                            _manage_transaction=False,
+                        )
+                        created_count += 1
+
+                    add_note_to_deck(conn, note_id, deck_id, _manage_transaction=False)
+
+                conn.commit()
+                return JSONResponse(
+                    status_code=status.HTTP_201_CREATED,
+                    content={
+                        "deck_id": deck_id,
+                        "notes_created": created_count,
+                        "notes_reused": reused_count,
+                        "total_words": len(lines),
+                    },
+                )
+            except Exception as exc:
+                conn.rollback()
+                if isinstance(exc, DeckError):
+                    return JSONResponse(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        content={"detail": str(exc)},
+                    )
+                raise
+            finally:
+                conn.close()
+
     @app.post("/vocab/notes")
     async def capture_note_endpoint(request: Request) -> JSONResponse:
         body = await request.json()
@@ -582,60 +1643,58 @@ def create_app(
                             content={"detail": "user_meaning text must not be empty"},
                         )
 
-        conn = _get_user_db_conn(app)
-        try:
-            deck_name = body.get("deck_name") or body.get("lesson_label")
-            deck_id: int | None = None
-            if deck_name and isinstance(deck_name, str) and deck_name.strip():
-                clean_deck_name = deck_name.strip()
-                row = conn.execute(
-                    "SELECT id FROM deck WHERE name = ?", (clean_deck_name,)
-                ).fetchone()
-                if row is not None:
-                    deck_id = int(row[0])
-                else:
-                    deck_id = create_deck(conn, clean_deck_name)
+            conn = _get_user_db_conn(app)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                deck_name = body.get("deck_name") or body.get("lesson_label")
+                deck_id: int | None = None
+                if deck_name and isinstance(deck_name, str) and deck_name.strip():
+                    clean_deck_name = deck_name.strip()
+                    row = conn.execute(
+                        "SELECT id FROM deck WHERE name = ?", (clean_deck_name,)
+                    ).fetchone()
+                    if row is not None:
+                        deck_id = int(row[0])
+                    else:
+                        deck_id = create_deck(conn, clean_deck_name, _manage_transaction=False)
 
-            note_id = create_note(
-                conn,
-                lemma_semantic_ref=clean_lemma_ref,
-                sense_semantic_ref=clean_sense_ref,
-                status=status_val,
-                component_bindings=component_refs or (),
-                meaning_languages=validated_langs,
-            )
-
-            if deck_id is not None:
-                conn.execute(
-                    """
-                    INSERT INTO note_deck (note_id, deck_id, created_at)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(note_id, deck_id) DO NOTHING
-                    """,
-                    (note_id, deck_id, datetime.now(timezone.utc).isoformat()),
+                note_id = create_note(
+                    conn,
+                    lemma_semantic_ref=clean_lemma_ref,
+                    sense_semantic_ref=clean_sense_ref,
+                    status=status_val,
+                    component_bindings=component_refs or (),
+                    meaning_languages=validated_langs,
+                    _manage_transaction=False,
                 )
+
+                if deck_id is not None:
+                    add_note_to_deck(conn, note_id, deck_id, _manage_transaction=False)
+
+                if user_meanings_input:
+                    for um_lang, um_text in user_meanings_input.items():
+                        set_user_meaning(
+                            conn, note_id, um_lang, um_text.strip(), _manage_transaction=False
+                        )
+
                 conn.commit()
-
-            if user_meanings_input:
-                for um_lang, um_text in user_meanings_input.items():
-                    set_user_meaning(conn, note_id, um_lang, um_text.strip())
-
-            return JSONResponse(
-                status_code=status.HTTP_201_CREATED,
-                content={
-                    "note_id": note_id,
-                    "status": status_val,
-                    "meaning_languages": list(validated_langs),
-                    "deck_id": deck_id,
-                },
-            )
-        except DeckError as exc:
-            return JSONResponse(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                content={"detail": str(exc)},
-            )
-        finally:
-            conn.close()
+                return JSONResponse(
+                    status_code=status.HTTP_201_CREATED,
+                    content={
+                        "note_id": note_id,
+                        "status": status_val,
+                        "meaning_languages": list(validated_langs),
+                        "deck_id": deck_id,
+                    },
+                )
+            except DeckError as exc:
+                conn.rollback()
+                return JSONResponse(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    content={"detail": str(exc)},
+                )
+            finally:
+                conn.close()
 
     @app.get("/vocab/cards/next")
     def next_card_endpoint(deck_id: int | None = None) -> JSONResponse:

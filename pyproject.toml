@@ -31,7 +31,6 @@ exclude = [
     "^build",
     "^dist",
     "^handoff",
-    "^reference",
     "^tmp",
 ]
 
@@ -46,7 +45,6 @@ exclude = [
     "build",
     "dist",
     "handoff",
-    "reference",
     "tmp",
 ]
 
@@ -59,4 +57,4 @@ select = ["E", "F", "I"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-norecursedirs = [".venv", "handoff", "build", "dist", "reference", "tmp"]
+norecursedirs = [".venv", "handoff", "build", "dist", "tmp"]

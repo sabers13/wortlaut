@@ -11,12 +11,12 @@ import os
 import sqlite3
 import threading
 from collections.abc import Callable, Generator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import TypeAlias, cast
+from typing import Any, TypeAlias, cast
 
 from fsrs import Card, Rating, Scheduler, State
 
@@ -147,11 +147,21 @@ def _scheduler() -> Scheduler:
     )
 
 
-def create_deck(conn: sqlite3.Connection, name: str, *, created_at: datetime | None = None) -> int:
+def _transaction_context(conn: sqlite3.Connection, manage: bool) -> Any:
+    return conn if manage else nullcontext()
+
+
+def create_deck(
+    conn: sqlite3.Connection,
+    name: str,
+    *,
+    created_at: datetime | None = None,
+    _manage_transaction: bool = True,
+) -> int:
     """Create a user deck and return its primary key."""
     if not name.strip():
         raise DeckError("deck name must not be blank")
-    with conn:
+    with _transaction_context(conn, _manage_transaction):
         cursor = conn.execute(
             "INSERT INTO deck (name, created_at) VALUES (?, ?)",
             (name.strip(), _timestamp(_as_utc(created_at))),
@@ -168,6 +178,7 @@ def create_note(
     component_bindings: Sequence[ComponentBinding] = (),
     meaning_languages: Sequence[str],
     created_at: datetime | None = None,
+    _manage_transaction: bool = True,
 ) -> int:
     """Create a note, card, D47 bindings, and a non-empty language selection."""
     if not lemma_semantic_ref.strip():
@@ -185,7 +196,7 @@ def create_note(
             raise DeckError("component bindings require non-blank semantic references")
 
     now_text = _timestamp(_as_utc(created_at))
-    with conn:
+    with _transaction_context(conn, _manage_transaction):
         cursor = conn.execute(
             """
             INSERT INTO note (
@@ -235,9 +246,10 @@ def add_note_to_deck(
     deck_id: int,
     *,
     created_at: datetime | None = None,
+    _manage_transaction: bool = True,
 ) -> None:
     """Add a note to a deck without duplicating an existing membership."""
-    with conn:
+    with _transaction_context(conn, _manage_transaction):
         conn.execute(
             """
             INSERT OR IGNORE INTO note_deck (note_id, deck_id, created_at)
@@ -294,10 +306,16 @@ def delete_deck(conn: sqlite3.Connection, deck_id: int, *, now: datetime | None 
         raise
 
 
-def set_meaning_languages(conn: sqlite3.Connection, note_id: int, languages: Sequence[str]) -> None:
+def set_meaning_languages(
+    conn: sqlite3.Connection,
+    note_id: int,
+    languages: Sequence[str],
+    *,
+    _manage_transaction: bool = True,
+) -> None:
     """Replace a note's display language set after validating it in full."""
     selected = _validate_languages(languages)
-    with conn:
+    with _transaction_context(conn, _manage_transaction):
         conn.execute("DELETE FROM note_meaning_lang WHERE note_id = ?", (note_id,))
         conn.executemany(
             "INSERT INTO note_meaning_lang (note_id, lang) VALUES (?, ?)",
@@ -312,13 +330,14 @@ def set_user_meaning(
     meaning_text: str,
     *,
     now: datetime | None = None,
+    _manage_transaction: bool = True,
 ) -> None:
     """Upsert a language-specific note-local user meaning."""
     _validate_language(language)
     if not meaning_text.strip():
         raise DeckError("user meaning must not be blank")
     timestamp = _timestamp(_as_utc(now))
-    with conn:
+    with _transaction_context(conn, _manage_transaction):
         conn.execute(
             """
             INSERT INTO note_user_meaning (
@@ -332,10 +351,16 @@ def set_user_meaning(
         )
 
 
-def delete_user_meaning(conn: sqlite3.Connection, note_id: int, language: str) -> None:
+def delete_user_meaning(
+    conn: sqlite3.Connection,
+    note_id: int,
+    language: str,
+    *,
+    _manage_transaction: bool = True,
+) -> None:
     """Remove one note-local user meaning without changing selected languages."""
     _validate_language(language)
-    with conn:
+    with _transaction_context(conn, _manage_transaction):
         conn.execute(
             "DELETE FROM note_user_meaning WHERE note_id = ? AND lang = ?",
             (note_id, language),
