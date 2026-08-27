@@ -489,3 +489,13 @@ Output: `684 passed, 82 warnings in 257.32s`
 #### J. Git Diff Check
 Command: `git diff --check`
 Exit code: 0 (clean, no trailing whitespace or merge conflict markers)
+
+## S8C-1a Evidence — navigation and deck shell
+
+Implemented the frontend-only deck navigation shell with the existing typed `/vocab` client: server-authoritative list, create, open, refresh, and explicit delete confirmation. Loading, empty, error/retry, and success states remain distinct; no browser persistence or scheduling was added.
+
+### Repair evidence
+
+The refresh outcome is now explicit: a failed `GET /vocab/decks` returns failure to create/delete flows, clears any success notice, and produces an error rather than a false success. Creation opens a deck only after the refreshed server list contains its returned ID; deletion likewise requires a refreshed list that no longer contains the deleted ID. The historical S8B full-gate output above is not evidence for this repair.
+
+Verification for this repair: `npm run typecheck`, `npm test`, and `npm run build` passed in `frontend/`. `make gate` reached mypy after ruff passed, then stopped on the pre-existing unavailable `fsrs`/`spacy` imports (7 missing-import errors in six non-frontend files), so it did not reach pytest. `git diff --check` passed.
