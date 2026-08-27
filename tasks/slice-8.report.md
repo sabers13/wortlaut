@@ -334,3 +334,158 @@ Exit code: 0 (OK)
 #### E. Pytest Test Suites
 Command: `/home/saber/projects/flashcard/.venv/bin/pytest -q tests/test_capture.py tests/test_examples.py tests/test_smoke_baseline.py`
 Exit code: 0 (17 passed)
+
+---
+
+## S8B Final Verification Evidence
+
+### 1. Cumulative Frontend Foundation & Verification
+- **Strict TypeScript & Toolchain Configuration**:
+  - `frontend/tsconfig.json` enforces strict TypeScript compilation (`strict: true`, `noUnusedLocals: true`, `noUnusedParameters: true`, `noFallthroughCasesInSwitch: true`, `noUncheckedIndexedAccess: true`, `skipLibCheck: true`, `target: ES2022`, `module: ESNext`, `moduleResolution: bundler`).
+  - Vite (`frontend/vite.config.ts`) targets `../app/frontend` with `emptyOutDir: true` and proxies `/vocab` to `http://127.0.0.1:8000`.
+  - Playwright (`frontend/playwright.config.ts`) configured with `baseURL: http://127.0.0.1:8000`, parallel execution, and test directory `./tests/e2e`.
+- **Lit Root Custom Element & Design Tokens**:
+  - Registered `<flashcard-app>` Lit custom element (`frontend/src/app.ts`) and CSS custom property token hierarchy (`frontend/src/styles/tokens.css`).
+  - Strict ephemeral state (`@state() private appTitle`); zero local storage, IndexedDB, or client-side caching.
+- **Typed `/vocab` Client (AGENTS R12, ADR-0002 §4.1 / §5, ADR-0004 D47)**:
+  - `VocabClient` strictly prefixes all endpoints with `/vocab`.
+  - Enforces `X-Flashcards-Request: 1` on all non-GET requests and `Content-Type: application/json` on JSON requests.
+  - Complete TypeScript interface coverage (`HighlightRequest`/`HighlightResponse`, `CaptureCardsRequest`/`CaptureCardsResponse`, `ImportCsvRequest`/`ImportCsvResponse`, `LookupResponse`, `NextCardResponse`, `ReviewCardResponse`, `SetGlossResponse`, `UploadAudioResponse`, `ActivateDictionaryResponse`, etc.).
+  - Typed `ApiError` with 400/403/404/409/422 status helpers and ADR-0004 D47 `pickerToken`/`activeToken` extraction.
+- **Prohibitions & Architecture Invariants Verified**:
+  - Zero client-side scheduler or FSRS rating algorithm (FSRS is strictly backend-managed; review endpoint accepts only raw confidence 1..5).
+  - Zero client-side database / IndexedDB / persistence.
+  - Zero React / non-Lit UI frameworks or external UI dependencies.
+  - Zero runtime LLM dependencies or imports (AGENTS R1).
+  - No Persian (`fa`) language option in client type unions.
+  - Clean repository boundary (`.gitignore` covers `node_modules/`, `app/frontend/`, `frontend/test-results/`, `frontend/playwright-report/`, `frontend/.playwright/`).
+
+### 2. Process & Transport Argv Safety Record
+- **Implementation Packages**: 3 primary implementation packages (S8B-1a toolchain/metadata, S8B-1b Lit shell/CSS tokens, S8B-2 typed `/vocab` client) plus 1 bounded repair package.
+- **Task Prompt Compactness**: Post-policy task prompts were compact and well below 28,672 UTF-8 bytes.
+- **Transport Warnings**: One earlier generated model prompt was reported at 63,534 bytes as a transport warning; no routing substitution was made because of prompt size.
+
+### 3. Verification Commands Output
+
+#### A. Frontend Dependencies Installation (`npm ci`)
+Command: `npm ci --prefix frontend`
+Exit code: 0
+Output:
+```
+added 26 packages, and audited 27 packages in 2s
+found 0 vulnerabilities
+```
+
+#### B. Frontend Typecheck (`tsc --noEmit`)
+Command: `npm run --prefix frontend typecheck`
+Exit code: 0
+Output:
+```
+> flashcard-frontend@0.1.0 typecheck
+> tsc --noEmit
+```
+
+#### C. Frontend Build (`tsc && vite build`)
+Command: `npm run --prefix frontend build`
+Exit code: 0
+Output:
+```
+> flashcard-frontend@0.1.0 build
+> tsc && vite build
+
+vite v6.4.3 building for production...
+transforming (1) src/main.tstransforming (21) node_modules/@lit/reactive-element/css-tag.js✓ 22 modules transformed.
+rendering chunks (1)...computing gzip size (0)...computing gzip size (1)...computing gzip size (2)...computing gzip size (3)...../app/frontend/index.html                  0.41 kB │ gzip: 0.27 kB
+../app/frontend/assets/index-B7pGa7di.css   2.00 kB │ gzip: 0.83 kB
+../app/frontend/assets/index-DGAbqAPX.js   20.74 kB │ gzip: 7.64 kB
+✓ built in 353ms
+```
+
+#### D. Frontend Unit Tests (`node --test`)
+Command: `npm test --prefix frontend`
+Exit code: 0
+Output:
+```
+> flashcard-frontend@0.1.0 test
+> node --experimental-strip-types --test src/api/client.test.ts
+
+▶ VocabClient
+  ✔ instantiates cleanly via factory and constructor with default or custom options (1.538413ms)
+  ▶ Security guards & headers (AGENTS R12 / ADR-0002)
+    ✔ does NOT send X-Flashcards-Request on GET requests (50.962137ms)
+    ✔ sends X-Flashcards-Request: 1 and Content-Type: application/json on non-GET JSON requests (1.693005ms)
+    ✔ sends X-Flashcards-Request: 1 on DELETE requests (0.925557ms)
+  ✔ Security guards & headers (AGENTS R12 / ADR-0002) (54.127086ms)
+  ▶ Lookup & Dictionary endpoints
+    ✔ executes GET /vocab/lookup with query param encoding (1.302859ms)
+    ✔ executes POST /vocab/lookup with query body (0.897471ms)
+    ✔ executes POST /vocab/dictionary/activate (0.933598ms)
+  ✔ Lookup & Dictionary endpoints (4.440569ms)
+  ▶ Capture workflows
+    ✔ executes POST /vocab/highlight (Stage 1 candidate resolution) (0.883784ms)
+    ✔ executes POST /vocab/cards (Stage 2 atomic card creation) (0.913139ms)
+    ✔ executes POST /vocab/import/csv for batch imports (0.977642ms)
+    ✔ executes POST /vocab/notes for single note creation (1.205229ms)
+  ✔ Capture workflows (4.492449ms)
+  ▶ Review & Study endpoints
+    ✔ executes GET /vocab/cards/next with optional deck_id (1.047584ms)
+    ✔ executes POST /vocab/cards/{card_id}/review with raw confidence (0.742661ms)
+  ✔ Review & Study endpoints (2.041473ms)
+  ▶ Gloss & User meaning endpoints
+    ✔ executes POST /vocab/notes/{note_id}/gloss (0.68676ms)
+    ✔ executes DELETE /vocab/notes/{note_id}/gloss?language=... (0.586578ms)
+  ✔ Gloss & User meaning endpoints (1.529881ms)
+  ▶ Audio endpoints
+    ✔ generates audio URL via getAudioUrl (0.352913ms)
+    ✔ fetches audio binary blob via fetchAudio (31.868527ms)
+    ✔ uploads custom pronunciation audio via uploadAudio (0.811291ms)
+    ✔ reverts custom pronunciation audio via revertAudio (0.687178ms)
+  ✔ Audio endpoints (34.456301ms)
+  ▶ Export Anki endpoint
+    ✔ executes GET /vocab/export/anki with text response (1.083704ms)
+  ✔ Export Anki endpoint (1.192768ms)
+  ▶ Error handling & typed ApiError
+    ✔ throws ApiError on 404 with parsed detail (1.258709ms)
+    ✔ throws ApiError on 409 Conflict with picker_token and active_token (0.62623ms)
+    ✔ throws ApiError on 422 Unprocessable Entity with error list or string detail (0.594867ms)
+    ✔ throws ApiError on non-JSON error response (0.488437ms)
+  ✔ Error handling & typed ApiError (3.218912ms)
+✔ VocabClient (109.361236ms)
+ℹ tests 24
+ℹ suites 9
+ℹ pass 24
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 317.990242
+```
+
+#### E. Python Reference Smoke Test
+Command: `/home/saber/projects/flashcard/.venv/bin/python reference/smoke_test.py`
+Exit code: 0
+Output: OK (5/5 sections passed)
+
+#### F. Python Ruff Linter
+Command: `/home/saber/projects/flashcard/.venv/bin/ruff check .`
+Exit code: 0
+Output: `All checks passed!`
+
+#### G. Python Mypy Strict Typecheck
+Command: `/home/saber/projects/flashcard/.venv/bin/mypy --strict .`
+Exit code: 0
+Output: `Success: no issues found in 31 source files`
+
+#### H. AGENTS Rule Validator
+Command: `/home/saber/projects/flashcard/.venv/bin/python tools/check_agents.py`
+Exit code: 0
+Output: `AGENTS checks passed: R1 (runtime LLM), R3 (resolver cache key), R6 (review log append-only), R7 (lecture coupling), R12 (browser origin/host guards), R13 (durable semantic identity)`
+
+#### I. Pytest Full Test Suite
+Command: `/home/saber/projects/flashcard/.venv/bin/pytest -q`
+Exit code: 0
+Output: `684 passed, 82 warnings in 257.32s`
+
+#### J. Git Diff Check
+Command: `git diff --check`
+Exit code: 0 (clean, no trailing whitespace or merge conflict markers)
