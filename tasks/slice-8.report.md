@@ -129,3 +129,49 @@ Exit code: 0 (clean, no trailing whitespace or merge conflict markers)
   Validation of `asset_token`, semantic references, sense ownership, and the database transaction execute inside a single `with runtime.reading():` block preventing generation retirement or mid-flight dictionary swaps. Verified via `test_cards_stale_asset_token_rejection` in `tests/test_capture.py`.
 - **Blocker 4 (Stable-ref materialization and example preservation)**:
   `highlight_endpoint` and `cards_endpoint` use stable semantic refs (`lemma_semantic_ref`, `sense_semantic_ref`) and pure deterministic example ranking preserving primary examples.
+
+---
+
+## S8B-1a Evidence
+
+### 1. Scope & Toolchain Configuration
+- **Package Manifest & Toolchain (`frontend/package.json`, `frontend/package-lock.json`)**:
+  - Locked Lit (`lit`), TypeScript (`typescript`, `@types/node`), Vite (`vite`), and Playwright (`@playwright/test`).
+  - Scripts: `dev` (`vite`), `build` (`tsc && vite build`), `preview` (`vite preview`), `typecheck` (`tsc --noEmit`), `test:e2e` (`playwright test`).
+- **Strict TypeScript Settings (`frontend/tsconfig.json`)**:
+  - `target: ES2022`, `useDefineForClassFields: false`, `module: ESNext`, `moduleResolution: bundler`, `experimentalDecorators: true`.
+  - Strict type checking enabled (`strict: true`, `noUnusedLocals: true`, `noUnusedParameters: true`, `noFallthroughCasesInSwitch: true`, `noUncheckedIndexedAccess: true`, `skipLibCheck: true`).
+- **Vite Clean Output & Proxy (`frontend/vite.config.ts`)**:
+  - Build output configured to `../app/frontend` with `emptyOutDir: true`.
+  - Development server `/vocab` proxy target configured to `http://127.0.0.1:8000`.
+- **Playwright Test Configuration (`frontend/playwright.config.ts`)**:
+  - Test directory configured to `./tests/e2e`.
+  - Base URL defaulting to `http://127.0.0.1:8000`.
+- **Generated Output and Dependency Ignores (`.gitignore`)**:
+  - Added rules for `node_modules/`, `app/frontend/`, `frontend/test-results/`, `frontend/playwright-report/`, `frontend/.playwright/`.
+- **Sub-slice Invariants Enforced**:
+  - No root app, CSS tokens, typed `/vocab` client, workflows, tests, or generated output created in this sub-slice.
+  - No backend, runtime LLM, fa/Persian, lecture, React-family framework, ts-fsrs, IndexedDB, scheduler/FSRS, donor/schema/ADR, or unrelated paths modified.
+
+### 2. Verification Commands Output
+
+#### A. Frontend Typecheck
+Command: `npm run --prefix frontend typecheck`
+Exit code: 0
+Output:
+```
+> flashcard-frontend@0.1.0 typecheck
+> tsc --noEmit
+```
+
+#### B. Git Diff Check
+Command: `git diff --check`
+Exit code: 0 (clean, no trailing whitespace or merge conflict markers)
+
+#### C. Python Reference Smoke Test
+Command: `/home/saber/projects/flashcard/.venv/bin/python reference/smoke_test.py`
+Exit code: 0 (OK)
+
+#### D. Pytest Test Suites
+Command: `/home/saber/projects/flashcard/.venv/bin/pytest -q tests/test_capture.py tests/test_examples.py tests/test_smoke_baseline.py`
+Exit code: 0 (17 passed)
