@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from app import deck
 from app.api import create_app
-from tools.build_dict import compute_lemma_semantic_ref
+from tools.build_dict import compute_lemma_semantic_ref, compute_sense_semantic_ref
 
 AUTH_HEADERS = {
     "Host": "127.0.0.1:8000",
@@ -27,6 +27,19 @@ def test_setup(
     create_test_db: Callable[..., Path],
 ) -> tuple[Path, Path]:
     dict_path = create_test_db(populate=True)
+    conn_dict = sqlite3.connect(dict_path)
+    try:
+        senses = conn_dict.execute(
+            "SELECT s.id, l.semantic_ref, s.source_namespace, s.source_ref "
+            "FROM sense s JOIN lemma l ON s.lemma_id = l.id"
+        ).fetchall()
+        for sid, lref, ns, sref in senses:
+            sem_ref = compute_sense_semantic_ref(lref, ns, sref)
+            conn_dict.execute("UPDATE sense SET semantic_ref = ? WHERE id = ?", (sem_ref, sid))
+        conn_dict.commit()
+    finally:
+        conn_dict.close()
+
     user_db_path = tmp_path / "user.sqlite"
     conn = sqlite3.connect(user_db_path)
     schema_path = Path(__file__).resolve().parent.parent / "reference" / "schema.sql"
