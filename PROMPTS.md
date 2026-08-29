@@ -24,6 +24,21 @@ decision point. If a background handle requires later retrieval of the final res
 perform only the minimum technically necessary retrieval calls. Preserve final
 stdout/stderr for evidence. Silence while healthy and running is the default.
 
+**Staged validation rule (normative, WORKFLOW.md §16).** Every implementation,
+repair, and review-repair prompt inherits this rule: implement/repair → focused
+checks → final candidate → full gate. During iteration use the smallest
+meaningful validation first — tests for the changed module/subsystem (e.g.
+`pytest -q tests/test_feature.py [-k relevant_behavior]`), nearby regression
+tests, targeted lint/type checks — and do not repeatedly run the full
+repository gate after every small edit. Run the full authoritative validation
+(`make gate` plus any slice-specific required validation) once, when the
+candidate is believed final. Focused checks never substitute for full
+validation at acceptance: no final acceptance/merge/release without successful
+full validation of the exact final candidate, and any code change after the
+last successful full validation invalidates that result, requiring one fresh
+full validation. This is an efficiency rule — it changes when full validation
+runs, never whether the final candidate is fully validated.
+
 ---
 
 ## Orchestrator — NEW SLICE OPEN (canonical; printed by the previous slice's closure)
@@ -183,6 +198,7 @@ Terminal procedure (run exactly; nonzero exit on any check = STOP and report):
   <gate command>                  # STOP on nonzero exit; record numbers
 
 Obey WORKFLOW.md §15: launch long-running commands (gate, builds, tests) once using the longest practical blocking timeout; do not poll, narrate, or check status while healthy and running. Resume reasoning only on completion, failure, genuine timeout, or a decision point. Preserve final stdout/stderr.
+Obey WORKFLOW.md §16: during implementation/repair use focused validation (tests for the changed module/subsystem, nearby regression tests, targeted lint/type checks); run the full gate once, when the candidate is believed final — not after every edit. Any code change after the last successful full validation invalidates it; run one fresh full validation before reporting final evidence.
 
 The Allowlist block is exhaustive — anything changed outside it is a scope
 violation. Stop and report on any Stop-and-ask condition rather than resolving
@@ -563,6 +579,12 @@ Forbidden actions:
 --------------------------------------------------
 4. VERIFICATION AND GATE
 --------------------------------------------------
+Staged validation applies (WORKFLOW.md §16): use focused checks (module tests,
+nearby regression tests, targeted lint/type checks) during iteration/repair;
+run the full authoritative validation below once, when the candidate is
+believed final. Any code change after the last successful full validation
+invalidates it — run one fresh full validation before reporting final evidence.
+
 Run the required verification:
   <REQUIRED_GATE>
 

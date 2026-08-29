@@ -334,6 +334,10 @@ belong to the owning implementation slice, `docs/backlog.md`, or no action.
   validated fallback ZIP when offline) (§11).
 - Do not let the closure worker resolve anything — STOP-and-report only (§11).
 - Do not proactively monitor, narrate progress, or repeatedly poll healthy long-running commands unless explicitly instructed by the owner/orchestrator (§15).
+- Do not rerun the full repository gate after every small edit during
+  implementation or repair — validate in stages (§16): focused checks during
+  iteration, one full validation when the candidate is believed final, and a
+  fresh full validation whenever the candidate changes after the last success.
 
 ---
 
@@ -754,3 +758,80 @@ consume conversation context without producing new task evidence.
 Therefore:
 
 > **SILENCE WHILE HEALTHY AND RUNNING IS THE DEFAULT.**
+
+---
+
+## 16. Staged validation — focused iteration, full verification at the end
+
+Normative for all implementation, repair, and review-repair work in this
+repository. This is an **efficiency rule, not a safety reduction**: it changes
+*when* full validation runs, never *whether* the final candidate is fully
+validated.
+
+### 16.1 During iteration — focused validation first
+
+While implementing or repairing, workers MUST NOT repeatedly run the full
+repository gate after every small edit. Use the smallest meaningful validation
+first:
+
+- tests covering the directly changed module/subsystem, e.g.
+  `pytest -q tests/test_feature.py`, optionally narrowed with
+  `pytest -q tests/test_feature.py -k relevant_behavior`;
+- nearby regression tests covering directly affected behavior;
+- targeted lint/type checks where possible (e.g. `ruff check <paths>`,
+  `mypy <paths>`).
+
+A full-gate rerun during iteration is permitted only when the change is
+unusually broad or focused tests cannot provide meaningful confidence.
+
+### 16.2 Candidate believed final — one full validation
+
+Run the repository's complete authoritative validation exactly once for the
+final candidate: `make gate`, plus any slice-specific required validation
+(frontend/build/E2E, APKG, Playwright, etc.) mandated by the slice brief.
+Slice-specific validation is additive; focused checks never replace it, and
+focused checks alone never certify a candidate for acceptance.
+
+### 16.3 Failure and repair loop
+
+If full validation fails:
+
+1. inspect the failure;
+2. repair it;
+3. confirm the repair with focused validation;
+4. rerun full validation only once the resulting candidate is believed final
+   again.
+
+The same loop applies to independent review and review-repair cycles:
+
+    review finding → repair → focused verification → candidate ready
+    → one full validation → re-review / acceptance as required
+
+### 16.4 Invalidation invariant (mandatory)
+
+> **NO FINAL ACCEPTANCE / MERGE / RELEASE WITHOUT SUCCESSFUL FULL VALIDATION
+> OF THE EXACT FINAL CANDIDATE.**
+
+Any code change after the most recent successful full validation invalidates
+that result: it no longer certifies the candidate. An earlier passing gate
+result can never substitute for a fresh full validation of the final state.
+
+The intended iteration loop:
+
+    implement → focused tests → repair → focused tests
+    → candidate final → full validation → submit/accept
+
+Not:
+
+    edit → full suite → edit → full suite → edit → full suite
+
+### 16.5 Non-negotiables
+
+This rule does not remove `make gate`, does not make focused tests sufficient
+for final acceptance, does not permit merge on targeted tests alone, does not
+allow an earlier gate result to survive later code changes, and does not weaken
+independent review, risk review (§6), escalation or cold-review limits (§5,
+§7), slice-specific validation requirements, or any fail-closed condition
+(§11, §14.6). Long-command execution (§15) applies unchanged: full gates are
+launched once with the longest practical blocking timeout, without polling or
+narration while healthy.

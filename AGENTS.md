@@ -270,6 +270,21 @@ backlog work.
   authority, or forcing governance orchestration to migrate away from the primary
   ChatGPT chat when direct tool bridges are unavailable (WORKFLOW §14).
 
+- **G12 — Staged validation: focused iteration, full validation at the end.**
+  `[reviewed]` During implementation or repair, use the smallest meaningful
+  validation first — tests for the changed module/subsystem, nearby regression
+  tests, targeted lint/type checks — and do not repeatedly run the full
+  `make gate` after every small edit. Run the full authoritative validation
+  (`make gate` plus any slice-specific required validation) once, when the
+  candidate is believed final. **No acceptance, merge, or release without
+  successful full validation of the exact final candidate**; any code change
+  after the last successful full validation invalidates that result and
+  requires one fresh full validation. Focused checks never substitute for full
+  validation at acceptance (details: WORKFLOW §16).
+  *Defect prevented:* workers burning tokens and wall-clock time rerunning the
+  entire gate per edit — and, in the other direction, a candidate being
+  accepted on focused-only or stale validation evidence.
+
 ## Conventions
 
 - **C1 — App factory, no module-level state.** The service is constructed by
