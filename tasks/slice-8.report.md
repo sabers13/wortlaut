@@ -489,3 +489,28 @@ Output: `684 passed, 82 warnings in 257.32s`
 #### J. Git Diff Check
 Command: `git diff --check`
 Exit code: 0 (clean, no trailing whitespace or merge conflict markers)
+
+## S8C-1a Evidence — navigation and deck shell
+
+Implemented the frontend-only deck navigation shell with the existing typed `/vocab` client: server-authoritative list, create, open, refresh, and explicit delete confirmation. Loading, empty, error/retry, and success states remain distinct; no browser persistence or scheduling was added.
+
+### Repair evidence
+
+The refresh outcome is now explicit: a failed `GET /vocab/decks` returns failure to create/delete flows, clears any success notice, and produces an error rather than a false success. Creation opens a deck only after the refreshed server list contains its returned ID; deletion likewise requires a refreshed list that no longer contains the deleted ID. The historical S8B full-gate output above is not evidence for this repair.
+
+Verification for this repair: `npm run typecheck`, `npm test`, and `npm run build` passed in `frontend/`. `make gate` reached mypy after ruff passed, then stopped on the pre-existing unavailable `fsrs`/`spacy` imports (7 missing-import errors in six non-frontend files), so it did not reach pytest. `git diff --check` passed.
+
+## S8C-1b Evidence — manual vocabulary and CSV workflows
+
+Extended only `frontend/src/app.ts` with browser-ephemeral Lit form state. The manual flow calls typed `GET /vocab/lookup`, requires a selected candidate and (for resolved entries) a selected dictionary sense, offers explicit DE/EN display-language checkboxes plus optional supported DE/EN user meanings, and sends typed `POST /vocab/notes` with the selected deck. It only reports a save after the server response and a fresh deck-list confirmation of the returned deck ID; lookup, validation, conflict/error, and save-loading states are visible.
+
+CSV import accepts pasted line text or a browser-local CSV/text file, a deck name (with current deck names suggested), and calls typed `POST /vocab/import/csv`. It reports returned created/reused counts only after a fresh deck-list confirmation of the returned deck. The existing typed Anki TSV export is a real download action with loading/error state. TSV import and APKG import/export are visible but disabled and explicitly marked pending because no accepted typed endpoint exists; no endpoint was invented.
+
+Verification (this attempt):
+
+- `npm run typecheck` — passed.
+- `npm test` — passed (1 test file, 1 pass).
+- `ESBUILD_BINARY_PATH=/tmp/flashcard-esbuild/esbuild npm run build` — passed (the workspace mount prevented the package-managed esbuild executable from running, so the locked binary was copied to `/tmp` solely for this build invocation).
+- Exact configured gate, `make gate` — ruff passed; mypy stopped with the pre-existing seven missing-import errors for `fsrs`/`spacy` in non-frontend files, so pytest/check-agents did not run.
+- `git diff --check` — passed.
+- Commit attempt — blocked by the execution sandbox: Git could not create the linked-worktree index lock at `/home/saber/projects/flashcard/.git/worktrees/a1102/index.lock` because that common Git directory is read-only here. No ref was changed and the two allowed files remain unstaged for the owner to commit in a writable checkout.
