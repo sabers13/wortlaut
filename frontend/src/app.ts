@@ -2,11 +2,23 @@ import { LitElement, css, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { createVocabClient } from './api/client.ts';
 import { ApiError } from './api/errors.ts';
-import type { Candidate, CandidateSense, CaptureContext, DeckSummary, MeaningLanguage } from './api/types.ts';
+import type { Candidate, CandidateSense, CaptureContext, DeckSummary, MeaningLanguage, NextCardData, RenderedMeaning } from './api/types.ts';
 
 type DeckListStatus = 'loading' | 'ready' | 'error';
 type LookupStatus = 'idle' | 'loading' | 'ready' | 'error';
 type CaptureStatus = 'idle' | 'loading' | 'ready' | 'error';
+type AppView = 'decks' | 'deck' | 'study';
+type StudyStatus = 'idle' | 'loading' | 'ready' | 'empty' | 'error';
+type AudioStatus = 'idle' | 'loading' | 'playing' | 'unavailable';
+type RecordingStatus = 'idle' | 'recording' | 'ready' | 'saving' | 'save-error';
+
+const confidenceLabels = [
+  ['1', 'Not at all'],
+  ['2', 'Barely'],
+  ['3', 'With effort'],
+  ['4', 'Comfortably'],
+  ['5', 'Without doubt'],
+] as const;
 
 interface CaptureCandidateSelection {
   candidate: Candidate;
@@ -88,7 +100,64 @@ export class FlashcardApp extends LitElement {
     .chip.selected { color: white; border-color: var(--accent); background: var(--accent); }
     .create-actions { flex-wrap: wrap; }
     .disabled-explanation { margin: 0; color: var(--muted); font-size: .875rem; }
-    @media (max-width: 800px) { .shell { padding: var(--space-24) var(--space-16); } header, .form-row, .deck-heading { align-items: stretch; flex-direction: column; } .deck { grid-template-columns: 1fr; } .workflow-grid { grid-template-columns: 1fr; } }
+    .primary-nav, .bottom-nav { display: flex; gap: var(--space-8); }
+    .primary-nav button[aria-current="page"], .bottom-nav button[aria-current="page"] { color: white; border-color: var(--accent); background: var(--accent); }
+    .study { max-width: 760px; margin: 0 auto; }
+    .study-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-16); margin-bottom: var(--space-16); }
+    .study-heading h2 { margin: 0; }
+    .card-stage { min-height: 25rem; display: grid; align-content: center; gap: var(--space-24); padding: clamp(var(--space-24), 7vw, var(--space-72)); border: 1px solid var(--border); border-radius: var(--radius-dialog); background: var(--surface); box-shadow: var(--shadow-sm); }
+    .card-stage:focus { outline: none; }
+    .card-stage:focus-visible { outline: 3px solid color-mix(in oklch, var(--accent), white 65%); outline-offset: 3px; }
+    .card-side { display: grid; gap: var(--space-16); }
+    .front-label, .meaning-label { color: var(--muted); font-family: var(--font-mono); font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; }
+    .study-lemma { margin: 0; font-family: var(--font-display); font-size: clamp(3rem, 10vw, 6rem); font-weight: 600; line-height: .98; letter-spacing: -.045em; overflow-wrap: anywhere; }
+    .study-meta { margin: 0; color: var(--muted); font-family: var(--font-mono); font-size: .82rem; }
+    .reveal-action { justify-self: start; }
+    .answer-rule { border: 0; border-top: 1px solid var(--border); width: 100%; margin: var(--space-8) 0; }
+    .meaning { margin: 0; font-size: 1.25rem; }
+    .example { margin: 0; padding-left: var(--space-16); border-left: 3px solid var(--accent); font-size: 1.05rem; }
+    .example-translation { display: block; margin-top: var(--space-4); color: var(--muted); font-size: .9rem; }
+    .details { border-top: 1px solid var(--border); padding-top: var(--space-16); }
+    .details summary { cursor: pointer; font-weight: 650; }
+    .detail-block { margin-top: var(--space-16); }
+    .detail-block p, .detail-block ul { margin-bottom: 0; }
+    .detail-block ul { padding-left: var(--space-24); }
+    .confidence-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: var(--space-8); }
+    .confidence { min-height: 5rem; display: grid; align-content: center; justify-items: start; gap: var(--space-4); border-top: 4px solid var(--border); text-align: left; }
+    .confidence:nth-child(1) { border-top-color: var(--danger); }
+    .confidence:nth-child(2) { border-top-color: var(--warning); }
+    .confidence:nth-child(3) { border-top-color: oklch(65% .1 95); }
+    .confidence:nth-child(4) { border-top-color: oklch(62% .12 155); }
+    .confidence:nth-child(5) { border-top-color: var(--accent); }
+    .confidence-number { font-family: var(--font-mono); font-size: 1.1rem; }
+    .confidence-text { font-size: .75rem; line-height: 1.15; }
+    .study-state { min-height: 25rem; display: grid; place-content: center; text-align: center; }
+    .study-state h2 { margin-bottom: var(--space-8); }
+    .inline-status { margin: 0; color: var(--muted); }
+    .inline-status.error { color: var(--danger); }
+    .edit-meanings, .pronunciation { padding: var(--space-16); border: 1px solid var(--border); border-radius: var(--radius-panel); background: color-mix(in oklch, var(--bg), white 45%); }
+    .edit-meanings h3, .pronunciation h3 { margin-bottom: var(--space-8); font-size: 1.25rem; }
+    .gloss-row { display: grid; grid-template-columns: 1fr auto auto; gap: var(--space-8); align-items: end; margin-top: var(--space-12); }
+    .audio-actions, .recording-actions { display: flex; flex-wrap: wrap; gap: var(--space-8); }
+    .audio-preview { width: 100%; margin-top: var(--space-12); }
+    .local-take { margin-top: var(--space-12); padding: var(--space-12); border: 1px dashed var(--accent); border-radius: var(--radius-control); }
+    .bottom-nav { display: none; }
+    @media (max-width: 800px) {
+      .shell { padding: var(--space-24) var(--space-16) calc(var(--space-72) + var(--space-24)); }
+      header, .form-row, .deck-heading { align-items: stretch; flex-direction: column; }
+      header { align-items: flex-start; }
+      header > .primary-nav { display: none; }
+      .deck { grid-template-columns: 1fr; }
+      .workflow-grid { grid-template-columns: 1fr; }
+      .card-stage { min-height: 20rem; padding: var(--space-24); }
+      .confidence-grid { grid-template-columns: 1fr; }
+      .confidence { min-height: 3.6rem; grid-template-columns: 2rem 1fr; align-items: center; justify-items: start; }
+      .confidence-text { font-size: .9rem; }
+      .gloss-row { grid-template-columns: 1fr auto; }
+      .gloss-row label { grid-column: 1 / -1; }
+      .bottom-nav { position: fixed; z-index: 10; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 0; padding: var(--space-8) var(--space-16) calc(var(--space-8) + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: color-mix(in oklch, var(--surface), white 12%); box-shadow: 0 -8px 24px oklch(20% .02 240 / 6%); }
+      .bottom-nav button { min-height: 3rem; border: 0; background: transparent; }
+    }
   `;
 
   @state() private decks: DeckSummary[] = [];
@@ -133,10 +202,54 @@ export class FlashcardApp extends LitElement {
   @state() private captureError = '';
   @state() private captureDictionaryChanged = false;
   @state() private isCapturing = false;
+  @state() private view: AppView = 'decks';
+  @state() private studyDeckId: number | null = null;
+  @state() private studyStatus: StudyStatus = 'idle';
+  @state() private studyCard: NextCardData | null = null;
+  @state() private isRevealed = false;
+  @state() private isReviewing = false;
+  @state() private studyError = '';
+  @state() private moreDetails = false;
+  @state() private glossDrafts: Record<MeaningLanguage, string> = { de: '', en: '' };
+  @state() private glossState = '';
+  @state() private glossError = '';
+  @state() private glossSavingLanguage: MeaningLanguage | null = null;
+  @state() private audioStatus: AudioStatus = 'idle';
+  @state() private audioMessage = '';
+  @state() private recordingStatus: RecordingStatus = 'idle';
+  @state() private recordingBlob: Blob | null = null;
+  @state() private recordingNoteId: number | null = null;
+  @state() private recordingPreviewUrl = '';
+  @state() private recordingError = '';
+  @state() private showRecordingControls = false;
+  @state() private revertConfirmation = false;
+  @state() private hasCustomAudio = false;
+  private focusTarget: 'answer' | 'empty' | null = null;
+  private audioPlayer: HTMLAudioElement | null = null;
+  private mediaRecorder: MediaRecorder | null = null;
+  private recordingChunks: Blob[] = [];
 
   connectedCallback(): void {
     super.connectedCallback();
     void this.loadDecks();
+    window.addEventListener('keydown', this.handleStudyKeydown);
+  }
+
+  disconnectedCallback(): void {
+    window.removeEventListener('keydown', this.handleStudyKeydown);
+    this.stopAudio();
+    this.releaseRecordingPreview();
+    super.disconnectedCallback();
+  }
+
+  updated(): void {
+    if (!this.focusTarget) return;
+    const selector = this.focusTarget === 'answer' ? '[data-study-answer]' : '[data-study-empty]';
+    const target = this.renderRoot.querySelector<HTMLElement>(selector);
+    if (target) {
+      target.focus();
+      this.focusTarget = null;
+    }
   }
 
   /**
@@ -240,6 +353,289 @@ export class FlashcardApp extends LitElement {
     if (error instanceof ApiError && error.detail) return error.detail;
     if (error instanceof Error && error.message) return error.message;
     return fallback;
+  }
+
+  private openDeck(deck: DeckSummary): void {
+    this.selectedDeckId = deck.id;
+    this.manualDeckId = deck.id;
+    this.captureDeckId = deck.id;
+    this.importDeckName = deck.name;
+    this.view = 'deck';
+    this.successMessage = '';
+  }
+
+  private async openStudy(deckId?: number): Promise<void> {
+    if (this.recordingBlob || this.recordingStatus === 'recording') {
+      this.view = 'study';
+      this.errorMessage = 'Save or discard the local recording before changing study sessions.';
+      return;
+    }
+    this.view = 'study';
+    this.studyDeckId = deckId ?? null;
+    this.studyCard = null;
+    this.isRevealed = false;
+    this.moreDetails = false;
+    this.studyError = '';
+    this.clearPronunciationState();
+    await this.loadStudyCard();
+  }
+
+  private clearPronunciationState(): void {
+    this.stopAudio();
+    this.audioMessage = '';
+    this.audioStatus = 'idle';
+    this.showRecordingControls = false;
+    this.revertConfirmation = false;
+  }
+
+  private async loadStudyCard(): Promise<void> {
+    this.studyStatus = 'loading';
+    this.studyError = '';
+    try {
+      const response = await vocabClient.getNextCard(this.studyDeckId ?? undefined);
+      this.studyCard = response.card;
+      this.isRevealed = false;
+      this.moreDetails = false;
+      this.hasCustomAudio = Boolean(response.card?.front.audio_trigger.token?.startsWith('custom:'));
+      this.glossDrafts = { de: this.userGlossValue(response.card, 'de'), en: this.userGlossValue(response.card, 'en') };
+      this.glossState = '';
+      this.glossError = '';
+      this.studyStatus = response.card ? 'ready' : 'empty';
+      if (!response.card) this.focusTarget = 'empty';
+    } catch (error) {
+      this.studyCard = null;
+      this.studyStatus = 'error';
+      this.studyError = this.messageFor(error, 'The next card could not be loaded.');
+    }
+  }
+
+  private revealCard(): void {
+    if (!this.studyCard || this.isRevealed || this.isReviewing) return;
+    this.isRevealed = true;
+    this.moreDetails = false;
+    this.focusTarget = 'answer';
+  }
+
+  private async submitConfidence(confidence: number): Promise<void> {
+    const card = this.studyCard;
+    if (!card || !this.isRevealed || this.isReviewing) return;
+    if (this.recordingBlob) {
+      this.studyError = 'Save or discard the local recording before continuing to the next card.';
+      return;
+    }
+    this.isReviewing = true;
+    this.studyError = '';
+    try {
+      await vocabClient.reviewCard(card.card_id, confidence);
+      await this.loadStudyCard();
+    } catch (error) {
+      this.studyError = this.messageFor(error, 'Your confidence could not be saved. Try the same rating again.');
+    } finally {
+      this.isReviewing = false;
+    }
+  }
+
+  private readonly handleStudyKeydown = (event: KeyboardEvent): void => {
+    if (this.view !== 'study') return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+    if (event.code === 'Space' && !this.isRevealed) {
+      event.preventDefault();
+      this.revealCard();
+      return;
+    }
+    if (event.key >= '1' && event.key <= '5' && this.isRevealed) {
+      event.preventDefault();
+      void this.submitConfidence(Number(event.key));
+      return;
+    }
+    if (event.key.toLowerCase() === 'r') {
+      event.preventDefault();
+      void this.playPronunciation();
+    }
+  };
+
+  private meaningFor(card: NextCardData | null, language: MeaningLanguage): RenderedMeaning | undefined {
+    return card?.back.meanings.find((meaning) => meaning.language === language);
+  }
+
+  private userGlossValue(card: NextCardData | null, language: MeaningLanguage): string {
+    const meaning = this.meaningFor(card, language);
+    return meaning?.is_user_authored ? meaning.lines.join(' ') : '';
+  }
+
+  private async saveGloss(language: MeaningLanguage): Promise<void> {
+    const card = this.studyCard;
+    const meaningText = this.glossDrafts[language].trim();
+    if (!card || !meaningText) return;
+    this.glossSavingLanguage = language;
+    this.glossError = '';
+    this.glossState = '';
+    try {
+      const result = await vocabClient.setGloss(card.note_id, language, meaningText);
+      this.glossDrafts = { ...this.glossDrafts, [language]: result.meaning_text };
+      this.glossState = `${language === 'de' ? 'German' : 'English'} meaning saved.`;
+      await this.refreshStudyFace(card.card_id);
+    } catch (error) {
+      this.glossError = this.messageFor(error, 'That meaning could not be saved.');
+    } finally {
+      this.glossSavingLanguage = null;
+    }
+  }
+
+  private async deleteGloss(language: MeaningLanguage): Promise<void> {
+    const card = this.studyCard;
+    if (!card) return;
+    this.glossSavingLanguage = language;
+    this.glossError = '';
+    this.glossState = '';
+    try {
+      const result = await vocabClient.deleteGloss(card.note_id, language);
+      if (!result.deleted) throw new Error('The server did not confirm removal.');
+      this.glossDrafts = { ...this.glossDrafts, [language]: '' };
+      this.glossState = `${language === 'de' ? 'German' : 'English'} meaning removed.`;
+      await this.refreshStudyFace(card.card_id);
+    } catch (error) {
+      this.glossError = this.messageFor(error, 'That meaning could not be removed.');
+    } finally {
+      this.glossSavingLanguage = null;
+    }
+  }
+
+  private async refreshStudyFace(cardId: number): Promise<void> {
+    try {
+      const response = await vocabClient.getNextCard(this.studyDeckId ?? undefined);
+      if (response.card?.card_id === cardId) {
+        this.studyCard = response.card;
+        this.hasCustomAudio = Boolean(response.card.front.audio_trigger.token?.startsWith('custom:'));
+      }
+    } catch {
+      // The mutation result is already server-confirmed; leave the visible face usable.
+    }
+  }
+
+  private audioRequestId(card: NextCardData): string | number {
+    return this.hasCustomAudio ? card.note_id : card.front.audio_trigger.lemma;
+  }
+
+  private stopAudio(): void {
+    if (this.audioPlayer) {
+      this.audioPlayer.pause();
+      this.audioPlayer.src = '';
+      this.audioPlayer = null;
+    }
+    if (this.audioStatus === 'playing') this.audioStatus = 'idle';
+  }
+
+  private async playPronunciation(): Promise<void> {
+    const card = this.studyCard;
+    if (!card || !card.front.audio_trigger.available || this.audioStatus === 'loading') return;
+    this.stopAudio();
+    this.audioStatus = 'loading';
+    this.audioMessage = 'Loading pronunciation…';
+    try {
+      const blob = await vocabClient.fetchAudio(this.audioRequestId(card));
+      const url = URL.createObjectURL(blob);
+      const player = new Audio(url);
+      this.audioPlayer = player;
+      player.onended = () => { URL.revokeObjectURL(url); this.audioPlayer = null; this.audioStatus = 'idle'; this.audioMessage = ''; };
+      await player.play();
+      this.audioStatus = 'playing';
+      this.audioMessage = 'Playing pronunciation…';
+    } catch (error) {
+      this.audioStatus = 'unavailable';
+      this.audioMessage = this.messageFor(error, 'Pronunciation is unavailable right now.');
+    }
+  }
+
+  private releaseRecordingPreview(): void {
+    if (this.recordingPreviewUrl) URL.revokeObjectURL(this.recordingPreviewUrl);
+    this.recordingPreviewUrl = '';
+  }
+
+  private setLocalRecording(blob: Blob): void {
+    this.releaseRecordingPreview();
+    this.recordingBlob = blob;
+    this.recordingNoteId = this.studyCard?.note_id ?? null;
+    this.recordingPreviewUrl = URL.createObjectURL(blob);
+    this.recordingStatus = 'ready';
+    this.recordingError = '';
+  }
+
+  private async startRecording(): Promise<void> {
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      this.recordingError = 'Recording is not available in this browser. You can choose an audio file instead.';
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      this.recordingChunks = [];
+      recorder.ondataavailable = (event) => { if (event.data.size) this.recordingChunks.push(event.data); };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((track) => track.stop());
+        this.setLocalRecording(new Blob(this.recordingChunks, { type: recorder.mimeType || 'audio/webm' }));
+      };
+      recorder.start();
+      this.mediaRecorder = recorder;
+      this.recordingStatus = 'recording';
+      this.recordingError = '';
+    } catch (error) {
+      this.recordingError = this.messageFor(error, 'Microphone access was not granted. You can choose an audio file instead.');
+    }
+  }
+
+  private stopRecording(): void {
+    if (this.mediaRecorder?.state === 'recording') this.mediaRecorder.stop();
+    this.mediaRecorder = null;
+  }
+
+  private selectAudioFile(event: Event): void {
+    const file = (event.target as HTMLInputElement).files?.[0];
+    if (file) this.setLocalRecording(file);
+  }
+
+  private discardRecording(): void {
+    this.releaseRecordingPreview();
+    this.recordingBlob = null;
+    this.recordingNoteId = null;
+    this.recordingStatus = 'idle';
+    this.recordingError = '';
+  }
+
+  private async saveRecording(): Promise<void> {
+    const card = this.studyCard;
+    const recording = this.recordingBlob;
+    if (!card || !recording || this.recordingNoteId !== card.note_id) return;
+    this.recordingStatus = 'saving';
+    this.recordingError = '';
+    try {
+      await vocabClient.uploadAudio(card.note_id, recording, recording.type || 'audio/webm');
+      this.discardRecording();
+      this.showRecordingControls = false;
+      this.hasCustomAudio = true;
+      this.audioMessage = 'Custom pronunciation saved.';
+      await this.refreshStudyFace(card.card_id);
+    } catch (error) {
+      this.recordingStatus = 'save-error';
+      this.recordingError = this.messageFor(error, 'The recording was not saved. Your local take is still available.');
+    }
+  }
+
+  private async revertCustomAudio(): Promise<void> {
+    const card = this.studyCard;
+    if (!card) return;
+    this.audioMessage = '';
+    try {
+      const result = await vocabClient.revertAudio(card.note_id);
+      if (!result.reverted) throw new Error('The server did not confirm the change.');
+      this.hasCustomAudio = false;
+      this.revertConfirmation = false;
+      this.audioMessage = 'Automatic pronunciation restored.';
+      await this.refreshStudyFace(card.card_id);
+    } catch (error) {
+      this.audioMessage = this.messageFor(error, 'Automatic pronunciation could not be restored.');
+    }
   }
 
   private selectedDeck(): DeckSummary | undefined {
@@ -647,7 +1043,7 @@ export class FlashcardApp extends LitElement {
       <ul class="deck-list" aria-label="Your decks">
         ${this.decks.map((deck) => html`
           <li class="deck">
-            <button class="deck-open" @click=${() => { this.selectedDeckId = deck.id; this.manualDeckId = deck.id; this.captureDeckId = deck.id; this.importDeckName = deck.name; this.successMessage = ''; }} aria-label=${`Open ${deck.name}`}>
+            <button class="deck-open" @click=${() => this.openDeck(deck)} aria-label=${`Open ${deck.name}`}>
               <span class="deck-name">${deck.name}</span>
               <span class="deck-stats">${deck.card_count} ${deck.card_count === 1 ? 'card' : 'cards'} · ${deck.due_count} due · ${deck.mastery_percent}% mastered</span>
             </button>
@@ -927,6 +1323,163 @@ export class FlashcardApp extends LitElement {
     `;
   }
 
+  private renderPronunciation() {
+    const recordingFailed = this.recordingStatus === 'save-error';
+    return html`
+      <section class="pronunciation" aria-labelledby="pronunciation-title">
+        <h3 id="pronunciation-title">Pronunciation</h3>
+        <div class="audio-actions">
+          <button type="button" @click=${() => void this.playPronunciation()} ?disabled=${this.audioStatus === 'loading'}>
+            ${this.audioStatus === 'loading' ? 'Loading pronunciation…' : this.audioStatus === 'playing' ? 'Playing pronunciation…' : 'Play pronunciation'}
+          </button>
+          <span class="caption">Press R to replay</span>
+        </div>
+        ${this.audioMessage ? html`<p class="inline-status ${this.audioStatus === 'unavailable' ? 'error' : ''}" role=${this.audioStatus === 'unavailable' ? 'alert' : 'status'}>${this.audioMessage}</p>` : nothing}
+        ${this.hasCustomAudio ? html`
+          <div class="audio-actions">
+            <button type="button" @click=${() => { this.showRecordingControls = !this.showRecordingControls; this.revertConfirmation = false; }}>
+              ${this.showRecordingControls ? 'Keep current pronunciation' : 'Replace pronunciation'}
+            </button>
+            ${this.revertConfirmation ? html`
+              <span class="caption">Replace your custom pronunciation with automatic pronunciation?</span>
+              <button class="danger" type="button" @click=${() => void this.revertCustomAudio()}>Confirm revert to automatic</button>
+              <button type="button" @click=${() => { this.revertConfirmation = false; }}>Cancel</button>
+            ` : html`<button class="danger" type="button" @click=${() => { this.revertConfirmation = true; this.showRecordingControls = false; }}>Revert to automatic</button>`}
+          </div>
+        ` : html`<button type="button" @click=${() => { this.showRecordingControls = !this.showRecordingControls; }}>Add your pronunciation</button>`}
+        ${this.showRecordingControls ? html`
+          <div class="local-take">
+            <p class="muted">Record a take or choose an audio file. It stays only in this browser until you save it.</p>
+            ${this.recordingBlob ? html`
+              <p class="inline-status">Local recording ready to preview and save.</p>
+              <audio class="audio-preview" controls src=${this.recordingPreviewUrl}></audio>
+            ` : nothing}
+            ${recordingFailed ? html`
+              <p class="inline-status error" role="alert">${this.recordingError}</p>
+              <div class="recording-actions">
+                <button class="primary" type="button" @click=${() => void this.saveRecording()}>Try again</button>
+                <button class="danger" type="button" @click=${this.discardRecording}>Discard recording</button>
+              </div>
+            ` : html`
+              <div class="recording-actions">
+                ${this.recordingStatus === 'recording'
+                  ? html`<button class="danger" type="button" @click=${this.stopRecording}>Stop recording</button>`
+                  : html`<button type="button" @click=${() => void this.startRecording()} ?disabled=${this.recordingStatus === 'saving'}>Record pronunciation</button>`}
+                <label>Choose audio file
+                  <input type="file" accept="audio/*" @change=${this.selectAudioFile} ?disabled=${this.recordingStatus === 'recording' || this.recordingStatus === 'saving'} />
+                </label>
+                ${this.recordingBlob ? html`
+                  <button class="primary" type="button" @click=${() => void this.saveRecording()} ?disabled=${this.recordingStatus === 'saving'}>${this.recordingStatus === 'saving' ? 'Saving pronunciation…' : 'Save recording'}</button>
+                  <button class="danger" type="button" @click=${this.discardRecording} ?disabled=${this.recordingStatus === 'saving'}>Discard recording</button>
+                ` : nothing}
+              </div>
+              ${this.recordingError ? html`<p class="inline-status error" role="alert">${this.recordingError}</p>` : nothing}
+            `}
+          </div>
+        ` : nothing}
+      </section>
+    `;
+  }
+
+  private renderMeaningEditor(card: NextCardData) {
+    return html`
+      <section class="edit-meanings" aria-labelledby="meaning-edit-title">
+        <h3 id="meaning-edit-title">Your meanings</h3>
+        <p class="muted">Save your wording for either language, or remove an existing personal meaning to return to the card’s available meaning.</p>
+        ${(['de', 'en'] as MeaningLanguage[]).map((language) => {
+          const meaning = this.meaningFor(card, language);
+          const userAuthored = Boolean(meaning?.is_user_authored);
+          const languageName = language === 'de' ? 'German' : 'English';
+          return html`
+            <div class="gloss-row">
+              <label>Your ${languageName} meaning
+                <input
+                  .value=${this.glossDrafts[language]}
+                  @input=${(event: InputEvent) => { this.glossDrafts = { ...this.glossDrafts, [language]: (event.target as HTMLInputElement).value }; }}
+                  ?disabled=${this.glossSavingLanguage === language}
+                  autocomplete="off"
+                />
+              </label>
+              <button type="button" @click=${() => void this.saveGloss(language)} ?disabled=${this.glossSavingLanguage === language || !this.glossDrafts[language].trim()}>
+                ${this.glossSavingLanguage === language ? 'Saving…' : 'Save'}
+              </button>
+              ${userAuthored ? html`<button class="danger" type="button" @click=${() => void this.deleteGloss(language)} ?disabled=${this.glossSavingLanguage === language}>Remove</button>` : nothing}
+            </div>
+          `;
+        })}
+        ${this.glossState ? html`<p class="inline-status" role="status">${this.glossState}</p>` : nothing}
+        ${this.glossError ? html`<p class="inline-status error" role="alert">${this.glossError}</p>` : nothing}
+      </section>
+    `;
+  }
+
+  private renderStudyCard(card: NextCardData) {
+    const deMeaning = this.meaningFor(card, 'de');
+    const enMeaning = this.meaningFor(card, 'en');
+    const primaryExample = card.back.examples[0];
+    const otherExamples = card.back.examples.slice(1);
+    const extraMeaningLines = card.back.meanings.flatMap((meaning) => meaning.lines.slice(1).map((line) => `${meaning.heading}: ${line}`));
+    return html`
+      <div class="card-stage">
+        <div class="card-side">
+          <span class="front-label">German vocabulary</span>
+          <h2 class="study-lemma">${card.front.display_headword}</h2>
+          <p class="study-meta">${card.front.pos}${card.front.ipa ? ` · ${card.front.ipa}` : ''}</p>
+          ${!this.isRevealed ? html`
+            <button class="primary reveal-action" type="button" @click=${this.revealCard}>Reveal answer <span class="caption">Space</span></button>
+          ` : html`
+            <div class="card-side" data-study-answer tabindex="-1">
+              <hr class="answer-rule" />
+              <span class="front-label">Answer</span>
+              <p class="meaning"><span class="meaning-label">German</span><br />${deMeaning?.lines[0] ?? 'No German learner meaning is available.'}</p>
+              ${enMeaning ? html`<p class="meaning"><span class="meaning-label">English</span><br />${enMeaning.lines[0] ?? ''}</p>` : nothing}
+              ${primaryExample ? html`<p class="example">${primaryExample.de}${primaryExample.en ? html`<span class="example-translation">${primaryExample.en}</span>` : nothing}</p>` : nothing}
+              <button type="button" aria-expanded=${this.moreDetails ? 'true' : 'false'} @click=${() => { this.moreDetails = !this.moreDetails; }}>More details</button>
+              ${this.moreDetails ? html`
+                <div class="details">
+                  <div class="detail-block"><span class="meaning-label">Grammar</span><p>${card.back.grammar.lines.join(' · ') || card.back.pos}</p>${card.back.plural ? html`<p>Plural: ${card.back.plural}</p>` : nothing}</div>
+                  ${extraMeaningLines.length ? html`<div class="detail-block"><span class="meaning-label">Extended notes</span><ul>${extraMeaningLines.map((line) => html`<li>${line}</li>`)}</ul></div>` : nothing}
+                  ${otherExamples.length ? html`<div class="detail-block"><span class="meaning-label">Additional examples</span>${otherExamples.map((example) => html`<p class="example">${example.de}${example.en ? html`<span class="example-translation">${example.en}</span>` : nothing}</p>`)}</div>` : nothing}
+                </div>
+              ` : nothing}
+              ${this.renderPronunciation()}
+              ${this.renderMeaningEditor(card)}
+              <div>
+                <p class="front-label">How well did you know it?</p>
+                <div class="confidence-grid">
+                  ${confidenceLabels.map(([number, label]) => html`
+                    <button class="confidence" type="button" ?disabled=${this.isReviewing || Boolean(this.recordingBlob)} @click=${() => void this.submitConfidence(Number(number))}>
+                      <span class="confidence-number">${number}</span><span class="confidence-text">${label}</span>
+                    </button>
+                  `)}
+                </div>
+              </div>
+              ${this.isReviewing ? html`<p class="inline-status" role="status">Saving your confidence…</p>` : nothing}
+              ${this.recordingBlob ? html`<p class="inline-status">Save or discard the local recording before choosing a confidence.</p>` : nothing}
+            </div>
+          `}
+        </div>
+      </div>
+    `;
+  }
+
+  private renderStudy() {
+    const deck = this.decks.find((item) => item.id === this.studyDeckId);
+    return html`
+      <main class="study" aria-labelledby="study-title">
+        <div class="study-heading">
+          <div><p class="caption">Study</p><h2 id="study-title">${deck ? deck.name : 'All due cards'}</h2></div>
+          <button type="button" @click=${() => void this.loadStudyCard()} ?disabled=${this.studyStatus === 'loading'}>${this.studyStatus === 'loading' ? 'Loading…' : 'Refresh'}</button>
+        </div>
+        ${this.studyStatus === 'ready' && this.studyError ? html`<p class="inline-status error" role="alert">${this.studyError}</p>` : nothing}
+        ${this.studyStatus === 'loading' ? html`<div class="card-stage study-state" role="status">Loading the next due card…</div>` : nothing}
+        ${this.studyStatus === 'error' ? html`<div class="card-stage study-state"><div><h2>Could not load a card</h2><p class="inline-status error" role="alert">${this.studyError}</p><button class="primary" type="button" @click=${() => void this.loadStudyCard()}>Try again</button></div></div>` : nothing}
+        ${this.studyStatus === 'empty' ? html`<div class="card-stage study-state" data-study-empty tabindex="-1"><div><h2>Nothing due right now</h2><p class="muted">Your next due card will appear here when the server has one ready.</p><button type="button" @click=${() => void this.loadStudyCard()}>Check again</button></div></div>` : nothing}
+        ${this.studyStatus === 'ready' && this.studyCard ? this.renderStudyCard(this.studyCard) : nothing}
+      </main>
+    `;
+  }
+
   private renderDeckDetail(deck: DeckSummary) {
     return html`
       <section class="panel" aria-labelledby="deck-title">
@@ -935,7 +1488,7 @@ export class FlashcardApp extends LitElement {
             <h2 id="deck-title">${deck.name}</h2>
             <p class="muted">${deck.card_count} ${deck.card_count === 1 ? 'card' : 'cards'} · ${deck.due_count} due · ${deck.mastery_percent}% mastered</p>
           </div>
-          <button @click=${() => { this.selectedDeckId = null; }}>All decks</button>
+          <div class="actions"><button class="primary" @click=${() => void this.openStudy(deck.id)}>Study this deck</button><button @click=${() => { this.selectedDeckId = null; this.view = 'decks'; }}>All decks</button></div>
         </div>
         <p>Card data and review scheduling remain on the server.</p>
         <div class="workflow-grid">
@@ -957,10 +1510,14 @@ export class FlashcardApp extends LitElement {
             <h1>Flashcards</h1>
             <div class="subtitle">German vocabulary</div>
           </div>
-          <button @click=${this.loadDecks} ?disabled=${this.deckStatus === 'loading'}>${this.deckStatus === 'loading' ? 'Refreshing…' : 'Refresh decks'}</button>
+          <nav class="primary-nav" aria-label="Main navigation">
+            <button type="button" aria-current=${this.view === 'study' ? 'false' : 'page'} @click=${() => { this.view = 'decks'; this.selectedDeckId = null; }}>Decks</button>
+            <button type="button" aria-current=${this.view === 'study' ? 'page' : 'false'} @click=${() => void this.openStudy()}>Study due</button>
+            <button type="button" @click=${this.loadDecks} ?disabled=${this.deckStatus === 'loading'}>${this.deckStatus === 'loading' ? 'Refreshing…' : 'Refresh decks'}</button>
+          </nav>
         </header>
         ${this.renderNotices()}
-        ${showDeckList ? html`
+        ${this.view === 'study' ? this.renderStudy() : showDeckList ? html`
           <main class="panel">
             <div class="toolbar"><h2>Your decks</h2><span class="muted" aria-live="polite">${this.deckStatus === 'ready' ? 'Server-synced' : ''}</span></div>
             <form class="form-row" @submit=${this.createDeck}>
@@ -973,6 +1530,10 @@ export class FlashcardApp extends LitElement {
           </main>
         ` : this.renderDeckDetail(selectedDeck)}
       </div>
+      <nav class="bottom-nav" aria-label="Main navigation">
+        <button type="button" aria-current=${this.view === 'study' ? 'false' : 'page'} @click=${() => { this.view = 'decks'; this.selectedDeckId = null; }}>Decks</button>
+        <button type="button" aria-current=${this.view === 'study' ? 'page' : 'false'} @click=${() => void this.openStudy()}>Study due</button>
+      </nav>
     `;
   }
 }

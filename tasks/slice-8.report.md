@@ -1,5 +1,14 @@
 # Slice 8 report
 
+## S8C-3 Evidence — review, meanings, and pronunciation UI
+
+- Added the standalone Lit study surface, reachable from each deck and the all-due navigation. It requests `GET /vocab/cards/next`, explicitly reveals the answer, and sends the raw confidence integer 1–5 only after reveal; no browser-side scheduling or rating mapping was added. The five controls use the exact requested labels, numeral/text labels, and semantic top-rule color treatment.
+- Added the complete keyboard and focus contract: Space reveals, 1–5 rate only after reveal, R replays pronunciation; revealed answers and nothing-due states receive programmatic focus. Mobile stacks the confidence controls as full-width rows and switches navigation to a fixed bottom bar; the 1280px desktop shell and existing OKLCH/display/body/mono token system remain in use.
+- Revealed cards immediately present lemma, learner meanings, and a primary example. One More details toggle holds grammar, plural, extended meaning lines, and additional examples without mutating data or issuing a request.
+- Added server-confirmed DE/EN personal-meaning save/remove states through the typed gloss client, plus pronunciation playback, unavailable feedback, local previewable recording/file takes, retry-or-discard save failure handling, replacement, and confirmed revert-to-automatic. Unsaved takes remain browser-local and block session changes until saved or explicitly discarded.
+- Focused frontend validation passed: `npm run --prefix frontend typecheck`, `npm test --prefix frontend`, `npm run --prefix frontend build`, and `git diff --check`. The initial required `npm ci --prefix frontend` reached esbuild’s post-install validation but was blocked by an environment `EPERM`; `npm ci --prefix frontend --ignore-scripts` supplied the same lockfile packages, and the final Vite build passed.
+- Authoritative validation passed once: `make gate PYTHON=/home/saber/projects/flashcard/.venv/bin/python RUFF=/home/saber/projects/flashcard/.venv/bin/ruff MYPY=/home/saber/projects/flashcard/.venv/bin/mypy PYTEST=/home/saber/projects/flashcard/.venv/bin/pytest` followed by `git diff --check`.
+
 ## S8C-2 Evidence — standalone capture workflow
 
 - Added an ephemeral Lit capture view: user-provided sentence text, browser text-span selection, lesson-label provenance, and typed `POST /vocab/highlight` lookup with loading, validation, empty, error/retry, and success states.
