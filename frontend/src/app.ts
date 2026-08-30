@@ -2,10 +2,16 @@ import { LitElement, css, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { createVocabClient } from './api/client.ts';
 import { ApiError } from './api/errors.ts';
-import type { Candidate, CandidateSense, DeckSummary, MeaningLanguage } from './api/types.ts';
+import type { Candidate, CandidateSense, CaptureContext, DeckSummary, MeaningLanguage } from './api/types.ts';
 
 type DeckListStatus = 'loading' | 'ready' | 'error';
 type LookupStatus = 'idle' | 'loading' | 'ready' | 'error';
+type CaptureStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+interface CaptureCandidateSelection {
+  candidate: Candidate;
+  senseRef: string | null;
+}
 
 const vocabClient = createVocabClient();
 
@@ -19,60 +25,70 @@ const vocabClient = createVocabClient();
 @customElement('flashcard-app')
 export class FlashcardApp extends LitElement {
   static styles = css`
-    :host {
-      display: block;
-      min-height: 100vh;
-      color: var(--color-text-primary, #0f172a);
-      background: var(--color-bg, #f8fafc);
-      font-family: var(--font-sans, sans-serif);
-    }
-
-    .shell { max-width: 960px; margin: 0 auto; padding: var(--space-8, 2rem) var(--space-4, 1rem); }
-    header { display: flex; align-items: end; justify-content: space-between; gap: var(--space-4, 1rem); margin-bottom: var(--space-6, 1.5rem); }
-    h1, h2, p { margin-top: 0; }
-    h1 { margin-bottom: var(--space-1, .25rem); font-size: var(--font-size-3xl, 1.875rem); }
-    h2 { margin-bottom: var(--space-2, .5rem); font-size: var(--font-size-xl, 1.25rem); }
-    .subtitle, .muted { color: var(--color-text-secondary, #475569); }
-    .panel { padding: var(--space-6, 1.5rem); border: 1px solid var(--color-border, #e2e8f0); border-radius: var(--radius-lg, .5rem); background: var(--color-surface, #fff); box-shadow: var(--shadow-sm, 0 1px 2px rgba(0,0,0,.05)); }
-    .toolbar, .deck-heading, .form-row, .actions { display: flex; gap: var(--space-3, .75rem); align-items: center; }
+    :host { display: block; min-height: 100vh; color: var(--fg); background: var(--bg); font-family: var(--font-sans); }
+    .shell { max-width: 1280px; margin: 0 auto; padding: var(--space-48) var(--space-16); }
+    header { display: flex; align-items: end; justify-content: space-between; gap: var(--space-16); margin-bottom: var(--space-32); }
+    h1, h2, h3, p { margin-top: 0; }
+    h1, h2, h3 { font-family: var(--font-display); font-weight: 600; letter-spacing: -.02em; }
+    h1 { margin-bottom: var(--space-4); font-size: clamp(2rem, 5vw, 3.25rem); }
+    h2 { margin-bottom: var(--space-8); font-size: 1.75rem; }
+    .subtitle, .muted, .result, .caption { color: var(--muted); }
+    .caption { font-family: var(--font-mono); font-size: .75rem; letter-spacing: .04em; text-transform: uppercase; }
+    .panel { padding: var(--space-32); border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); box-shadow: var(--shadow-sm); }
+    .toolbar, .deck-heading, .form-row, .actions { display: flex; gap: var(--space-12); align-items: center; }
     .toolbar, .deck-heading { justify-content: space-between; }
-    .form-row { margin: var(--space-5, 1.25rem) 0; align-items: end; }
-    label { display: grid; gap: var(--space-1, .25rem); flex: 1; font-size: var(--font-size-sm, .875rem); font-weight: var(--font-weight-medium, 500); }
-    input, select, textarea { width: 100%; padding: var(--space-2, .5rem) var(--space-3, .75rem); color: inherit; background: var(--color-surface, #fff); border: 1px solid var(--color-border-hover, #cbd5e1); border-radius: var(--radius-sm, .25rem); font: inherit; }
+    .form-row { margin: var(--space-24) 0; align-items: end; }
+    label { display: grid; gap: var(--space-4); flex: 1; font-size: .875rem; font-weight: 600; }
+    input, select, textarea { width: 100%; padding: 10px var(--space-12); color: var(--fg); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-control); font: inherit; }
     textarea { min-height: 8rem; resize: vertical; }
-    button { min-height: 2.5rem; padding: var(--space-2, .5rem) var(--space-4, 1rem); color: var(--color-text-primary, #0f172a); border: 1px solid var(--color-border-hover, #cbd5e1); border-radius: var(--radius-sm, .25rem); background: var(--color-surface, #fff); cursor: pointer; font: inherit; font-weight: var(--font-weight-medium, 500); }
-    button:hover:not(:disabled) { background: var(--color-surface-hover, #f1f5f9); }
-    button:focus-visible, input:focus-visible { outline: 3px solid var(--color-primary-light, #dbeafe); outline-offset: 2px; }
-    button.primary { color: var(--color-text-inverse, #fff); border-color: var(--color-primary, #2563eb); background: var(--color-primary, #2563eb); }
-    button.primary:hover:not(:disabled) { background: var(--color-primary-hover, #1d4ed8); }
-    button.danger { color: var(--color-danger, #dc2626); }
-    button:disabled { cursor: wait; opacity: .6; }
-    .notice { margin-bottom: var(--space-4, 1rem); padding: var(--space-3, .75rem); border-radius: var(--radius-sm, .25rem); }
-    .notice.error { color: #991b1b; background: var(--color-danger-light, #fef2f2); }
-    .notice.success { color: #166534; background: var(--color-success-light, #f0fdf4); }
-    .deck-list { display: grid; gap: var(--space-3, .75rem); padding: 0; margin: var(--space-5, 1.25rem) 0 0; list-style: none; }
-    .deck { display: grid; grid-template-columns: 1fr auto; gap: var(--space-4, 1rem); align-items: center; padding: var(--space-4, 1rem); border: 1px solid var(--color-border, #e2e8f0); border-radius: var(--radius-md, .375rem); }
+    button { min-height: 2.6rem; padding: var(--space-8) var(--space-16); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); cursor: pointer; font: inherit; font-weight: 600; }
+    button:hover:not(:disabled) { border-color: var(--accent); }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid color-mix(in oklch, var(--accent), white 65%); outline-offset: 2px; }
+    button.primary { color: white; border-color: var(--accent); background: var(--accent); }
+    button.primary:hover:not(:disabled) { filter: brightness(.94); }
+    button.danger { color: var(--danger); }
+    button:disabled { cursor: not-allowed; opacity: .55; }
+    .notice, .capture-state { margin-bottom: var(--space-16); padding: var(--space-12); border: 1px solid var(--border); border-radius: var(--radius-control); }
+    .notice.error, .capture-state.error { color: var(--danger); background: color-mix(in oklch, var(--danger), white 94%); }
+    .notice.success { color: var(--success); background: color-mix(in oklch, var(--success), white 94%); }
+    .capture-state.warning { border-color: var(--warning); background: color-mix(in oklch, var(--warning), white 91%); }
+    .capture-state p { margin-bottom: var(--space-8); }
+    .capture-state p:last-child { margin-bottom: 0; }
+    .deck-list { display: grid; gap: var(--space-12); padding: 0; margin: var(--space-24) 0 0; list-style: none; }
+    .deck { display: grid; grid-template-columns: 1fr auto; gap: var(--space-16); align-items: center; padding: var(--space-16); border: 1px solid var(--border); border-radius: var(--radius-panel); }
     .deck-open { min-height: 0; padding: 0; border: 0; background: transparent; text-align: left; }
     .deck-open:hover:not(:disabled) { background: transparent; text-decoration: underline; }
-    .deck-name { display: block; font-weight: var(--font-weight-semibold, 600); }
-    .deck-stats { display: block; margin-top: var(--space-1, .25rem); color: var(--color-text-secondary, #475569); font-size: var(--font-size-sm, .875rem); }
-    .empty, .loading { padding: var(--space-8, 2rem) 0; text-align: center; color: var(--color-text-secondary, #475569); }
-    .confirm { border-color: var(--color-warning, #d97706); background: var(--color-warning-light, #fffbeb); }
-    .workflow-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: var(--space-5, 1.25rem); margin-top: var(--space-6, 1.5rem); }
-    .workflow { padding-top: var(--space-5, 1.25rem); border-top: 1px solid var(--color-border, #e2e8f0); }
-    .workflow h3 { margin: 0 0 var(--space-2, .5rem); font-size: var(--font-size-lg, 1.125rem); }
-    .workflow form { display: grid; gap: var(--space-3, .75rem); }
-    .choice-list, .candidate-list { display: grid; gap: var(--space-2, .5rem); margin: 0; padding: 0; list-style: none; }
-    .choice { display: flex; align-items: center; gap: var(--space-2, .5rem); font-weight: var(--font-weight-medium, 500); }
-    .choice input { width: auto; }
+    .deck-name { display: block; font-family: var(--font-display); font-size: 1.2rem; font-weight: 600; }
+    .deck-stats { display: block; margin-top: var(--space-4); color: var(--muted); font-family: var(--font-mono); font-size: .75rem; }
+    .empty, .loading { padding: var(--space-48) 0; text-align: center; color: var(--muted); }
+    .confirm { border-color: var(--warning); background: color-mix(in oklch, var(--warning), white 92%); }
+    .workflow-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: var(--space-32); margin-top: var(--space-32); }
+    .workflow { padding-top: var(--space-24); border-top: 1px solid var(--border); }
+    .capture-workflow { grid-column: 1 / -1; }
+    .workflow h3 { margin: 0 0 var(--space-8); font-size: 1.4rem; }
+    .workflow form { display: grid; gap: var(--space-12); }
+    .choice-list, .candidate-list { display: grid; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
+    .choice, .candidate-choice { display: flex; align-items: center; gap: var(--space-8); font-weight: 500; }
+    .choice input, .candidate-choice input { width: auto; }
     .candidate { width: 100%; min-height: 0; text-align: left; }
-    .candidate.selected { border-color: var(--color-primary, #2563eb); background: var(--color-primary-light, #dbeafe); }
-    .candidate small { display: block; margin-top: var(--space-1, .25rem); color: var(--color-text-secondary, #475569); }
-    .selection { margin: 0; padding: var(--space-3, .75rem); border: 1px solid var(--color-border, #e2e8f0); border-radius: var(--radius-sm, .25rem); }
-    .selection legend { padding: 0 var(--space-1, .25rem); font-weight: var(--font-weight-semibold, 600); }
-    .pending { color: var(--color-text-secondary, #475569); background: var(--color-surface-hover, #f1f5f9); }
-    .result { margin: 0; color: var(--color-text-secondary, #475569); font-size: var(--font-size-sm, .875rem); }
-    @media (max-width: 560px) { header, .form-row, .deck-heading { align-items: stretch; flex-direction: column; } .deck { grid-template-columns: 1fr; } }
+    .candidate.selected { border-color: var(--accent); background: color-mix(in oklch, var(--accent), white 94%); }
+    .candidate small { display: block; margin-top: var(--space-4); color: var(--muted); }
+    .selection { margin: 0; padding: var(--space-16); border: 1px solid var(--border); border-radius: var(--radius-panel); }
+    .selection legend { padding: 0 var(--space-4); font-family: var(--font-display); font-weight: 600; }
+    .pending { color: var(--muted); background: var(--bg); }
+    .selection-preview { margin: 0; padding: var(--space-8) var(--space-12); border-left: 3px solid var(--accent); color: var(--muted); }
+    .capture-picker { margin-top: var(--space-24); }
+    .capture-candidate { padding: var(--space-12); border: 1px solid var(--border); border-radius: var(--radius-control); }
+    .capture-candidate.chosen { border-color: var(--accent); }
+    .lemma { font-family: var(--font-display); font-size: 1.25rem; }
+    .sense-choices { display: grid; gap: var(--space-8); margin: var(--space-12) 0 0 var(--space-24); border: 0; padding: 0; }
+    .sense-choices legend { margin-bottom: var(--space-4); color: var(--muted); font-size: .8rem; }
+    .language-chips { display: flex; flex-wrap: wrap; gap: var(--space-8); align-items: center; }
+    .language-chips > p { width: 100%; }
+    .chip.selected { color: white; border-color: var(--accent); background: var(--accent); }
+    .create-actions { flex-wrap: wrap; }
+    .disabled-explanation { margin: 0; color: var(--muted); font-size: .875rem; }
+    @media (max-width: 800px) { .shell { padding: var(--space-24) var(--space-16); } header, .form-row, .deck-heading { align-items: stretch; flex-direction: column; } .deck { grid-template-columns: 1fr; } .workflow-grid { grid-template-columns: 1fr; } }
   `;
 
   @state() private decks: DeckSummary[] = [];
@@ -101,6 +117,22 @@ export class FlashcardApp extends LitElement {
   @state() private isReadingImportFile = false;
   @state() private isImporting = false;
   @state() private isExporting = false;
+  @state() private captureSentence = '';
+  @state() private captureLessonLabel = '';
+  @state() private captureSpanStart = 0;
+  @state() private captureSpanEnd = 0;
+  @state() private captureStatus: CaptureStatus = 'idle';
+  @state() private captureCandidates: Candidate[] = [];
+  @state() private captureAssetToken = '';
+  @state() private captureContext: CaptureContext | null = null;
+  @state() private captureSelections: Record<string, CaptureCandidateSelection> = {};
+  @state() private captureMeaningLanguages: MeaningLanguage[] = ['de', 'en'];
+  @state() private captureUserMeaningDe = '';
+  @state() private captureUserMeaningEn = '';
+  @state() private captureDeckId: number | null = null;
+  @state() private captureError = '';
+  @state() private captureDictionaryChanged = false;
+  @state() private isCapturing = false;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -124,6 +156,9 @@ export class FlashcardApp extends LitElement {
       }
       if (this.manualDeckId !== null && !decks.some((deck) => deck.id === this.manualDeckId)) {
         this.manualDeckId = null;
+      }
+      if (this.captureDeckId !== null && !decks.some((deck) => deck.id === this.captureDeckId)) {
+        this.captureDeckId = null;
       }
       this.deckStatus = 'ready';
       return decks;
@@ -161,6 +196,7 @@ export class FlashcardApp extends LitElement {
       }
       this.selectedDeckId = refreshedDeck.id;
       this.manualDeckId = refreshedDeck.id;
+      this.captureDeckId = refreshedDeck.id;
       this.importDeckName = refreshedDeck.name;
       this.successMessage = `Created and opened “${refreshedDeck.name}”.`;
     } catch (error) {
@@ -340,6 +376,175 @@ export class FlashcardApp extends LitElement {
     }
   }
 
+  private captureKey(candidate: Candidate): string {
+    return `${candidate.lemma_semantic_ref}:${candidate.status}`;
+  }
+
+  private updateCaptureSpan(event: Event): void {
+    const input = event.target as HTMLTextAreaElement;
+    this.captureSpanStart = input.selectionStart ?? 0;
+    this.captureSpanEnd = input.selectionEnd ?? 0;
+  }
+
+  private resetCapturePicker(): void {
+    this.captureCandidates = [];
+    this.captureAssetToken = '';
+    this.captureContext = null;
+    this.captureSelections = {};
+    this.captureDictionaryChanged = false;
+  }
+
+  private async highlightCapture(event?: Event): Promise<void> {
+    event?.preventDefault();
+    const sentenceText = this.captureSentence;
+    const lessonLabel = this.captureLessonLabel.trim();
+    const selectedSpan = { start: this.captureSpanStart, end: this.captureSpanEnd };
+    if (!sentenceText.trim()) {
+      this.captureStatus = 'error';
+      this.captureError = 'Enter the sentence you want this card to remember.';
+      return;
+    }
+    if (selectedSpan.start === selectedSpan.end) {
+      this.captureStatus = 'error';
+      this.captureError = 'Select the German word or phrase in the sentence before finding candidates.';
+      return;
+    }
+    if (!lessonLabel) {
+      this.captureStatus = 'error';
+      this.captureError = 'Add a lesson label so this capture keeps its provenance.';
+      return;
+    }
+
+    this.captureStatus = 'loading';
+    this.captureError = '';
+    this.resetCapturePicker();
+    try {
+      const result = await vocabClient.highlight({
+        sentence_text: sentenceText,
+        selected_span: selectedSpan,
+        lesson_label: lessonLabel,
+      });
+      this.captureCandidates = result.candidates;
+      this.captureAssetToken = result.asset_token;
+      this.captureContext = result.capture_context;
+      this.captureStatus = 'ready';
+      const soleCandidate = result.candidates.length === 1 ? result.candidates[0] : undefined;
+      if (soleCandidate) this.toggleCaptureCandidate(soleCandidate, true);
+    } catch (error) {
+      this.captureStatus = 'error';
+      this.captureError = this.messageFor(error, 'Candidates could not be found.');
+    }
+  }
+
+  private toggleCaptureCandidate(candidate: Candidate, checked: boolean): void {
+    const key = this.captureKey(candidate);
+    const selections = { ...this.captureSelections };
+    if (checked) {
+      selections[key] = {
+        candidate,
+        senseRef: candidate.status === 'resolved' ? candidate.senses?.[0]?.sense_semantic_ref ?? null : null,
+      };
+    } else {
+      delete selections[key];
+    }
+    this.captureSelections = selections;
+  }
+
+  private setCaptureSense(candidate: Candidate, senseRef: string): void {
+    const key = this.captureKey(candidate);
+    const current = this.captureSelections[key];
+    if (!current) return;
+    this.captureSelections = { ...this.captureSelections, [key]: { ...current, senseRef } };
+  }
+
+  private toggleCaptureMeaningLanguage(language: MeaningLanguage): void {
+    const selected = this.captureMeaningLanguages;
+    if (selected.includes(language)) {
+      if (selected.length === 1) return;
+      this.captureMeaningLanguages = selected.filter((item) => item !== language);
+      return;
+    }
+    this.captureMeaningLanguages = [...selected, language];
+  }
+
+  private captureUserMeanings(): Record<string, string> | undefined {
+    const meanings: Record<string, string> = {};
+    if (this.captureUserMeaningDe.trim()) meanings.de = this.captureUserMeaningDe.trim();
+    if (this.captureUserMeaningEn.trim()) meanings.en = this.captureUserMeaningEn.trim();
+    return Object.keys(meanings).length ? meanings : undefined;
+  }
+
+  private async saveCapture(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    const deck = this.decks.find((item) => item.id === this.captureDeckId);
+    const selections = Object.values(this.captureSelections);
+    if (!selections.length) return;
+    if (!deck) {
+      this.captureError = 'Choose a destination deck before creating cards.';
+      return;
+    }
+    if (!this.captureContext || !this.captureAssetToken) {
+      this.captureError = 'Find candidates again before creating cards.';
+      return;
+    }
+    const incomplete = selections.some(({ candidate, senseRef }) => candidate.status === 'resolved' && !senseRef);
+    if (incomplete) {
+      this.captureError = 'Choose a dictionary meaning for every selected candidate.';
+      return;
+    }
+
+    this.isCapturing = true;
+    this.captureError = '';
+    this.captureDictionaryChanged = false;
+    this.successMessage = '';
+    try {
+      const result = await vocabClient.captureCards({
+        asset_token: this.captureAssetToken,
+        deck: { name: deck.name, lesson_label: this.captureContext.lesson_label },
+        capture_context: this.captureContext,
+        selections: selections.map(({ candidate, senseRef }) => ({
+          lemma_semantic_ref: candidate.lemma_semantic_ref,
+          sense_semantic_ref: senseRef,
+          status: candidate.status,
+          component_refs: candidate.component_refs,
+          overrides: {
+            meaning_langs: this.captureMeaningLanguages,
+            user_meanings: this.captureUserMeanings(),
+          },
+        })),
+      });
+      const refreshedDecks = await this.loadDecks();
+      const selectedDeck = refreshedDecks?.find((item) => item.id === result.deck_id);
+      if (!selectedDeck || selectedDeck.id !== deck.id) {
+        this.captureError = 'The server did not confirm the selected destination deck. Cards were not reported as created.';
+        return;
+      }
+      const created = result.notes.filter((note) => note.created).length;
+      const reused = result.notes.length - created;
+      this.selectedDeckId = selectedDeck.id;
+      this.manualDeckId = selectedDeck.id;
+      this.captureDeckId = selectedDeck.id;
+      this.successMessage = `Server confirmed ${created} ${created === 1 ? 'card' : 'cards'} created and ${reused} ${reused === 1 ? 'card' : 'cards'} reused in “${selectedDeck.name}”.`;
+      this.captureStatus = 'idle';
+      this.captureSentence = '';
+      this.captureLessonLabel = '';
+      this.captureSpanStart = 0;
+      this.captureSpanEnd = 0;
+      this.captureUserMeaningDe = '';
+      this.captureUserMeaningEn = '';
+      this.resetCapturePicker();
+    } catch (error) {
+      if (error instanceof ApiError && error.isConflict) {
+        this.captureDictionaryChanged = true;
+        this.captureError = '';
+      } else {
+        this.captureError = this.messageFor(error, 'Cards could not be created.');
+      }
+    } finally {
+      this.isCapturing = false;
+    }
+  }
+
   private async readImportFile(event: Event): Promise<void> {
     const file = (event.target as HTMLInputElement).files?.[0];
     if (!file) return;
@@ -442,7 +647,7 @@ export class FlashcardApp extends LitElement {
       <ul class="deck-list" aria-label="Your decks">
         ${this.decks.map((deck) => html`
           <li class="deck">
-            <button class="deck-open" @click=${() => { this.selectedDeckId = deck.id; this.manualDeckId = deck.id; this.importDeckName = deck.name; this.successMessage = ''; }} aria-label=${`Open ${deck.name}`}>
+            <button class="deck-open" @click=${() => { this.selectedDeckId = deck.id; this.manualDeckId = deck.id; this.captureDeckId = deck.id; this.importDeckName = deck.name; this.successMessage = ''; }} aria-label=${`Open ${deck.name}`}>
               <span class="deck-name">${deck.name}</span>
               <span class="deck-stats">${deck.card_count} ${deck.card_count === 1 ? 'card' : 'cards'} · ${deck.due_count} due · ${deck.mastery_percent}% mastered</span>
             </button>
@@ -559,6 +764,118 @@ export class FlashcardApp extends LitElement {
     `;
   }
 
+  private renderCaptureCreation(deck: DeckSummary) {
+    const selectedCount = Object.keys(this.captureSelections).length;
+    const captureDeck = this.decks.find((item) => item.id === this.captureDeckId);
+    const selectedText = this.captureSentence.slice(this.captureSpanStart, this.captureSpanEnd);
+    return html`
+      <section class="workflow capture-workflow" aria-labelledby="capture-title">
+        <h3 id="capture-title">Capture from a sentence</h3>
+        <p class="muted">Paste or type a sentence, select its German word or phrase, then choose the cards to create.</p>
+        <form @submit=${this.highlightCapture}>
+          <label>Sentence text
+            <textarea
+              .value=${this.captureSentence}
+              @input=${(event: InputEvent) => { this.captureSentence = (event.target as HTMLTextAreaElement).value; this.updateCaptureSpan(event); this.resetCapturePicker(); this.captureStatus = 'idle'; this.captureError = ''; }}
+              @select=${this.updateCaptureSpan}
+              @keyup=${this.updateCaptureSpan}
+              @click=${this.updateCaptureSpan}
+              ?disabled=${this.captureStatus === 'loading' || this.isCapturing}
+              placeholder="Ich rufe dich morgen an."
+            ></textarea>
+          </label>
+          <p class="selection-preview" aria-live="polite">${selectedText ? html`Selected: <strong>“${selectedText}”</strong>` : 'Select a German word or phrase in the sentence.'}</p>
+          <label>Lesson label
+            <input
+              .value=${this.captureLessonLabel}
+              @input=${(event: InputEvent) => { this.captureLessonLabel = (event.target as HTMLInputElement).value; this.resetCapturePicker(); this.captureStatus = 'idle'; this.captureError = ''; }}
+              ?disabled=${this.captureStatus === 'loading' || this.isCapturing}
+              autocomplete="off"
+              placeholder="Lesson 4 · Telephone calls"
+            />
+          </label>
+          <div class="actions">
+            <button class="primary" type="submit" ?disabled=${this.captureStatus === 'loading' || this.isCapturing}>${this.captureStatus === 'loading' ? 'Finding candidates…' : 'Find candidates'}</button>
+          </div>
+        </form>
+        ${this.captureStatus === 'loading' ? html`<p class="result" role="status">Checking the active dictionary…</p>` : nothing}
+        ${this.captureStatus === 'error' ? html`<div class="capture-state error" role="alert"><p>${this.captureError}</p><button @click=${() => void this.highlightCapture()}>Try again</button></div>` : nothing}
+        ${this.captureStatus === 'ready' && this.captureCandidates.length === 0 ? html`<div class="capture-state"><p>No dictionary candidates were found for “${selectedText}”. Adjust the selected text and try again.</p></div>` : nothing}
+        ${this.captureCandidates.length ? html`
+          <form class="capture-picker" @submit=${this.saveCapture}>
+            <fieldset class="selection">
+              <legend>Choose vocabulary <span class="muted">(select one or more)</span></legend>
+              <p class="result">Each checked German candidate becomes its own card. You can select multiple candidates.</p>
+              <ul class="candidate-list">
+                ${this.captureCandidates.map((candidate) => {
+                  const key = this.captureKey(candidate);
+                  const selection = this.captureSelections[key];
+                  return html`
+                    <li class="capture-candidate ${selection ? 'chosen' : ''}">
+                      <label class="candidate-choice">
+                        <input
+                          type="checkbox"
+                          .checked=${Boolean(selection)}
+                          @change=${(event: Event) => this.toggleCaptureCandidate(candidate, (event.target as HTMLInputElement).checked)}
+                          ?disabled=${this.isCapturing}
+                        />
+                        <span><strong class="lemma">${candidate.lemma}</strong> <span class="caption">${candidate.pos}</span></span>
+                      </label>
+                      ${selection && candidate.status === 'resolved' ? (candidate.senses?.length ? html`
+                        <fieldset class="sense-choices">
+                          <legend>Dictionary meaning for ${candidate.lemma}</legend>
+                          ${candidate.senses.map((sense) => html`
+                            <label class="choice">
+                              <input type="radio" name=${`capture-sense-${key}`} .value=${sense.sense_semantic_ref} .checked=${selection.senseRef === sense.sense_semantic_ref} @change=${() => this.setCaptureSense(candidate, sense.sense_semantic_ref)} ?disabled=${this.isCapturing} />
+                              ${sense.gloss || `Meaning ${sense.ord}`}
+                            </label>
+                          `)}
+                        </fieldset>
+                      ` : html`<p class="result">This entry has no selectable dictionary meaning.</p>`) : nothing}
+                      ${selection && candidate.status === 'derived_compound' ? html`<p class="result">The server will preserve the compound’s dictionary component bindings.</p>` : nothing}
+                    </li>
+                  `;
+                })}
+              </ul>
+            </fieldset>
+            ${this.captureDictionaryChanged ? html`
+              <div class="capture-state warning" role="alert">
+                <p>The dictionary changed while you were choosing cards. Your selections have not been saved.</p>
+                <button type="button" @click=${() => void this.highlightCapture()}>Find fresh candidates</button>
+              </div>
+            ` : nothing}
+            ${this.captureError ? html`<div class="capture-state error" role="alert"><p>${this.captureError}</p></div>` : nothing}
+            <fieldset class="selection language-chips">
+              <legend>Meaning languages</legend>
+              <p class="result">Choose German, English, or both. At least one language stays selected.</p>
+              ${(['de', 'en'] as MeaningLanguage[]).map((language) => html`
+                <button
+                  class="chip ${this.captureMeaningLanguages.includes(language) ? 'selected' : ''}"
+                  type="button"
+                  aria-pressed=${this.captureMeaningLanguages.includes(language) ? 'true' : 'false'}
+                  @click=${() => this.toggleCaptureMeaningLanguage(language)}
+                  ?disabled=${this.isCapturing || (this.captureMeaningLanguages.length === 1 && this.captureMeaningLanguages.includes(language))}
+                >${language === 'de' ? 'German · DE' : 'English · EN'}</button>
+              `)}
+            </fieldset>
+            ${this.captureMeaningLanguages.includes('de') ? html`<label>Your German meaning <span class="muted">(optional)</span><input .value=${this.captureUserMeaningDe} @input=${(event: InputEvent) => { this.captureUserMeaningDe = (event.target as HTMLInputElement).value; }} ?disabled=${this.isCapturing} autocomplete="off" /></label>` : nothing}
+            ${this.captureMeaningLanguages.includes('en') ? html`<label>Your English meaning <span class="muted">(optional)</span><input .value=${this.captureUserMeaningEn} @input=${(event: InputEvent) => { this.captureUserMeaningEn = (event.target as HTMLInputElement).value; }} ?disabled=${this.isCapturing} autocomplete="off" /></label>` : nothing}
+            <label>Destination deck
+              <select .value=${captureDeck ? String(captureDeck.id) : String(deck.id)} @change=${(event: Event) => { const value = (event.target as HTMLSelectElement).value; this.captureDeckId = value ? Number(value) : null; }} ?disabled=${this.isCapturing}>
+                <option value="">Select a deck</option>
+                ${this.decks.map((item) => html`<option value=${item.id}>${item.name}</option>`)}
+              </select>
+            </label>
+            <div class="actions create-actions">
+              <button class="primary" type="submit" ?disabled=${selectedCount === 0 || this.isCapturing || this.captureDictionaryChanged}>${this.isCapturing ? 'Creating cards…' : `Create ${selectedCount || ''} card${selectedCount === 1 ? '' : 's'}`}</button>
+              ${selectedCount === 0 ? html`<p class="disabled-explanation">Select at least one candidate to create cards.</p>` : nothing}
+            </div>
+          </form>
+        ` : nothing}
+      </section>
+    `;
+  }
+
   private renderImportExport(deck: DeckSummary) {
     return html`
       <section class="workflow" aria-labelledby="import-export-title">
@@ -622,6 +939,7 @@ export class FlashcardApp extends LitElement {
         </div>
         <p>Card data and review scheduling remain on the server.</p>
         <div class="workflow-grid">
+          ${this.renderCaptureCreation(deck)}
           ${this.renderManualCreation()}
           ${this.renderImportExport(deck)}
         </div>

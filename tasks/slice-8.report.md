@@ -1,5 +1,24 @@
 # Slice 8 report
 
+## S8C-2 Evidence — standalone capture workflow
+
+- Added an ephemeral Lit capture view: user-provided sentence text, browser text-span selection, lesson-label provenance, and typed `POST /vocab/highlight` lookup with loading, validation, empty, error/retry, and success states.
+- Added the D11 multi-select candidate picker with per-candidate sense selection, independently toggleable DE/EN meaning chips (one always retained), optional per-language user meanings, server deck selection, and typed `POST /vocab/cards` submission. The confirmation message reports the server’s created/reused counts only after the destination deck is refreshed and confirmed.
+- A stale dictionary picker token is now a dedicated adjacent recovery panel: it says that the dictionary changed, confirms no selections were saved, and offers fresh lookup. It exposes neither a raw HTTP status nor a false success.
+- The disabled zero-selection create action explicitly says why it cannot be used. Capture state is component-local and transient; it adds no browser persistence, scheduler, FSRS/rating mapping, lecture dependency, or runtime LLM.
+- Replaced the shared frontend styling tokens with the OpenDesign light-only OKLCH palette, display/body/mono type split, 4/8/12/16/24/32/48/72 spacing, 10/16/24 radii, and visible focus rings; existing deck/manual/import screens use the renamed tokens.
+
+Focused validation passed:
+
+```
+npm run --prefix frontend typecheck
+npm test --prefix frontend
+npm run --prefix frontend build
+git diff --check
+```
+
+Implementation was completed and the focused checks above (typecheck, unit tests, build, and `git diff --check`) passed. Orchestration committed the attempt-1 candidate as `7c0faa32116633d630e1bcc7d0e37977145997df`, and the authoritative full gate passed on that candidate. This repair commit supersedes it with identical source content plus this evidence correction.
+
 ## NARRATIVE
 
 This stage implements S8A of Slice 8: repairing the executable smoke baseline, removing `reference` tool exclusions, implementing the pure deterministic example sentence ranking engine, and establishing the stateless two-stage capture endpoints (`POST /vocab/highlight`, `POST /vocab/cards`) and word-list import (`POST /vocab/import/csv`).
