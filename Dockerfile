@@ -1,3 +1,12 @@
+FROM node:22-bookworm-slim AS frontend-build
+
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend ./
+RUN npm run build
+
+
 FROM python:3.12-slim
 
 ARG PIPER_VOICE_REV=8aaa3c9839d2b669cb57a94e1ec92ae0928897e8
@@ -16,6 +25,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY app ./app
+COPY --from=frontend-build /app/frontend ./app/frontend
 RUN pip install . \
     && pip install piper-tts==1.6.0 \
     && python -m spacy download de_core_news_md
@@ -54,4 +64,4 @@ RUN printf 'Guten Tag.' | piper --model "${PIPER_VOICE_PATH}" --output_file /tmp
     && rm /tmp/piper-smoke.wav \
     && ! pip freeze | grep -E '^(anthropic|openai|google-genai)=='
 
-CMD ["python", "-c", "import spacy; spacy.load('de_core_news_md'); print('flashcard runtime ready')"]
+CMD ["uvicorn", "app.api:create_production_app", "--factory", "--host", "127.0.0.1", "--port", "8000"]

@@ -1,5 +1,19 @@
 # Slice 8 report
 
+## S8D RP4 Evidence — APKG audio-precedence repair
+
+- Repaired `_export_audio_for_observation` to use the shared ADR-0005 D48 resolver rather than exposing only a custom note-local file. APKG selection is now custom learner audio, then policy-verified **and redistribution-eligible** human audio, then local Piper, then absent. The human wrapper requires `evaluate_human_audio_policy()` and `redistribution_eligible`; ineligible media falls through rather than being packaged.
+- Export deliberately supplies neither `tts_remote_url` nor a remote-speak client. It passes no cache directory to the resolver, so export does not populate the disposable automatic-audio cache or otherwise write application-owned audio state. Generated human/Piper filenames are basename-only digest names; custom files retain their validated basename.
+- The app factory now wires an exact-human-id resolver and human-media resolver when supplied, and detects the image-pinned `piper` executable plus `PIPER_VOICE_PATH` for export/runtime use. The runner enforces the pinned `de_DE-thorsten-high` voice; where Piper or its voice is unavailable it is `None`, and export remains silent rather than failing. This worker environment has neither the executable nor `/opt/piper/de_DE-thorsten-high.onnx`, so no host subprocess was invoked.
+- Focused semantic checks passed: `tests/test_export.py` (`3 passed`) proves custom > eligible human > Piper > absent with fakes/local WAV assets, including an export-ineligible human fallback; the export/container focused run passed (`4 passed`); Ruff and strict mypy passed for `app/api.py`, `app/export.py`, and the S8D tests; `git diff --check` passed. The final full-gate command is run after this evidence update.
+
+## S8D Evidence — APKG export and single-service production serving
+
+- Added the isolated `app/export.py` APKG boundary using pinned `genanki==0.13.1`: stable semantic GUIDs, a real `collection.anki2`, German Vocabulary deck/model records, read-time display rendering, and Anki media manifests. It does not write rendered faces or carry application FSRS/due state into a second scheduler.
+- APKG audio selection is explicit: custom learner recording, then export-eligible human media, then Piper, then absent. Fields contain basename-only `[sound:...]` references and selected media bytes are packaged. The RP4 repair above wires the full precedence through the shared audio-domain resolver without modifying user data.
+- Added deck-scoped `GET /vocab/export/apkg`, static Vite serving after all `/vocab` routes (therefore under the existing host/origin middleware), a multi-stage Docker frontend build, and a `uvicorn` factory command bound to `127.0.0.1:8000`. The Lit UI now makes APKG the primary download action and retains TSV as secondary; both import placeholders remain truthfully disabled.
+- Focused checks passed: export/container pytest (`3 passed`), Ruff, strict mypy, frontend typecheck, frontend client tests, and Vite build. The supplied venv's FastAPI `TestClient` cannot start even a minimal one-route FastAPI app (it blocks in `TestClient.__enter__` with FastAPI 0.141.1 / Starlette 1.6.0), so its existing TestClient-based API suite could not execute in this environment; the same block affects baseline tests before request handling.
+
 ## S8C-3 Evidence — review, meanings, and pronunciation UI
 
 - Added the standalone Lit study surface, reachable from each deck and the all-due navigation. It requests `GET /vocab/cards/next`, explicitly reveals the answer, and sends the raw confidence integer 1–5 only after reveal; no browser-side scheduling or rating mapping was added. The five controls use the exact requested labels, numeral/text labels, and semantic top-rule color treatment.

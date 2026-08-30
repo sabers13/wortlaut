@@ -359,6 +359,15 @@ export class VocabClient {
       responseType: 'text',
     });
   }
+
+  /** Export one deck as a real Anki package (GET /vocab/export/apkg). */
+  async exportApkg(deckId: number): Promise<Blob> {
+    return this.request<Blob>('/vocab/export/apkg', {
+      method: 'GET',
+      params: { deck_id: deckId },
+      responseType: 'blob',
+    });
+  }
 }
 
 /**

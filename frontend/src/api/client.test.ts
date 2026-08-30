@@ -504,6 +504,22 @@ describe('VocabClient', () => {
       assert.strictEqual(text, tsvContent);
       assert.strictEqual(captured[0]?.url, '/vocab/export/anki?deck_id=1');
     });
+
+    it('executes deck-scoped GET /vocab/export/apkg with a blob response', async () => {
+      const captured: CapturedRequest[] = [];
+      const content = new Blob(['apkg'], { type: 'application/apkg' });
+      const mockFetch = createMockFetch(
+        () => ({ status: 200, blob: content }),
+        captured,
+      );
+      const client = new VocabClient({ fetch: mockFetch });
+
+      const exported = await client.exportApkg(7);
+
+      assert.strictEqual(await exported.text(), 'apkg');
+      assert.strictEqual(captured[0]?.url, '/vocab/export/apkg?deck_id=7');
+      assert.strictEqual(captured[0]?.method, 'GET');
+    });
   });
 
   describe('Error handling & typed ApiError', () => {

@@ -1944,3 +1944,42 @@ def test_concurrency_complete_old_observation_during_activation(
     assert "Modernes Wohnhaus (Dict B)" in r_fresh_exp.text
     assert "Gebäude zum Wohnen (Dict A)" not in r_fresh_exp.text
 
+
+def test_apkg_export_endpoint_is_deck_scoped_and_host_origin_guarded(
+    client: TestClient, app_instance: Any
+) -> None:
+    """APKG export has the normal GET guard behavior and returns package bytes."""
+    headers = {"X-Flashcards-Request": "1", "Content-Type": "application/json"}
+    lemma_ref = compute_lemma_semantic_ref("Haus", "NOUN", "das")
+    sense_ref = compute_sense_semantic_ref(
+        lemma_ref, "wiktextract:enwiktionary", "senseid:en-house-1"
+    )
+    created = client.post(
+        "/vocab/notes",
+        json={
+            "lemma_semantic_ref": lemma_ref,
+            "sense_semantic_ref": sense_ref,
+            "status": "resolved",
+            "meaning_languages": ["de"],
+            "asset_token": app_instance.state.runtime.asset_token,
+            "deck_name": "APKG deck",
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201
+    deck_id = client.get("/vocab/decks").json()[0]["id"]
+
+    valid = client.get(f"/vocab/export/apkg?deck_id={deck_id}")
+    assert valid.status_code == 200
+    assert valid.headers["content-type"].startswith("application/apkg")
+    assert valid.content.startswith(b"PK")
+    assert "attachment" in valid.headers["content-disposition"]
+
+    missing_scope = client.get("/vocab/export/apkg")
+    assert missing_scope.status_code == 422
+    bad_host = client.get(f"/vocab/export/apkg?deck_id={deck_id}", headers={"Host": "evil.test"})
+    assert bad_host.status_code == 403
+    bad_origin = client.get(
+        f"/vocab/export/apkg?deck_id={deck_id}", headers={"Origin": "https://evil.test"}
+    )
+    assert bad_origin.status_code == 403

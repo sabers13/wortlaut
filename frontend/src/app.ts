@@ -185,7 +185,7 @@ export class FlashcardApp extends LitElement {
   @state() private importFileName = '';
   @state() private isReadingImportFile = false;
   @state() private isImporting = false;
-  @state() private isExporting = false;
+  @state() private exportingFormat: 'apkg' | 'tsv' | null = null;
   @state() private captureSentence = '';
   @state() private captureLessonLabel = '';
   @state() private captureSpanStart = 0;
@@ -1003,7 +1003,7 @@ export class FlashcardApp extends LitElement {
   }
 
   private async exportTsv(deck: DeckSummary): Promise<void> {
-    this.isExporting = true;
+    this.exportingFormat = 'tsv';
     this.errorMessage = '';
     this.successMessage = '';
     try {
@@ -1018,7 +1018,27 @@ export class FlashcardApp extends LitElement {
     } catch (error) {
       this.errorMessage = this.messageFor(error, 'TSV export could not be prepared.');
     } finally {
-      this.isExporting = false;
+      this.exportingFormat = null;
+    }
+  }
+
+  private async exportApkg(deck: DeckSummary): Promise<void> {
+    this.exportingFormat = 'apkg';
+    this.errorMessage = '';
+    this.successMessage = '';
+    try {
+      const apkg = await vocabClient.exportApkg(deck.id);
+      const url = URL.createObjectURL(apkg);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${deck.name.replace(/[^a-z0-9._-]+/gi, '-') || 'flashcards'}.apkg`;
+      link.click();
+      URL.revokeObjectURL(url);
+      this.successMessage = `Prepared an APKG export for “${deck.name}”.`;
+    } catch (error) {
+      this.errorMessage = this.messageFor(error, 'APKG export could not be prepared.');
+    } finally {
+      this.exportingFormat = null;
     }
   }
 
@@ -1299,9 +1319,14 @@ export class FlashcardApp extends LitElement {
         </form>
         <div class="workflow-grid">
           <div>
+            <h3>APKG export</h3>
+            <p class="muted">Download the selected deck as a ready-to-import Anki package.</p>
+            <button class="primary" @click=${() => void this.exportApkg(deck)} ?disabled=${this.exportingFormat !== null}>${this.exportingFormat === 'apkg' ? 'Preparing APKG…' : `Export “${deck.name}” APKG`}</button>
+          </div>
+          <div>
             <h3>TSV export</h3>
-            <p class="muted">Download the selected deck in the available Anki TSV format.</p>
-            <button @click=${() => void this.exportTsv(deck)} ?disabled=${this.isExporting}>${this.isExporting ? 'Preparing TSV…' : `Export “${deck.name}” TSV`}</button>
+            <p class="muted">Secondary export for the available Anki TSV format.</p>
+            <button @click=${() => void this.exportTsv(deck)} ?disabled=${this.exportingFormat !== null}>${this.exportingFormat === 'tsv' ? 'Preparing TSV…' : `Export “${deck.name}” TSV`}</button>
           </div>
           <div>
             <h3>TSV import</h3>
@@ -1312,11 +1337,6 @@ export class FlashcardApp extends LitElement {
             <h3>APKG import</h3>
             <p class="muted">Pending — this product has no accepted APKG import contract yet.</p>
             <button class="pending" disabled>APKG import pending</button>
-          </div>
-          <div>
-            <h3>APKG export</h3>
-            <p class="muted">Pending — this product has no accepted APKG export contract yet.</p>
-            <button class="pending" disabled>APKG export pending</button>
           </div>
         </div>
       </section>
