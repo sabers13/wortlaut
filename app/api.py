@@ -190,7 +190,12 @@ def _materialize_candidate_from_ref(
         lem_rows = cur.fetchall()
         if not lem_rows:
             return None
-        lem = lem_rows[0]
+        lem = next(
+            (row for row in lem_rows if row[3] == ref.pos and row[4] == ref.gender),
+            None,
+        )
+        if lem is None:
+            return None
         lem_id = int(lem[0])
         lem_ref = str(lem[1])
 

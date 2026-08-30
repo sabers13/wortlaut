@@ -1070,11 +1070,11 @@ class DictionaryRuntime:
                 FROM card c
                 JOIN note n ON n.id = c.note_id
                 JOIN note_deck nd ON nd.note_id = n.id
-                WHERE nd.deck_id = ?
+                WHERE nd.deck_id = ? AND c.due_at <= ?
                 ORDER BY c.due_at ASC, c.id ASC
                 LIMIT 1
                 """,
-                (deck_id,),
+                (deck_id, _timestamp(_utc_now())),
             ).fetchone()
         else:
             row = reader_conn.execute(
@@ -1085,9 +1085,11 @@ class DictionaryRuntime:
                        n.status AS note_status
                 FROM card c
                 JOIN note n ON n.id = c.note_id
+                WHERE c.due_at <= ?
                 ORDER BY c.due_at ASC, c.id ASC
                 LIMIT 1
-                """
+                """,
+                (_timestamp(_utc_now()),),
             ).fetchone()
 
         if row is None:

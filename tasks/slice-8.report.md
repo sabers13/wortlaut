@@ -1,5 +1,11 @@
 # Slice 8 report
 
+## S8E RP8 Evidence — manual-creation lookup-contract repair
+
+The E2E exposed that the manual flow assumed lookup fields the lookup contract does not include; the UI now derives them at ingestion.
+The E2E also exposed `cards/next` returning not-yet-due cards; the endpoint now filters to actually due cards so the session-complete state is reachable.
+The E2E also exposed the highlight materializer collapsing multi-gender candidates into the first lemma; it now matches the resolved Ref identity.
+
 ## S8D RP4 Evidence — APKG audio-precedence repair
 
 - Repaired `_export_audio_for_observation` to use the shared ADR-0005 D48 resolver rather than exposing only a custom note-local file. APKG selection is now custom learner audio, then policy-verified **and redistribution-eligible** human audio, then local Piper, then absent. The human wrapper requires `evaluate_human_audio_policy()` and `redistribution_eligible`; ineligible media falls through rather than being packaged.
