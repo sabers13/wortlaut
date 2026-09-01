@@ -5,31 +5,66 @@ Run from the repository root:
 
     ./flashcard
 
-The launcher resolves per-user data paths (XDG on Linux), ensures the
-user database exists, verifies the read-only dictionary asset is
-present and matches the active manifest, and starts the FastAPI app
-bound to ``127.0.0.1:8000`` so the bundled browser frontend can connect
-without exposing the unauthenticated deck API to the LAN (AGENTS R8 /
-AGENTS R12). The loopback URL is printed on stdout and the system
-browser is opened when possible.
+The launcher automatically re-executes itself through the
+repository-local ``.venv/bin/python`` interpreter when one is present so
+the user never has to ``source .venv/bin/activate`` first. It resolves
+per-user data paths (XDG on Linux), ensures the user database exists,
+verifies the read-only dictionary asset matches the active manifest,
+and starts the FastAPI app bound to ``127.0.0.1`` only — the port is
+configurable but the loopback bind is non-overridable (AGENTS R8 /
+R12). The loopback URL is printed on stdout and the system browser is
+opened when possible.
 
-No environment variables are required; advanced overrides are exposed
-as optional flags only. The launcher never modifies or deletes the
-dictionary asset (AGENTS R9).
+No environment variables are required, advanced overrides are exposed
+as optional flags only, and the launcher never modifies or deletes the
+dictionary asset (AGENTS R9). No LLM SDK is installed (AGENTS R1) and
+no arbitrary Python packages are installed behind the user's back.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import webbrowser
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
-# Ensure ``app.*`` and ``tools.*`` imports resolve even when the
-# launcher is invoked from a different working directory.
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+VENV_PYTHON = REPO_ROOT / ".venv" / "bin" / "python"
+# Mark that we re-executed into the venv interpreter so we never loop.
+_REEXEC_ENV = "FLASHCARD_LAUNCHER_REEXEC"
+
+
+def _reexec_into_venv() -> "object | int":
+    """Re-execute this script under ``.venv/bin/python`` when available.
+
+    Returns ``None`` to signal that the caller should continue under the
+    current interpreter; never raises. When ``.venv/bin/python`` is
+    absent the script continues under the current interpreter (system
+    Python) so the rest of ``main`` can surface a clear error message
+    telling the user exactly which command to run first.
+
+    Detection of "already in venv" uses ``sys.prefix`` rather than the
+    ``sys.executable`` path: venv symlinks (e.g. ``.venv/bin/python``
+    → ``.venv/bin/python3`` → ``/usr/bin/python3``) resolve to the same
+    physical file as the system interpreter even when the running
+    interpreter sees the venv's ``site-packages`` on ``sys.path``.
+    """
+    if os.environ.get(_REEXEC_ENV) == "1":
+        return None  # We re-execed; continue without looping.
+    if not VENV_PYTHON.is_file():
+        return None  # No venv yet; let ``main`` produce the setup hint.
+    in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+    if in_venv:
+        return None  # Already running under the venv interpreter.
+    env = dict(os.environ)
+    env[_REEXEC_ENV] = "1"
+    os.execve(
+        str(VENV_PYTHON),
+        [str(VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]],
+        env,
+    )
+    return None  # pragma: no cover - execve does not return on success
 
 
 def _log(message: str) -> None:
@@ -46,7 +81,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="flashcard",
         description=(
-            "Run the Flashcard standalone web app on http://127.0.0.1:8000 ."
+            "Run the Flashcard standalone web app on the loopback interface."
         ),
     )
     parser.add_argument(
@@ -69,16 +104,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Override the path to the user SQLite database.",
     )
     parser.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help="Network interface to bind to. Defaults to the loopback only; "
-        "external interfaces are intentionally not advertised.",
-    )
-    parser.add_argument(
         "--port",
         type=int,
         default=8000,
-        help="TCP port to bind to (default 8000).",
+        help="TCP port to bind to on 127.0.0.1 (default 8000).",
     )
     parser.add_argument(
         "--no-browser",
@@ -86,15 +115,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Do not open the system browser after the server is ready.",
     )
     parser.add_argument(
-        "--skip-dict-verify",
-        action="store_true",
-        help="Skip the dictionary SHA-256 / PART-A verification at startup.",
-    )
-    parser.add_argument(
         "--install-dictionary",
         action="store_true",
-        help="Download and verify the dictionary from the release manifest "
-        "before starting the server.",
+        help="Install the verified dictionary into the default slot "
+        "(<data-dir>/dictionary/dictionary.sqlite) before starting the server.",
     )
     parser.add_argument(
         "--manifest",
@@ -104,6 +128,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "release/dictionary-manifest-v1.json).",
     )
     return parser.parse_args(argv)
+
+
+def _require_venv() -> None:
+    """Fail closed when no repository-local venv is present."""
+    if not VENV_PYTHON.is_file():
+        sys.stderr.write(
+            "flashcard: repository virtualenv is missing at "
+            f"{VENV_PYTHON}\n"
+            "  Create and install it first:\n"
+            "      python3 -m venv .venv\n"
+            "      .venv/bin/pip install -e .\n"
+        )
+        raise SystemExit(1)
 
 
 def _maybe_install(
@@ -133,13 +170,24 @@ def _maybe_install(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Ensure the repository-local virtualenv is present before doing
+    # any work — the app code expects to run with the install pins.
+    # Checked BEFORE argparse so ``--help`` also fails closed when the
+    # venv is missing (the user should know they need to install deps
+    # even when they only asked for help).
+    _require_venv()
+
     args = _parse_args(list(argv) if argv is not None else sys.argv[1:])
 
+    # Ensure ``app.*`` and ``tools.*`` imports resolve even when the
+    # launcher is invoked from a different working directory.
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+
     from app.standalone import (  # noqa: PLC0415
-        StandaloneError,
+        build_standalone_app,
         ensure_user_db,
         resolve_standalone_paths,
-        verify_dictionary_asset,
     )
 
     paths = resolve_standalone_paths(
@@ -163,20 +211,15 @@ def main(argv: list[str] | None = None) -> int:
     if not paths.dictionary_path.is_file():
         sys.stderr.write(
             f"dictionary asset is missing: {paths.dictionary_path}\n"
-            f"  Place a verified dictionary.sqlite at that path, or run\n"
+            f"  Place a verified dictionary at that path, or run\n"
             f"  with --install-dictionary to fetch it from the release manifest.\n"
         )
         return 1
 
-    if not args.skip_dict_verify:
-        try:
-            digest = verify_dictionary_asset(paths.dictionary_path)
-        except StandaloneError as exc:
-            sys.stderr.write(f"dictionary verification failed: {exc}\n")
-            return 4
-        _log(f"dictionary verified sha256={digest}")
-    else:
-        _log("dictionary verification skipped (--skip-dict-verify)")
+    # The runtime's authoritative validation already runs inside
+    # ``build_standalone_app``; we deliberately do NOT add a second
+    # full-file SHA-256/quick_check pass here, which would re-read the
+    # ~945 MB dictionary twice for no extra safety (Repair G).
 
     ensure_user_db(paths.user_db_path)
     _log(f"data directory: {paths.data_dir}")
@@ -184,10 +227,12 @@ def main(argv: list[str] | None = None) -> int:
     _log(f"dictionary    : {paths.dictionary_path}")
     _log(f"media cache   : {paths.media_dir}")
 
-    url = f"http://{args.host}:{args.port}"
+    # AGENTS R8 / R12: the API is unauthenticated and must remain on
+    # the loopback interface. The host is hard-coded; only the port is
+    # user-configurable.
+    bind_host = "127.0.0.1"
+    url = f"http://{bind_host}:{args.port}"
     _log(f"  Flashcard is starting at: {url}")
-
-    from app.standalone import build_standalone_app  # noqa: PLC0415
 
     app = build_standalone_app(
         data_dir=paths.data_dir,
@@ -195,6 +240,10 @@ def main(argv: list[str] | None = None) -> int:
         user_db_path=paths.user_db_path,
         media_dir=paths.media_dir,
         cache_dir=paths.cache_dir,
+        # CORS allowlist must match the bound origin so the bundled
+        # browser frontend's same-origin Origin header is accepted at
+        # the user-chosen port.
+        cors_origins=(f"http://{bind_host}:{args.port}", f"http://localhost:{args.port}"),
     )
 
     if not args.no_browser:
@@ -205,9 +254,14 @@ def main(argv: list[str] | None = None) -> int:
 
     import uvicorn  # noqa: PLC0415
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    uvicorn.run(app, host=bind_host, port=args.port, log_level="info")
     return 0
 
 
 if __name__ == "__main__":
+    # When the launcher is invoked directly (typical user case: the
+    # shebang resolves to /usr/bin/env python3 on PATH) and a repo
+    # venv is present, re-exec into the venv interpreter so the rest
+    # of ``main`` always sees the installed dependency pins.
+    _reexec_into_venv()
     raise SystemExit(main())

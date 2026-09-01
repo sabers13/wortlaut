@@ -59,7 +59,11 @@ tmp/
 
 # Frontend dependencies and generated output
 node_modules/
-app/frontend/
 frontend/test-results/
 frontend/playwright-report/
 frontend/.playwright/
+# Tracked production frontend assets live under app/frontend/ as
+# release runtime deliverables (Repair F, option A: tracked assets).
+# They are rebuilt by the documented install path's locked frontend
+# build; the build is deterministic (content-hash filenames are stable
+# for unchanged source), so a second rebuild does not dirty the tree.

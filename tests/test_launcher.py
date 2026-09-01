@@ -1,20 +1,27 @@
 """Subprocess smoke test for the standalone launcher.
 
 Drives the ``./flashcard`` launcher through argparse, a missing
-dictionary error, and the install-dictionary path. The test never
-launches a long-running server — it verifies the launcher's
-fail-closed error paths and CLI plumbing so a regression in the
-single-command UX is caught.
+dictionary error, the install-dictionary path, and the custom-port
+same-origin browser security path. The launcher is invoked as a real
+shell script (the shebang ``./flashcard``) for the dedicated
+subprocess tests so a regression in the launcher re-exec path or its
+loopback bind contract is caught end-to-end. The test never launches a
+long-running server — it verifies the launcher's fail-closed error
+paths and CLI plumbing so a regression in the single-command UX is
+caught.
 """
 
 from __future__ import annotations
 
 import http.server
 import json
+import socket
 import sqlite3
 import subprocess
 import sys
 import threading
+import time
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -80,9 +87,21 @@ def _run_launcher(
     cwd: Path,
     env: dict[str, str] | None = None,
     timeout: float = 30.0,
+    via_shebang: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    """Drive the launcher.
+
+    ``via_shebang=True`` invokes ``./flashcard`` directly, exercising the
+    real user command path and the launcher's venv re-exec logic.
+    ``via_shebang=False`` invokes ``sys.executable ./flashcard ...``
+    for tests that want to bypass the shebang.
+    """
+    if via_shebang:
+        cmd = ["./flashcard", *args]
+    else:
+        cmd = [sys.executable, str(LAUNCHER), *args]
     proc = subprocess.run(
-        [sys.executable, str(LAUNCHER), *args],
+        cmd,
         cwd=str(cwd),
         capture_output=True,
         text=True,
@@ -99,6 +118,78 @@ def test_launcher_help_prints_expected_text(tmp_path: Path) -> None:
     assert "Run the Flashcard standalone web app" in proc.stdout
     assert "--data-dir" in proc.stdout
     assert "--install-dictionary" in proc.stdout
+    # Host binding is intentionally non-configurable.
+    assert "--host" not in proc.stdout
+    # The misleading dictionary-verify bypass has been removed.
+    assert "--skip-dict-verify" not in proc.stdout
+
+
+def test_launcher_help_via_shebang(tmp_path: Path) -> None:
+    """``./flashcard --help`` must succeed even when invoked via the
+    shebang path, exercising the launcher's venv re-exec logic.
+    """
+    proc = _run_launcher("--help", cwd=LAUNCHER.parent, via_shebang=True)
+    assert proc.returncode == 0
+    assert "Run the Flashcard standalone web app" in proc.stdout
+
+
+def test_launcher_fails_closed_without_venv(tmp_path: Path) -> None:
+    """When the repository-local venv is missing, the launcher must
+    fail closed with a clear message naming the exact setup command
+    (Repair A). The message must mention ``python3 -m venv .venv`` and
+    ``.venv/bin/pip install -e .``.
+    """
+    # Invoke via /usr/bin/env python3 with PYTHONPATH unset so the
+    # script's venv re-exec sees no .venv.
+    fake_no_venv = tmp_path / "no_venv_repo"
+    fake_no_venv.mkdir()
+    # Copy the launcher script to the empty directory.
+    target_launcher = fake_no_venv / "flashcard"
+    target_launcher.write_bytes(LAUNCHER.read_bytes())
+    target_launcher.chmod(0o755)
+    # Confirm there is no venv next to it.
+    assert not (fake_no_venv / ".venv").exists()
+
+    proc = subprocess.run(
+        [sys.executable, str(target_launcher), "--help"],
+        cwd=str(fake_no_venv),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert proc.returncode != 0
+    assert "repository virtualenv is missing" in proc.stderr
+    assert "python3 -m venv .venv" in proc.stderr
+    assert ".venv/bin/pip install -e ." in proc.stderr
+
+
+def test_launcher_no_host_flag_executable(tmp_path: Path) -> None:
+    """The ``--host`` flag must be rejected: there is no supported CLI
+    path to a non-loopback bind address.
+    """
+    proc = _run_launcher(
+        "--host", "0.0.0.0",
+        "--data-dir", str(tmp_path / "data"),
+        "--no-browser",
+        cwd=tmp_path,
+        timeout=10,
+    )
+    assert proc.returncode != 0
+    # argparse rejects unknown options.
+    assert "unrecognized arguments" in proc.stderr or "unrecognized argument" in proc.stderr
+
+
+def test_launcher_rejects_lan_host(tmp_path: Path) -> None:
+    proc = _run_launcher(
+        "--host", "192.168.1.10",
+        "--data-dir", str(tmp_path / "data"),
+        "--no-browser",
+        cwd=tmp_path,
+        timeout=10,
+    )
+    assert proc.returncode != 0
+    assert "unrecognized argument" in proc.stderr
 
 
 def test_launcher_fails_closed_when_dictionary_missing(tmp_path: Path) -> None:
@@ -156,13 +247,13 @@ def test_launcher_fails_closed_with_exit_code_on_missing_dict(
     assert "dictionary asset is missing" in proc.stderr
 
 
-def test_launcher_install_dictionary_then_fail_server(
+def test_launcher_install_dictionary_lands_at_canonical_filename(
     tmp_path: Path, synthetic_dict: Path
 ) -> None:
-    """End-to-end: ``--install-dictionary`` over a local HTTP URL places
-    the verified dictionary in the user data directory. The server then
-    fails for an unrelated reason (the test harness does not bind a
-    port) but the install path has succeeded.
+    """Integration: ``--install-dictionary`` over a local HTTP URL places
+    the verified dictionary at the canonical slot
+    ``<data-dir>/dictionary/dictionary.sqlite`` so the NEXT normal
+    launch can find it without ``--dict-path``.
     """
     served_bytes = synthetic_dict.read_bytes()
 
@@ -182,10 +273,11 @@ def test_launcher_install_dictionary_then_fail_server(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
+    proc: subprocess.Popen[str] | None = None
     try:
         manifest_payload = {
             "version": "v1",
-            "filename": "dictionary_v1.sqlite",
+            "filename": "dictionary.sqlite",
             "sha256": compute_sha256(synthetic_dict),
             "bytes": synthetic_dict.stat().st_size,
             "classification": "source-backed-stage02",
@@ -196,30 +288,263 @@ def test_launcher_install_dictionary_then_fail_server(
         manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
 
         env = {"HOME": str(tmp_path), "XDG_DATA_HOME": str(tmp_path / "xdg")}
-        # Run the install path: the launcher verifies the manifest,
-        # downloads, verifies SHA + quick_check, and atomically renames.
-        proc = _run_launcher(
-            "--data-dir",
-            str(tmp_path / "data"),
-            "--manifest",
-            str(manifest_path),
-            "--install-dictionary",
-            "--no-browser",
-            cwd=tmp_path,
+        # Run the install path via the real shebang so we exercise the
+        # re-exec into .venv/bin/python as well. The launcher then
+        # starts uvicorn and blocks; we kill the process after the
+        # install lands and check the artifact on disk.
+        proc = subprocess.Popen(
+            [
+                "./flashcard",
+                "--data-dir",
+                str(tmp_path / "data"),
+                "--manifest",
+                str(manifest_path),
+                "--install-dictionary",
+                "--no-browser",
+            ],
+            cwd=str(LAUNCHER.parent),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
             env=env,
-            timeout=10,
         )
-        # The install succeeds, but uvicorn then tries to bind a port
-        # we don't actually claim — the test only cares that the
-        # dictionary landed.
-        installed = (
-            tmp_path / "data" / "dictionary" / "dictionary_v1.sqlite"
+        # Wait for the canonical dictionary file to land.
+        installed = tmp_path / "data" / "dictionary" / "dictionary.sqlite"
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            if installed.is_file():
+                break
+            time.sleep(0.1)
+        assert installed.is_file(), (
+            "dictionary must install at the canonical filename "
+            "<data-dir>/dictionary/dictionary.sqlite"
         )
-        assert installed.is_file()
         assert installed.read_bytes() == served_bytes
-        # The launcher may exit nonzero when uvicorn fails to bind, but
-        # the dictionary must have been installed before that.
-        assert proc.returncode != 0
+        # No leftover temp file under the dictionary directory.
+        leftovers = list((tmp_path / "data" / "dictionary").glob(".*.partial"))
+        assert leftovers == []
     finally:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
         server.shutdown()
         thread.join(timeout=2)
+
+
+def test_launcher_install_then_normal_launch_succeeds_without_dict_path(
+    tmp_path: Path, synthetic_dict: Path
+) -> None:
+    """Integration end-to-end: install via ``--install-dictionary`` then
+    start the launcher WITHOUT ``--dict-path``; the launcher must find
+    the canonical dictionary and serve the decks API at the user-chosen
+    loopback port. Proves the manifest's canonical filename and the
+    launcher's default path agree.
+    """
+    served_bytes = synthetic_dict.read_bytes()
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(served_bytes)))
+            self.send_header("Content-Type", "application/octet-stream")
+            self.end_headers()
+            self.wfile.write(served_bytes)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    _, port = server.server_address  # type: ignore[misc]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    install_proc: subprocess.Popen[str] | None = None
+    serve_proc: subprocess.Popen[str] | None = None
+    try:
+        manifest_payload = {
+            "version": "v1",
+            "filename": "dictionary.sqlite",
+            "sha256": compute_sha256(synthetic_dict),
+            "bytes": synthetic_dict.stat().st_size,
+            "classification": "source-backed-stage02",
+            "attribution": "ATTRIBUTION.md",
+            "download_url": f"http://127.0.0.1:{port}/dict.sqlite",
+        }
+        manifest_path = tmp_path / "dictionary-manifest-v1.json"
+        manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+
+        env = {"HOME": str(tmp_path), "XDG_DATA_HOME": str(tmp_path / "xdg")}
+
+        # Install path via shebang.
+        install_proc = subprocess.Popen(
+            [
+                "./flashcard",
+                "--data-dir",
+                str(tmp_path / "data"),
+                "--manifest",
+                str(manifest_path),
+                "--install-dictionary",
+                "--no-browser",
+            ],
+            cwd=str(LAUNCHER.parent),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        installed = tmp_path / "data" / "dictionary" / "dictionary.sqlite"
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            if installed.is_file():
+                break
+            time.sleep(0.1)
+        assert installed.is_file()
+
+        # Free port and start the launcher without --dict-path.
+        with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+            s.bind(("127.0.0.1", 0))
+            serve_port = int(s.getsockname()[1])
+
+        serve_proc = subprocess.Popen(
+            [
+                "./flashcard",
+                "--data-dir",
+                str(tmp_path / "data"),
+                "--port",
+                str(serve_port),
+                "--no-browser",
+            ],
+            cwd=str(LAUNCHER.parent),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        deadline = time.monotonic() + 30.0
+        ready = False
+        import urllib.request
+
+        while time.monotonic() < deadline:
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{serve_port}/vocab/decks",
+                    headers={
+                        "Host": f"127.0.0.1:{serve_port}",
+                        "X-Flashcards-Request": "1",
+                        "Content-Type": "application/json",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    if resp.status == 200:
+                        ready = True
+                        break
+            except Exception:
+                time.sleep(0.3)
+        assert ready, "launcher did not serve decks API from default path"
+    finally:
+        for proc in (install_proc, serve_proc):
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+def test_launcher_custom_port_same_origin_succeeds_and_hostile_origin_rejected(
+    tmp_path: Path, synthetic_dict: Path
+) -> None:
+    """Custom port: same-origin POST at the bound port is accepted
+    (Repair C) while a non-loopback Origin is still rejected (R12).
+    """
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(("127.0.0.1", 0))
+        serve_port = int(s.getsockname()[1])
+
+    env = {"HOME": str(tmp_path), "XDG_DATA_HOME": str(tmp_path / "xdg")}
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            str(LAUNCHER),
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--dict-path",
+            str(synthetic_dict),
+            "--port",
+            str(serve_port),
+            "--no-browser",
+        ],
+        cwd=str(LAUNCHER.parent),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        # Wait for the server to come up.
+        import urllib.request
+
+        deadline = time.monotonic() + 30.0
+        ready = False
+        while time.monotonic() < deadline:
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{serve_port}/vocab/decks",
+                    headers={
+                        "Host": f"127.0.0.1:{serve_port}",
+                        "X-Flashcards-Request": "1",
+                        "Content-Type": "application/json",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    if resp.status == 200:
+                        ready = True
+                        break
+            except Exception:
+                time.sleep(0.3)
+        assert ready, "launcher did not become ready at custom port"
+
+        # Same-origin POST at the custom port succeeds (Repair C).
+        post_req = urllib.request.Request(
+            f"http://127.0.0.1:{serve_port}/vocab/decks",
+            data=b'{"name":"Custom Port Deck"}',
+            method="POST",
+            headers={
+                "Host": f"127.0.0.1:{serve_port}",
+                "Origin": f"http://127.0.0.1:{serve_port}",
+                "X-Flashcards-Request": "1",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(post_req, timeout=5) as resp:
+            assert resp.status == 201
+
+        # Hostile (non-loopback) Origin is still rejected (R12).
+        import urllib.error
+
+        bad_req = urllib.request.Request(
+            f"http://127.0.0.1:{serve_port}/vocab/decks",
+            headers={
+                "Host": f"127.0.0.1:{serve_port}",
+                "Origin": "http://evil.example.com",
+                "X-Flashcards-Request": "1",
+                "Content-Type": "application/json",
+            },
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(bad_req, timeout=5)
+        assert exc_info.value.code == 403
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)

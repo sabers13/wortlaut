@@ -278,3 +278,35 @@ def test_launcher_rejects_missing_custom_header_on_post(
         assert exc_info.value.code == 403
     finally:
         _stop(proc)
+
+
+def test_launcher_serves_browser_product_at_root(
+    tmp_path: Path, synthetic_dict: Path
+) -> None:
+    """Clean-checkout production frontend (Repair F): the launcher must
+    serve the actual browser application at ``/`` from the tracked
+    production assets under ``app/frontend/``, without requiring any
+    manual ``npm``/Vite step.
+    """
+    port = _free_port()
+    proc = _launch(data_dir=tmp_path / "data", dict_path=synthetic_dict, port=port)
+    try:
+        assert _wait_ready(port)
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/",
+            headers={"Host": f"127.0.0.1:{port}"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 200
+            content_type = str(resp.headers.get("Content-Type", ""))
+            assert "text/html" in content_type
+            body = resp.read().decode("utf-8")
+        assert "<flashcard-app" in body, (
+            f"expected the bundled Vite output, got: {body[:200]!r}"
+        )
+        # The bundled asset path should be present.
+        assert "/assets/" in body
+    finally:
+        _stop(proc)

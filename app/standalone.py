@@ -6,12 +6,11 @@ launcher without any user-supplied path arguments:
 * ``default_data_dir`` — XDG-compliant per-user data directory.
 * ``ensure_user_db`` — Idempotent PART-B schema initialisation that never
   touches an existing user database (AGENTS R9 / dictionary separation).
-* ``verify_dictionary_asset`` — Read-only validation that an existing
-  dictionary file matches the standalone PART-A contract; returns the
-  SHA-256 fingerprint used by the installer manifest.
 * ``build_standalone_app`` — Convenience wrapper that computes XDG-style
   paths, ensures the user database, and constructs the FastAPI app with
-  the loopback-only CORS allowlist required by AGENTS R12.
+  the loopback-only CORS allowlist required by AGENTS R12. Dictionary
+  validation is delegated to ``DictionaryRuntime`` so the ~945 MB asset
+  is streamed through SHA-256 / schema validation exactly once.
 
 Nothing here writes to the dictionary file (AGENTS R9) and nothing here
 adds a runtime LLM dependency (AGENTS R1).
@@ -173,6 +172,12 @@ def verify_dictionary_asset(dict_path: Path | str) -> str:
     validation opens the database read-only via the candidate validator
     so a corrupt PART-A schema or a tampered-with file fails closed
     before the FastAPI app tries to read it.
+
+    Kept for tests and other callers that need an explicit fail-closed
+    check, but the standalone launcher no longer invokes it: full-file
+    validation is delegated to ``DictionaryRuntime`` so the asset is
+    streamed through SHA-256 / schema validation exactly once at
+    activation (Repair G).
     """
     target = Path(dict_path).resolve()
     if not target.is_file():
@@ -182,9 +187,6 @@ def verify_dictionary_asset(dict_path: Path | str) -> str:
     except OSError as exc:
         raise StandaloneError(f"dictionary file cannot be read: {target}") from exc
     digest = hashlib.sha256(raw_bytes).hexdigest()
-    # Imported lazily so this module has no runtime dependency on the
-    # dictionary reader (and no test-only database is constructed when
-    # the caller already knows the SHA matches).
     from app.dictionary import (  # noqa: PLC0415
         DictionaryAssetError,
         validate_candidate_dictionary,
@@ -214,16 +216,21 @@ def build_standalone_app(
     media_dir: Path | str | None = None,
     cache_dir: Path | str | None = None,
     cors_origins: Sequence[str] | None = None,
+    port: int | None = None,
     tts_remote_url: str | None = None,
 ) -> Any:
     """Construct a FastAPI app using the standalone XDG path layout.
 
     The user database is initialised on demand; the dictionary file is
     not modified and not created (the dictionary is a read-only
-    distributable asset, AGENTS R9 / ADR-0001). The CORS allowlist
-    defaults to the loopback endpoints used by the bundled frontend
-    and the standalone launcher, which is the only safe configuration
-    for an unauthenticated deck API (AGENTS R12).
+    distributable asset, AGENTS R9 / ADR-0001). Full-file dictionary
+    validation is delegated to ``DictionaryRuntime`` so the asset is
+    streamed and SHA-256-checked exactly once at activation. The CORS
+    allowlist defaults to the loopback endpoints used by the bundled
+    frontend; when ``port`` is provided, both the ``127.0.0.1`` and
+    ``localhost`` origins are constructed for that port so the bundled
+    browser frontend's same-origin ``Origin`` header is accepted at
+    non-default ports (Repair C).
     """
     paths = resolve_standalone_paths(
         data_dir=data_dir,
@@ -238,9 +245,12 @@ def build_standalone_app(
             "dictionary asset is missing; place the verified dictionary.sqlite at "
             f"{paths.dictionary_path} or pass --dict-path"
         )
-    verify_dictionary_asset(paths.dictionary_path)
     if cors_origins is None:
-        cors_origins = ("http://127.0.0.1:8000", "http://localhost:8000")
+        port_value = 8000 if port is None else int(port)
+        cors_origins = (
+            f"http://127.0.0.1:{port_value}",
+            f"http://localhost:{port_value}",
+        )
     from app.api import create_app  # noqa: PLC0415
 
     return create_app(

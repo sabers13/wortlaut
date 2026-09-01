@@ -30,10 +30,14 @@ in [`WORKFLOW.md`](WORKFLOW.md), [`AGENTS.md`](AGENTS.md), and the
 ## Prerequisites
 
 * Linux or macOS with Python 3.11 or newer.
-* The Python packages declared in `pyproject.toml` (installed by the
-  launcher on first run, see "Install" below).
+* The Python packages declared in `pyproject.toml` (you install them
+  yourself; the launcher does not auto-install, see "Install" below).
 * `git` if you are installing from a clone.
 * A modern browser (any current Chromium, Firefox, or Safari).
+* **No Node.js is required.** The browser product's production assets
+  ship with the repository (under `app/frontend/`); the launcher
+  serves them directly. You never need to run `npm`, Vite, or any
+  JavaScript toolchain yourself.
 
 ## Install
 
@@ -50,16 +54,25 @@ python3 -m venv .venv
 # 3. Install the spaCy German model the resolver depends on
 .venv/bin/python -m spacy download de_core_news_md
 
-# 4. Download the verified dictionary (the manifest is in release/)
-#    This installs into $XDG_DATA_HOME/flashcard/dictionary/ by default.
-./flashcard --install-dictionary
+# 4. Obtain the verified dictionary. Until the production artefact is
+#    published (see "Dictionary publication status" below),
+#    `--install-dictionary` will fail closed. Place a verified
+#    `dictionary.sqlite` at the default slot:
+#       $XDG_DATA_HOME/flashcard/dictionary/dictionary.sqlite
+#    using the SHA-256 / size in `release/dictionary-manifest-v1.json`.
+#    Once the dictionary is published, `./flashcard --install-dictionary`
+#    will fetch and verify it automatically.
 
 # 5. Launch
 ./flashcard
 ```
 
-You only need to run `--install-dictionary` once. Subsequent launches
+You only need to install the dictionary once. Subsequent launches
 reuse the verified dictionary already on disk.
+
+`./flashcard` automatically re-executes itself through the
+repository-local `.venv/bin/python` interpreter, so you do not have to
+`source .venv/bin/activate` first.
 
 ## First launch
 
@@ -100,12 +113,12 @@ self-contained file you can import into Anki.
 
 ## Dictionary verification
 
-Every dictionary download is verified against the
-`release/dictionary-manifest-v1.json` manifest. The installer
+Every dictionary download (or manual placement) is verified against
+the `release/dictionary-manifest-v1.json` manifest. The verifier
 checks:
 
 1. exact byte size;
-2. SHA-256 over the downloaded bytes;
+2. SHA-256 over the bytes;
 3. `PRAGMA quick_check` on the SQLite file;
 4. the full PART-A schema validation reused from the live app.
 
@@ -113,7 +126,24 @@ Any failure aborts the install, deletes the partial file, and never
 overwrites a valid dictionary. The dictionary URL is in the manifest
 and can be updated without code changes; the same installer works
 against any host (GitHub Release, public artifact mirror, local
-file:// URL).
+`file://` URL).
+
+## Dictionary publication status
+
+The standalone release code on this branch is ready. The dictionary
+artefact itself is **not yet published**: `download_url` is `null` in
+`release/dictionary-manifest-v1.json` and `--install-dictionary` will
+fail closed. Until a later orchestrator-authorized publication worker
+fills in the real URL, place a verified `dictionary.sqlite` (matching
+the manifest's pinned SHA-256 / size) at the default slot manually:
+
+```
+$XDG_DATA_HOME/flashcard/dictionary/dictionary.sqlite
+```
+
+`dictionary.sqlite` is the canonical installed filename; it does not
+change between manifest versions — the manifest's `sha256` is the
+durable identity.
 
 ## Updating the dictionary
 
@@ -126,7 +156,7 @@ dictionary release:
    --install-dictionary --data-dir <your data dir>`.
 
 The installer refuses to overwrite a still-valid dictionary; remove
-the old file under `dictionary/` first if you want a forced reinstall.
+the old `dictionary.sqlite` first if you want a forced reinstall.
 
 ## Stopping and restarting
 
@@ -136,6 +166,19 @@ the old file under `dictionary/` first if you want a forced reinstall.
 * **Run in the background**: `./flashcard --no-browser` keeps the
   server up without opening a browser window. Combine with a
   process supervisor of your choice if you want a daemon.
+
+## Custom port
+
+To bind the API to a non-default port:
+
+```bash
+./flashcard --port 8123
+```
+
+The launcher then binds `127.0.0.1:8123`, opens
+`http://127.0.0.1:8123`, and the browser security middleware accepts
+`http://127.0.0.1:8123` (and `http://localhost:8123`) as the same
+origin. Non-loopback hosts and arbitrary origins remain rejected.
 
 ## Export to Anki
 
@@ -155,7 +198,7 @@ a literal newline inside an Anki field).
 ## Privacy and local-only behavior
 
 * The server binds to `127.0.0.1` only — never to a LAN interface
-  (AGENTS R8).
+  (AGENTS R8). The bind address is not user-configurable.
 * The browser-facing API enforces a loopback `Host` check and an
   exact-origin CORS allowlist (AGENTS R12). No LAN or DNS-rebinding
   host can reach the deck API.
@@ -167,10 +210,12 @@ a literal newline inside an Anki field).
 
 | Symptom                                  | Likely cause / fix                                          |
 | ---------------------------------------- | ----------------------------------------------------------- |
-| "dictionary asset is missing"            | Run `./flashcard --install-dictionary` once.                |
-| "dictionary verification failed"        | The file under `dictionary/` does not match the manifest. Remove the file and re-run `--install-dictionary`. |
+| "repository virtualenv is missing"       | Run `python3 -m venv .venv && .venv/bin/pip install -e .` once. |
+| "dictionary asset is missing"            | Place a verified `dictionary.sqlite` at the default slot, or run `./flashcard --install-dictionary` (once the production artefact is published). |
+| "dictionary verification failed"        | The file under `dictionary/` does not match the manifest. Remove the file and re-install it. |
+| "no verified dictionary and the manifest has no download_url" | The production artefact is not yet published. Place `dictionary.sqlite` manually at the default slot. |
 | Browser does not open                    | Use `--no-browser` and visit <http://127.0.0.1:8000> yourself. |
-| Port 8000 already in use                 | Pass `--port 8001` (and update your browser bookmark).      |
+| Port 8000 already in use                 | Pass `--port 8001` (and update your browser bookmark). The same-origin Origin header is accepted at the new port automatically. |
 | `spacy` model not installed              | Run `.venv/bin/python -m spacy download de_core_news_md`.   |
 | Stale deck state after a long offline    | Your data lives in `~/.local/share/flashcard/flashcards.sqlite`; back it up before any manual surgery. |
 

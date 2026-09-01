@@ -220,9 +220,14 @@ owned_paths = [
     "release/dictionary-manifest-v1.json",
     "release/ATTRIBUTION.md",
     "release/README.md",
+    "app/frontend/**",
 ]
 dependencies = ["runtime_api", "dictionary"]
-focused_tests = ["tests/test_standalone.py"]
+focused_tests = [
+    "tests/test_standalone.py",
+    "tests/test_launcher.py",
+    "tests/test_launcher_smoke.py",
+]
 focused_commands = ["python -m app.standalone --help"]
 agents_rules = ["R8", "R9", "R12"]
 adrs = ["0001", "0002"]
