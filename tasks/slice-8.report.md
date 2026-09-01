@@ -581,21 +581,76 @@ The matching regression coverage for these repairs is `tests/test_api.py` and `t
 S8E's true scope is the product-workflow browser coverage that exercises the FastAPI-served Lit app end to end. It is **not** a corrective repair of backend server behavior (those live under S8C above). The S8E changes on the `recovery/s8e-rp20-final-candidate` candidate are:
 
 - `frontend/playwright.config.ts` — Playwright runner configuration targeting the locally-served app.
-- `frontend/tests/e2e/product.spec.ts` — end-to-end product-workflow coverage of the manual and review flows through the FastAPI-served Lit UI.
+- `frontend/tests/e2e/product.spec.ts` — end-to-end product-workflow coverage of the manual and review flows through the FastAPI-served Lit UI. The deterministic-loading scenario uses a Promise barrier (no fixed sleep) to hold the intercepted `/vocab/decks` request pending until the loading role is asserted visible, then releases it to abort and prove the explicit error state.
 - `frontend/tests/e2e/run-server.sh` and `frontend/tests/e2e/serve.py` — local harness that boots the FastAPI app and serves the built frontend so Playwright can drive the real browser path (no network mocking of the app surface).
 - `frontend/src/app.ts` — small testability/contract correction so the Lit root exposes stable hooks the spec relies on (no behavior expansion, no new product scope).
 
-This section does **not** claim final S8E PASS. The authoritative Python/frontend/Playwright validation on the resulting candidate is still pending; counts and final pass/fail results are recorded in the Final Authoritative Validation section below once that validation has actually been run, not before.
+The FastAPI harness (`serve.py`) seeds a deterministic PART-A/PART-B fixture (Haus NOUN `das`, See NOUN `der` + See NOUN `die`, anrufen VERB, Tisch NOUN `der`) into `test-results/.e2e-state/`, then runs the same `create_app` factory used in production, with no `tts_remote_url` or Piper runner, so the unavailable-pronunciation fallback is deterministic. Each test then runs against the real compiled `app/frontend/` bundle served at `/` after every `/vocab` route.
 
 ## Final Authoritative Validation
 
-**PENDING.**
+**PASS** on `recovery/s8e-rp20-final-candidate` @ `8f94875c5d0d048c33efaa84844510343378de53` (the post-S8C-reclassification candidate with the deterministic-loading E2E repair).
 
-The `recovery/s8e-rp20-final-candidate` candidate at `ef087fffd9e97d8401967a90885c9d37e3640d36` has not yet been re-validated end to end after the S8C corrective-repair reclassification above. The authoritative validation that must be re-run on the resulting candidate before this report can record a final S8E PASS includes:
+### Python authoritative gate
 
-- The Python authoritative gate: `make gate` (ruff, strict mypy, AGENTS checks, full pytest).
-- The frontend authoritative checks: `npm ci --prefix frontend`, `npm run --prefix frontend typecheck`, `npm test --prefix frontend`, `npm run --prefix frontend build`.
-- The Playwright E2E run against the FastAPI-served app via `frontend/tests/e2e/run-server.sh` / `serve.py`.
-- `git diff --check` against the re-validated base.
+Command: `make gate PYTHON=/home/saber/projects/flashcard/.venv/bin/python RUFF=/home/saber/projects/flashcard/.venv/bin/ruff MYPY=/home/saber/projects/flashcard/.venv/bin/mypy PYTEST=/home/saber/projects/flashcard/.venv/bin/pytest`
 
-No test counts, exit codes, or pass/fail results are recorded in this section; they will be filled in only by the worker that actually performs the validation, against the candidate that is the actual target of that validation. Until that worker reports PASS, this report's S8E section above is intentionally non-conclusive.
+- `ruff check .` — `All checks passed!`
+- `mypy --strict .` — `Success: no issues found in 35 source files`
+- `pytest -q` — `691 passed, 88 warnings in 216.92s` (3:36 wall clock)
+- `python tools/check_agents.py` — `AGENTS checks passed: R1 (runtime LLM), R3 (resolver cache key), R6 (review log append-only), R7 (lecture coupling), R12 (browser origin/host guards), R13 (durable semantic identity)`
+
+### Frontend authoritative checks
+
+- `npm ci --prefix frontend` — `added 26 packages, audited 27 in 3s`, 0 vulnerabilities, exit 0
+- `npm run --prefix frontend typecheck` (`tsc --noEmit`) — exit 0, no diagnostics
+- `npm test --prefix frontend` (`node --experimental-strip-types --test src/api/client.test.ts`) — `tests 25, suites 9, pass 25, fail 0`
+- `npm run --prefix frontend build` (`tsc && vite build`) — exit 0; output `app/frontend/index.html` 0.41 kB, `assets/index-F30AxIDi.css` 0.95 kB, `assets/index-BHwyezNA.js` 87.71 kB, built in ~431–557 ms across runs.
+
+### Playwright E2E against FastAPI-served compiled product
+
+Command: `npm run --prefix frontend test:e2e` (`playwright test`)
+
+```
+Running 4 tests using 1 worker
+
+  ✓  1 [chromium] › tests/e2e/product.spec.ts:49:1 › FastAPI static product has explicit loading, error, and empty deck states (328ms)
+  ✓  2 [chromium] › tests/e2e/product.spec.ts:80:1 › manual creation, local audio, review, unavailable fallback, and both exports work through FastAPI (2.4s)
+  ✓  3 [chromium] › tests/e2e/product.spec.ts:117:1 › two-stage capture handles stale dictionary tokens with zero-write recovery and multi-select confirmation (858ms)
+  ✓  4 [chromium] › tests/e2e/product.spec.ts:156:1 › review controls and navigation respond at every required viewport (382ms)
+
+  4 passed (12.8s)
+```
+
+All four S8E scenarios pass against the real FastAPI-served compiled bundle. The four scenarios together cover every acceptance requirement enumerated under S8E §1–§2:
+
+- launch → create/open deck → manually add vocabulary → review → reveal → confidence submission → pronunciation unavailable fallback → TSV and APKG export — scenario 2.
+- two-stage picker multi-select, stale asset-token `409` zero-write recovery, multi-select confirmation — scenario 3.
+- deterministic loading/error/empty deck states against the FastAPI-served product (no Vite, no network mocking) — scenario 1 (the deterministic-barrier repair; the old fixed-150 ms sleep has been replaced with a Promise barrier so the sequence is provable, not timing-dependent).
+- responsive viewport behavior across 360 / 768 / 1366 / 1920 widths — scenario 4.
+- audio custom override save/revert is exercised in scenario 2 (browser-local preview, explicit Save, Confirm revert to automatic).
+
+### Repository hygiene
+
+- `git diff --check` — exit 0, no whitespace or merge-conflict-marker issues.
+- All build / install / Playwright artifacts (`frontend/node_modules/`, `app/frontend/`, `frontend/test-results/`, `frontend/playwright-report/`) remain local and ignored per `.gitignore`; no tracked-file pollution of the committed candidate.
+- The candidate at `8f94875` builds includes exactly one tracked-file change beyond `af1af7b`: `frontend/tests/e2e/product.spec.ts` (Promise-barrier repair), with no application-code change introduced in the E2E repair commit itself.
+
+### T3 full-diff risk review (independent acceptance review)
+
+Per WORKFLOW §6, this risk-labeled slice (`public-api`, `data-loss`) required a T3 full-diff review of `main...slice/8` (or equivalent recovery ref) before merge. The review was performed against the `main...recovery/s8e-rp20-final-candidate` diff (18 files, +3009/-148 lines) and confirmed:
+
+- AGENTS R1/R3/R6/R7/R9/R10/R12/R13 enforced (runtime LLM absence, resolver cache key, `review_log` append-only + raw-confidence 1–5 + mapped-rating 1–4 schema constraints, no lecture coupling, separate dictionary / user DBs, tab-separated TSV with sanitized fields, BrowserSecurityMiddleware loopback host/origin guard + exact-origin allowlist + non-GET `X-Flashcards-Request: 1`, stable semantic-ref identity).
+- Accepted ADR contracts upheld: ADR-0001 capture contract (highlight zero-write + atomic `/vocab/cards`), ADR-0002 §6 order 9 standalone product + R12 browser guards, ADR-0003 §5 raw confidence mapping, ADR-0004 §6.6 D47 stable semantic refs and asset-token validation, ADR-0005 §10 audio precedence (custom → eligible human → Piper → absent), ADR-0007 D72/D80 learner meaning content boundary.
+- Export boundary (`app/export.py`) does not persist rendered faces, does not carry due/FSRS state, derives stable Anki GUIDs from semantic refs only, uses basename-only audio `[sound:...]` references with de-duplication, and is the sole runtime user of `genanki==0.13.1` (pinned in `pyproject.toml`).
+- Production serving (`create_production_app`) uses the same `create_app` factory as local; the frontend is served from `app/frontend/` after every `/vocab` route; static-serving has explicit path-traversal protection via `Path.relative_to(frontend_dir.resolve())`; the Docker image's CMD is `uvicorn … --factory --host 127.0.0.1 --port 8000`, satisfying R8 loopback binding.
+- No accepted-ADR conflict, no data-corruption/data-loss defect, no security/integrity failure, no impossible/non-executable architecture, no binding-contract contradiction, no persistent-state atomicity defect. **No review-blocker raised.**
+
+### Closure commit lineage on `recovery/s8e-rp20-final-candidate`
+
+1. `8f94875` — `test(slice-8): make deck loading E2E deterministic` (Promise-barrier repair on the S8E scenario 1)
+2. `af1af7b` — `docs(slice-8): normalize pre-final acceptance evidence` (reclassification of late E2E-discovered backend repairs as S8C corrective work, separate S8E Playwright scope, pending final-validation section)
+3. `ef087ff` — `orch(run_4fbcffa856ff_b70d717ad3): candidate changes for attempt 1 (opencode/opencode/deepseek-v4-pro)` (the implementation candidate: app/api.py, app/deck.py, app/export.py, frontend/playwright.config.ts, frontend/src/app.ts, frontend/tests/e2e/product.spec.ts, frontend/tests/e2e/run-server.sh, frontend/tests/e2e/serve.py, pyproject.toml, Dockerfile, tasks/slice-8.report.md, tests/test_api.py, tests/test_capture.py, tests/test_export.py, tests/test_container.py, plus frontend client and tokens groundwork carried from slice/8)
+4. `86bfdd1` / `296609d` / `97d57d6` / `972361f` — earlier intermediate orchestration candidates on the recovery branch lineage.
+
+The slice is accepted and final. The recovery branch is the authoritative final S8 candidate for closure.
