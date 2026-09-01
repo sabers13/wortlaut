@@ -1,59 +1,189 @@
-# Workflow — Base Set (no Fable)
+# Flashcard
 
-Four files, all of which go into the project root:
+A standalone, offline-first German flashcard application. Everything you
+need runs on your machine; nothing leaves your network.
 
-| File | Role |
-| --- | --- |
-| `README.md` | This file — install + bootstrap. Delete after day 1 if you want. |
-| `WORKFLOW.md` | The rules: roles, routing rubric, escalation ladder, risk labels, ADR two-pass review |
-| `PROMPTS.md` | Every OPEN/CLOSE prompt, paste verbatim |
-| `STATE.template.md` | Copy to `STATE.md` — the single entry point for every session |
+Flashcard is a single-user learning tool. You create decks, capture or
+import vocabulary, study on a confidence-based review schedule, and
+back up your own data. The dictionary is a read-only distributable
+asset; your cards, reviews, and audio are private data you fully own.
 
-This set is for projects with no Fable budget, or small enough that the ADR
-cold-review rule is enough ceiling. The escalation ladder tops out at T3 and
-resolves by orchestrator respecification (WORKFLOW.md §5.3).
+This README is the end-user guide. Developer / governance material is
+in [`WORKFLOW.md`](WORKFLOW.md), [`AGENTS.md`](AGENTS.md), and the
+`docs/adr/` directory.
 
 ---
+
+## What you get
+
+* A complete browser-based flashcard product: navigation, manual
+  vocabulary entry, CSV import, two-stage capture, review with FSRS
+  scheduling, DE/EN learner meanings, Anki (TSV + APKG) export.
+* A read-only German dictionary asset covering ~100k indexed lemmas
+  and ~777k Tatoeba example sentences.
+* A standalone launcher that resolves per-user data paths and brings
+  the app up at <http://127.0.0.1:8000>.
+* Strict local-only operation. The service binds to the loopback
+  interface only; no LAN exposure, no telemetry, no third-party
+  network calls.
+
+## Prerequisites
+
+* Linux or macOS with Python 3.11 or newer.
+* The Python packages declared in `pyproject.toml` (installed by the
+  launcher on first run, see "Install" below).
+* `git` if you are installing from a clone.
+* A modern browser (any current Chromium, Firefox, or Safari).
 
 ## Install
 
-1. Copy `WORKFLOW.md` and `PROMPTS.md` into the project root, names unchanged.
-2. Copy `STATE.template.md` to `STATE.md` in the project root.
-3. Fill `WORKFLOW.md` §0: gate command, paths, and the model table (edit the
-   model table again whenever your subscriptions/tokens change).
-4. If the project has no `AGENTS.md` yet, create one containing only:
+```bash
+# 1. Clone or download the repository
+git clone https://github.com/sabers13/flashcard.git
+cd flashcard
 
-   ```
-   # AGENTS — conventions and prohibitions. Every rule states the defect that caused it.
-   ```
+# 2. Install Python dependencies into a local virtual environment
+python3 -m venv .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -e .
 
----
+# 3. Install the spaCy German model the resolver depends on
+.venv/bin/python -m spacy download de_core_news_md
 
-## Day 1 — bootstrap
+# 4. Download the verified dictionary (the manifest is in release/)
+#    This installs into $XDG_DATA_HOME/flashcard/dictionary/ by default.
+./flashcard --install-dictionary
 
-The chain rule has a cold-start problem: session zero has no previous CLOSE to
-print its OPEN. This is the **only** prompt you ever compose by hand. Open your
-orchestrator (Opus 5 or GPT 5.6 sol — whichever has tokens) with:
-
-```
-Read WORKFLOW.md, AGENTS.md and STATE.md (currently the template).
-
-This is session zero. Task: interview me about this project until you can write
-(1) STATE.md's first real "Next three actions", (2) the initial plan outline, and
-(3) the first brief per WORKFLOW.md §2 with Model/Why/Fallback. Then close per
-PROMPTS.md §Orchestrator CLOSE.
+# 5. Launch
+./flashcard
 ```
 
-From here on, you never compose a prompt again. Every CLOSE prints the next OPEN
-with placeholders filled. If you find yourself writing one by hand, a CLOSE step
-was skipped — go back and run it.
+You only need to run `--install-dictionary` once. Subsequent launches
+reuse the verified dictionary already on disk.
 
----
+## First launch
 
-## Your three permanent jobs
+The first time you start Flashcard:
 
-1. **Courier:** paste printed prompts between surfaces, unedited.
-2. **Ladder integrity:** if a slice took three dispatches but STATE.md shows zero
-   attempts, the orchestrator is absorbing failures — call it out.
-3. **Contradiction sensor:** when two files disagree (an ADR vs a report), file
-   it in `docs/backlog.md` as BLOCKED. Do not resolve it in your head.
+1. The launcher prints the resolved per-user data directory, for
+   example `~/.local/share/flashcard/`.
+2. It creates your private SQLite database (`flashcards.sqlite`) there
+   from the authoritative `reference/schema.sql`.
+3. It opens <http://127.0.0.1:8000> in your browser.
+
+You will land on the empty deck screen. Create a deck, add a card,
+review it, repeat.
+
+## Where data lives
+
+| Concern                | Location                                                    |
+| ---------------------- | ----------------------------------------------------------- |
+| User data directory    | `$XDG_DATA_HOME/flashcard/` (defaults to `~/.local/share/flashcard/`) |
+| Your cards / reviews   | `flashcards.sqlite` inside that directory                   |
+| Custom pronunciation   | `media/` inside that directory                              |
+| Audio cache            | `cache/` inside that directory                              |
+| Dictionary asset       | `dictionary/dictionary.sqlite` inside that directory        |
+
+The dictionary file is a read-only distributable asset. Your private
+files are independent — replacing the dictionary never touches your
+cards, and removing your cards never affects the dictionary.
+
+## Backup
+
+The only user data you own is in `$XDG_DATA_HOME/flashcard/`.
+To back up, copy that directory. To restore, copy it back. There is
+no other database, no remote storage, no cloud.
+
+If you want to move your cards to Anki, use the **Export APKG** and
+**Export Anki TSV** buttons inside the app. They produce a single
+self-contained file you can import into Anki.
+
+## Dictionary verification
+
+Every dictionary download is verified against the
+`release/dictionary-manifest-v1.json` manifest. The installer
+checks:
+
+1. exact byte size;
+2. SHA-256 over the downloaded bytes;
+3. `PRAGMA quick_check` on the SQLite file;
+4. the full PART-A schema validation reused from the live app.
+
+Any failure aborts the install, deletes the partial file, and never
+overwrites a valid dictionary. The dictionary URL is in the manifest
+and can be updated without code changes; the same installer works
+against any host (GitHub Release, public artifact mirror, local
+file:// URL).
+
+## Updating the dictionary
+
+The launcher does not silently upgrade. To install a newer
+dictionary release:
+
+1. Place the new `dictionary-manifest-vN.json` (and optionally
+   `ATTRIBUTION.md` / `LICENSE`) in `release/`.
+2. Run `./flashcard --manifest release/dictionary-manifest-vN.json
+   --install-dictionary --data-dir <your data dir>`.
+
+The installer refuses to overwrite a still-valid dictionary; remove
+the old file under `dictionary/` first if you want a forced reinstall.
+
+## Stopping and restarting
+
+* **Stop**: `Ctrl+C` in the terminal where the launcher is running.
+  The FastAPI server shuts down cleanly.
+* **Restart**: `./flashcard` again. Your state is preserved.
+* **Run in the background**: `./flashcard --no-browser` keeps the
+  server up without opening a browser window. Combine with a
+  process supervisor of your choice if you want a daemon.
+
+## Export to Anki
+
+From any deck, click **Export APKG** (preferred) or **Export Anki
+TSV**. The export contains:
+
+* the German vocabulary front and back (with grammar, IPA, and
+  examples) for every card in the deck;
+* your custom pronunciation audio, attached to the right notes;
+* your user-authored DE/EN meanings.
+
+The export is a real `.apkg` you can drag into Anki; the TSV is the
+tab-separated fallback for any tool that prefers plain text. Both
+sanitise German commas and embedded newlines (the app never emits
+a literal newline inside an Anki field).
+
+## Privacy and local-only behavior
+
+* The server binds to `127.0.0.1` only — never to a LAN interface
+  (AGENTS R8).
+* The browser-facing API enforces a loopback `Host` check and an
+  exact-origin CORS allowlist (AGENTS R12). No LAN or DNS-rebinding
+  host can reach the deck API.
+* No LLM SDK is installed. No telemetry, no analytics, no error
+  reporting. There is no remote service to call.
+* No credentials, API keys, or tokens are stored anywhere.
+
+## Troubleshooting
+
+| Symptom                                  | Likely cause / fix                                          |
+| ---------------------------------------- | ----------------------------------------------------------- |
+| "dictionary asset is missing"            | Run `./flashcard --install-dictionary` once.                |
+| "dictionary verification failed"        | The file under `dictionary/` does not match the manifest. Remove the file and re-run `--install-dictionary`. |
+| Browser does not open                    | Use `--no-browser` and visit <http://127.0.0.1:8000> yourself. |
+| Port 8000 already in use                 | Pass `--port 8001` (and update your browser bookmark).      |
+| `spacy` model not installed              | Run `.venv/bin/python -m spacy download de_core_news_md`.   |
+| Stale deck state after a long offline    | Your data lives in `~/.local/share/flashcard/flashcards.sqlite`; back it up before any manual surgery. |
+
+## Developer / governance material
+
+The repo also serves as a development project with strict governance.
+See:
+
+* [`WORKFLOW.md`](WORKFLOW.md) — slice lifecycle, role split, escalation ladder.
+* [`AGENTS.md`](AGENTS.md) — runtime prohibitions (LLM SDKs, lecture coupling, wildcard CORS) and executable checks.
+* `docs/adr/` — architectural decision records.
+* `tasks/` — slice briefs and accepted reports.
+* `reference/schema.sql` — the authoritative PART-A + PART-B schema.
+
+The `make gate` command runs the authoritative validation: ruff,
+strict mypy, the full pytest suite, and the executable AGENTS checks.

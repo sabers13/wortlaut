@@ -312,9 +312,9 @@ def test_mixed_source_and_frontend_test(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """app/audio.py + frontend/src/api/client.test.ts → exactly
-    audio,frontend_api,runtime_api.
+    audio,frontend_api,runtime_api,standalone.
 
-    audio is a source (closure → runtime_api). client.test.ts is a
+    audio is a source (closure → runtime_api → standalone). client.test.ts is a
     frontend_api focused test (direct, no closure). frontend_shell,
     test:e2e, and frontend build MUST NOT be selected solely because
     of the test path.
@@ -327,11 +327,12 @@ def test_mixed_source_and_frontend_test(
     for line in out.splitlines():
         if line.startswith("MODULES="):
             assert line.strip() == (
-                "MODULES=audio,frontend_api,runtime_api"
+                "MODULES=audio,frontend_api,runtime_api,standalone"
             ), out
-    # audio + runtime_api Python focused tests are present.
+    # audio + runtime_api + standalone Python focused tests are present.
     assert "tests/test_audio.py" in out
     assert "tests/test_api.py" in out
+    assert "tests/test_standalone.py" in out
     # frontend_api focused_commands are present.
     assert "npm test --prefix frontend" in out
     assert "npm run --prefix frontend typecheck" in out

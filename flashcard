@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""Single-command standalone launcher for Flashcard.
+
+Run from the repository root:
+
+    ./flashcard
+
+The launcher resolves per-user data paths (XDG on Linux), ensures the
+user database exists, verifies the read-only dictionary asset is
+present and matches the active manifest, and starts the FastAPI app
+bound to ``127.0.0.1:8000`` so the bundled browser frontend can connect
+without exposing the unauthenticated deck API to the LAN (AGENTS R8 /
+AGENTS R12). The loopback URL is printed on stdout and the system
+browser is opened when possible.
+
+No environment variables are required; advanced overrides are exposed
+as optional flags only. The launcher never modifies or deletes the
+dictionary asset (AGENTS R9).
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import webbrowser
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent
+# Ensure ``app.*`` and ``tools.*`` imports resolve even when the
+# launcher is invoked from a different working directory.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+
+def _log(message: str) -> None:
+    """Write a single line to stdout, flushing immediately.
+
+    The launcher is a long-lived process and its progress messages
+    must reach the operator's terminal even when stdout is a pipe.
+    """
+    sys.stdout.write(message + "\n")
+    sys.stdout.flush()
+
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="flashcard",
+        description=(
+            "Run the Flashcard standalone web app on http://127.0.0.1:8000 ."
+        ),
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="Override the per-user data directory (defaults to XDG_DATA_HOME or "
+        "$HOME/.local/share/flashcard).",
+    )
+    parser.add_argument(
+        "--dict-path",
+        type=Path,
+        default=None,
+        help="Override the path to the read-only dictionary asset.",
+    )
+    parser.add_argument(
+        "--user-db",
+        type=Path,
+        default=None,
+        help="Override the path to the user SQLite database.",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Network interface to bind to. Defaults to the loopback only; "
+        "external interfaces are intentionally not advertised.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="TCP port to bind to (default 8000).",
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open the system browser after the server is ready.",
+    )
+    parser.add_argument(
+        "--skip-dict-verify",
+        action="store_true",
+        help="Skip the dictionary SHA-256 / PART-A verification at startup.",
+    )
+    parser.add_argument(
+        "--install-dictionary",
+        action="store_true",
+        help="Download and verify the dictionary from the release manifest "
+        "before starting the server.",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="Path to the dictionary release manifest (defaults to "
+        "release/dictionary-manifest-v1.json).",
+    )
+    return parser.parse_args(argv)
+
+
+def _maybe_install(
+    install: bool,
+    *,
+    manifest_path: Path,
+    target_dir: Path,
+) -> None:
+    if not install:
+        return
+    from app.dict_install import (  # noqa: PLC0415
+        DictionaryInstallerError,
+        install_dictionary,
+        load_manifest,
+    )
+
+    try:
+        manifest = load_manifest(manifest_path)
+    except DictionaryInstallerError as exc:
+        sys.stderr.write(f"manifest error: {exc}\n")
+        raise SystemExit(2) from exc
+    try:
+        install_dictionary(manifest, target_dir=target_dir)
+    except DictionaryInstallerError as exc:
+        sys.stderr.write(f"dictionary install failed: {exc}\n")
+        raise SystemExit(3) from exc
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(list(argv) if argv is not None else sys.argv[1:])
+
+    from app.standalone import (  # noqa: PLC0415
+        StandaloneError,
+        ensure_user_db,
+        resolve_standalone_paths,
+        verify_dictionary_asset,
+    )
+
+    paths = resolve_standalone_paths(
+        data_dir=args.data_dir,
+        dict_path=args.dict_path,
+        user_db_path=args.user_db,
+    )
+
+    if args.install_dictionary:
+        manifest_path = (
+            args.manifest
+            if args.manifest is not None
+            else (REPO_ROOT / "release" / "dictionary-manifest-v1.json")
+        )
+        _maybe_install(
+            True,
+            manifest_path=manifest_path,
+            target_dir=paths.dictionary_dir,
+        )
+
+    if not paths.dictionary_path.is_file():
+        sys.stderr.write(
+            f"dictionary asset is missing: {paths.dictionary_path}\n"
+            f"  Place a verified dictionary.sqlite at that path, or run\n"
+            f"  with --install-dictionary to fetch it from the release manifest.\n"
+        )
+        return 1
+
+    if not args.skip_dict_verify:
+        try:
+            digest = verify_dictionary_asset(paths.dictionary_path)
+        except StandaloneError as exc:
+            sys.stderr.write(f"dictionary verification failed: {exc}\n")
+            return 4
+        _log(f"dictionary verified sha256={digest}")
+    else:
+        _log("dictionary verification skipped (--skip-dict-verify)")
+
+    ensure_user_db(paths.user_db_path)
+    _log(f"data directory: {paths.data_dir}")
+    _log(f"user database : {paths.user_db_path}")
+    _log(f"dictionary    : {paths.dictionary_path}")
+    _log(f"media cache   : {paths.media_dir}")
+
+    url = f"http://{args.host}:{args.port}"
+    _log(f"  Flashcard is starting at: {url}")
+
+    from app.standalone import build_standalone_app  # noqa: PLC0415
+
+    app = build_standalone_app(
+        data_dir=paths.data_dir,
+        dict_path=paths.dictionary_path,
+        user_db_path=paths.user_db_path,
+        media_dir=paths.media_dir,
+        cache_dir=paths.cache_dir,
+    )
+
+    if not args.no_browser:
+        try:
+            webbrowser.open(url)
+        except Exception:  # pragma: no cover - defensive only
+            pass
+
+    import uvicorn  # noqa: PLC0415
+
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

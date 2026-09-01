@@ -211,3 +211,26 @@ focused_tests = [
 focused_commands = ["make check-modules"]
 agents_rules = []
 adrs = []
+
+[modules.standalone]
+id = "standalone"
+owned_paths = [
+    "app/standalone.py",
+    "flashcard",
+    "release/dictionary-manifest-v1.json",
+    "release/ATTRIBUTION.md",
+    "release/README.md",
+]
+dependencies = ["runtime_api", "dictionary"]
+focused_tests = ["tests/test_standalone.py"]
+focused_commands = ["python -m app.standalone --help"]
+agents_rules = ["R8", "R9", "R12"]
+adrs = ["0001", "0002"]
+
+[modules.dict_install]
+id = "dict_install"
+owned_paths = ["app/dict_install.py"]
+dependencies = ["dictionary"]
+focused_tests = ["tests/test_dict_install.py"]
+agents_rules = ["R9"]
+adrs = ["0001", "0004"]
