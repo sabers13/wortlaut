@@ -185,6 +185,33 @@ def test_highlight_success_and_candidate_resolution(client: TestClient, user_db:
     conn.close()
 
 
+def test_highlight_preserves_multi_gender_candidate_identity(client: TestClient) -> None:
+    """Resolved highlight candidates retain their POS and gender identity."""
+    sent = "Der See ist tief."
+    start = sent.index("See")
+    end = start + len("See")
+
+    resp = client.post(
+        "/vocab/highlight",
+        json={
+            "sentence_text": sent,
+            "selected_span": {"start": start, "end": end},
+            "lesson_label": "Lektion 04",
+        },
+        headers=AUTH_HEADERS,
+    )
+
+    assert resp.status_code == 200
+    candidates = resp.json()["candidates"]
+    assert len(candidates) == 2
+    assert len({candidate["lemma_semantic_ref"] for candidate in candidates}) == 2
+    assert {candidate["gender"] for candidate in candidates} == {"der", "die"}
+    assert {candidate["senses"][0]["gloss"] for candidate in candidates} == {
+        "lake",
+        "sea, ocean",
+    }
+
+
 # ===========================================================================
 # 2. POST /vocab/cards tests
 # ===========================================================================

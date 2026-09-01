@@ -6,22 +6,29 @@ ADR-0007 D80, and AGENTS rules R4, R5, R6, R9, R10, R12, R13, C1, C2.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import sqlite3
-from collections.abc import Mapping, Sequence
+import subprocess
+import tempfile
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, cast
 
 from fastapi import FastAPI, Query, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.types import ASGIApp
 
 from app.audio import (
+    PIPER_PINNED_VOICE,
     CustomAudioError,
+    HumanAudioProvenance,
     MediaValidationError,
+    evaluate_human_audio_policy,
     get_custom_pronunciation,
     revert_custom_pronunciation,
     save_custom_pronunciation,
@@ -44,6 +51,7 @@ from app.deck import (
 )
 from app.dictionary import DictionaryAssetError
 from app.examples import rank_examples
+from app.export import ExportAudio, build_apkg
 from app.render import (
     AudioTrigger,
     CardRenderInput,
@@ -182,7 +190,12 @@ def _materialize_candidate_from_ref(
         lem_rows = cur.fetchall()
         if not lem_rows:
             return None
-        lem = lem_rows[0]
+        lem = next(
+            (row for row in lem_rows if row[3] == ref.pos and row[4] == ref.gender),
+            None,
+        )
+        if lem is None:
+            return None
         lem_id = int(lem[0])
         lem_ref = str(lem[1])
 
@@ -593,6 +606,98 @@ def _get_user_db_conn(app: FastAPI) -> sqlite3.Connection:
     return conn
 
 
+def _export_audio_for_observation(
+    app: FastAPI, observation: Mapping[str, object]
+) -> Mapping[str, ExportAudio]:
+    """Resolve one APKG asset without changing application-owned state.
+
+    Export intentionally omits the optional remote ``/speak`` layer.  It uses
+    the shared D48 resolver for custom, policy-approved redistributable human,
+    and local Piper audio, while passing no cache directory so an export cannot
+    populate or otherwise mutate the disposable automatic-audio cache.
+    """
+    note_id = int(cast(int, observation["note_id"]))
+    lemma_data = cast(Mapping[str, object], observation["lemma"])
+    lemma = str(lemma_data["lemma"])
+
+    exact_human_id: str | None = None
+    human_id_for_observation = getattr(app.state, "human_audio_id_for_observation", None)
+    if callable(human_id_for_observation):
+        candidate_id = human_id_for_observation(observation)
+        if isinstance(candidate_id, str) and candidate_id.strip():
+            exact_human_id = candidate_id.strip()
+
+    configured_human_resolver = getattr(app.state, "human_audio_resolver", None)
+
+    def export_human_resolver(exact_id: str) -> tuple[bytes, HumanAudioProvenance]:
+        if not callable(configured_human_resolver):
+            raise LookupError("no human-audio resolver is configured")
+        raw_bytes, provenance = configured_human_resolver(exact_id)
+        if not (
+            evaluate_human_audio_policy(provenance) and provenance.redistribution_eligible
+        ):
+            raise LookupError("human audio is not eligible for APKG redistribution")
+        return raw_bytes, provenance
+
+    conn = _get_user_db_conn(app)
+    try:
+        result = select_pronunciation_audio(
+            lemma=lemma,
+            note_id=note_id,
+            user_db=conn,
+            media_dir=app.state.media_dir,
+            # Export must not write the automatic-audio cache.
+            cache_dir=None,
+            exact_human_id=exact_human_id,
+            human_resolver=export_human_resolver if exact_human_id is not None else None,
+            # Deliberately no tts_remote_url or remote_speak_client: remote
+            # composition is not part of the APKG export contract.
+            piper_runner=getattr(app.state, "piper_runner", None),
+        )
+    finally:
+        conn.close()
+    if (
+        result.source is None
+        or result.audio_bytes is None
+        or result.format is None
+        or result.sha256 is None
+    ):
+        return {}
+
+    if result.source == "custom" and result.media_filename is not None:
+        filename = result.media_filename
+    else:
+        filename = f"{result.source}-{result.sha256[:16]}.{result.format}"
+    return {
+        result.source: ExportAudio(filename=filename, data=result.audio_bytes, source=result.source)
+    }
+
+
+def _piper_runner_if_available() -> Callable[[str, str], bytes] | None:
+    """Return the image-pinned Piper runner, or ``None`` outside that image."""
+    executable = shutil.which("piper")
+    voice_path = Path(os.environ.get("PIPER_VOICE_PATH", "/opt/piper/de_DE-thorsten-high.onnx"))
+    if executable is None or not voice_path.is_file():
+        return None
+
+    def run_piper(text: str, voice: str) -> bytes:
+        if voice != PIPER_PINNED_VOICE:
+            raise ValueError(f"unexpected Piper voice: {voice}")
+        with tempfile.TemporaryDirectory(prefix="flashcard-piper-") as tmp:
+            output_path = Path(tmp) / "pronunciation.wav"
+            subprocess.run(
+                [executable, "--model", str(voice_path), "--output_file", str(output_path)],
+                input=text.encode("utf-8"),
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+            return output_path.read_bytes()
+
+    return run_piper
+
+
 def create_app(
     dict_path: Path | str,
     user_db_path: Path | str,
@@ -601,6 +706,9 @@ def create_app(
     tts_remote_url: str | None = None,
     media_dir: Path | str | None = None,
     cache_dir: Path | str | None = None,
+    human_audio_id_for_observation: Callable[[Mapping[str, object]], str | None] | None = None,
+    human_audio_resolver: Callable[[str], tuple[bytes, HumanAudioProvenance]] | None = None,
+    piper_runner: Callable[[str, str], bytes] | None = None,
 ) -> FastAPI:
     """Create and configure the standalone FastAPI vocabulary application.
 
@@ -644,6 +752,9 @@ def create_app(
     app.state.tts_remote_url = tts_remote_url
     app.state.media_dir = resolved_media_dir
     app.state.cache_dir = resolved_cache_dir
+    app.state.human_audio_id_for_observation = human_audio_id_for_observation
+    app.state.human_audio_resolver = human_audio_resolver
+    app.state.piper_runner = piper_runner or _piper_runner_if_available()
     app.state.runtime = runtime
 
     app.add_middleware(BrowserSecurityMiddleware, cors_origins=cors_origins_set)
@@ -2279,4 +2390,66 @@ def create_app(
             media_type="text/tab-separated-values; charset=utf-8",
         )
 
+    @app.get("/vocab/export/apkg")
+    def export_apkg_endpoint(deck_id: int = Query(..., ge=1)) -> Response:
+        """Export one existing deck as a real Anki package without app writes."""
+        conn = _get_user_db_conn(app)
+        try:
+            deck_row = conn.execute(
+                "SELECT name FROM deck WHERE id = ?", (deck_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+        if deck_row is None:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"detail": f"Deck {deck_id} not found"},
+            )
+
+        deck_name = str(deck_row["name"])
+        observations = runtime.observe_export_payload(deck_id=deck_id)
+        package_bytes = build_apkg(
+            observations,
+            deck_name=deck_name,
+            render_input_for_observation=_render_input_from_observation,
+            audio_for_observation=lambda observation: _export_audio_for_observation(
+                app, observation
+            ),
+        )
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", deck_name).strip(".-") or "flashcards"
+        return Response(
+            content=package_bytes,
+            media_type="application/apkg",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}.apkg"'},
+        )
+
+    frontend_dir = Path(__file__).with_name("frontend")
+
+    @app.get("/")
+    @app.get("/{frontend_path:path}")
+    def frontend_endpoint(frontend_path: str = "") -> Response:
+        """Serve the generated Vite application after every concrete API route."""
+        candidate = (frontend_dir / frontend_path).resolve()
+        try:
+            candidate.relative_to(frontend_dir.resolve())
+        except ValueError:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND, content={"detail": "Not found"}
+            )
+        if candidate.is_file():
+            return FileResponse(candidate)
+        index = frontend_dir / "index.html"
+        if index.is_file():
+            return FileResponse(index)
+        return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"detail": "Not found"})
+
     return app
+
+
+def create_production_app() -> FastAPI:
+    """Container entry-point factory; production state remains supplied by /data."""
+    return create_app(
+        dict_path="/data/dictionary.sqlite",
+        user_db_path="/data/flashcards.sqlite",
+        cors_origins=("http://127.0.0.1:8000", "http://localhost:8000"),
+    )

@@ -2,10 +2,28 @@ import { LitElement, css, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { createVocabClient } from './api/client.ts';
 import { ApiError } from './api/errors.ts';
-import type { Candidate, CandidateSense, DeckSummary, MeaningLanguage } from './api/types.ts';
+import type { Candidate, CandidateSense, CaptureContext, DeckSummary, MeaningLanguage, NextCardData, RenderedMeaning } from './api/types.ts';
 
 type DeckListStatus = 'loading' | 'ready' | 'error';
 type LookupStatus = 'idle' | 'loading' | 'ready' | 'error';
+type CaptureStatus = 'idle' | 'loading' | 'ready' | 'error';
+type AppView = 'decks' | 'deck' | 'study';
+type StudyStatus = 'idle' | 'loading' | 'ready' | 'empty' | 'error';
+type AudioStatus = 'idle' | 'loading' | 'playing' | 'unavailable';
+type RecordingStatus = 'idle' | 'recording' | 'ready' | 'saving' | 'save-error';
+
+const confidenceLabels = [
+  ['1', 'Not at all'],
+  ['2', 'Barely'],
+  ['3', 'With effort'],
+  ['4', 'Comfortably'],
+  ['5', 'Without doubt'],
+] as const;
+
+interface CaptureCandidateSelection {
+  candidate: Candidate;
+  senseRef: string | null;
+}
 
 const vocabClient = createVocabClient();
 
@@ -19,60 +37,127 @@ const vocabClient = createVocabClient();
 @customElement('flashcard-app')
 export class FlashcardApp extends LitElement {
   static styles = css`
-    :host {
-      display: block;
-      min-height: 100vh;
-      color: var(--color-text-primary, #0f172a);
-      background: var(--color-bg, #f8fafc);
-      font-family: var(--font-sans, sans-serif);
-    }
-
-    .shell { max-width: 960px; margin: 0 auto; padding: var(--space-8, 2rem) var(--space-4, 1rem); }
-    header { display: flex; align-items: end; justify-content: space-between; gap: var(--space-4, 1rem); margin-bottom: var(--space-6, 1.5rem); }
-    h1, h2, p { margin-top: 0; }
-    h1 { margin-bottom: var(--space-1, .25rem); font-size: var(--font-size-3xl, 1.875rem); }
-    h2 { margin-bottom: var(--space-2, .5rem); font-size: var(--font-size-xl, 1.25rem); }
-    .subtitle, .muted { color: var(--color-text-secondary, #475569); }
-    .panel { padding: var(--space-6, 1.5rem); border: 1px solid var(--color-border, #e2e8f0); border-radius: var(--radius-lg, .5rem); background: var(--color-surface, #fff); box-shadow: var(--shadow-sm, 0 1px 2px rgba(0,0,0,.05)); }
-    .toolbar, .deck-heading, .form-row, .actions { display: flex; gap: var(--space-3, .75rem); align-items: center; }
+    :host { display: block; min-height: 100vh; color: var(--fg); background: var(--bg); font-family: var(--font-sans); }
+    .shell { max-width: 1280px; margin: 0 auto; padding: var(--space-48) var(--space-16); }
+    header { display: flex; align-items: end; justify-content: space-between; gap: var(--space-16); margin-bottom: var(--space-32); }
+    h1, h2, h3, p { margin-top: 0; }
+    h1, h2, h3 { font-family: var(--font-display); font-weight: 600; letter-spacing: -.02em; }
+    h1 { margin-bottom: var(--space-4); font-size: clamp(2rem, 5vw, 3.25rem); }
+    h2 { margin-bottom: var(--space-8); font-size: 1.75rem; }
+    .subtitle, .muted, .result, .caption { color: var(--muted); }
+    .caption { font-family: var(--font-mono); font-size: .75rem; letter-spacing: .04em; text-transform: uppercase; }
+    .panel { padding: var(--space-32); border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); box-shadow: var(--shadow-sm); }
+    .toolbar, .deck-heading, .form-row, .actions { display: flex; gap: var(--space-12); align-items: center; }
     .toolbar, .deck-heading { justify-content: space-between; }
-    .form-row { margin: var(--space-5, 1.25rem) 0; align-items: end; }
-    label { display: grid; gap: var(--space-1, .25rem); flex: 1; font-size: var(--font-size-sm, .875rem); font-weight: var(--font-weight-medium, 500); }
-    input, select, textarea { width: 100%; padding: var(--space-2, .5rem) var(--space-3, .75rem); color: inherit; background: var(--color-surface, #fff); border: 1px solid var(--color-border-hover, #cbd5e1); border-radius: var(--radius-sm, .25rem); font: inherit; }
+    .form-row { margin: var(--space-24) 0; align-items: end; }
+    label { display: grid; gap: var(--space-4); flex: 1; font-size: .875rem; font-weight: 600; }
+    input, select, textarea { width: 100%; padding: 10px var(--space-12); color: var(--fg); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-control); font: inherit; }
     textarea { min-height: 8rem; resize: vertical; }
-    button { min-height: 2.5rem; padding: var(--space-2, .5rem) var(--space-4, 1rem); color: var(--color-text-primary, #0f172a); border: 1px solid var(--color-border-hover, #cbd5e1); border-radius: var(--radius-sm, .25rem); background: var(--color-surface, #fff); cursor: pointer; font: inherit; font-weight: var(--font-weight-medium, 500); }
-    button:hover:not(:disabled) { background: var(--color-surface-hover, #f1f5f9); }
-    button:focus-visible, input:focus-visible { outline: 3px solid var(--color-primary-light, #dbeafe); outline-offset: 2px; }
-    button.primary { color: var(--color-text-inverse, #fff); border-color: var(--color-primary, #2563eb); background: var(--color-primary, #2563eb); }
-    button.primary:hover:not(:disabled) { background: var(--color-primary-hover, #1d4ed8); }
-    button.danger { color: var(--color-danger, #dc2626); }
-    button:disabled { cursor: wait; opacity: .6; }
-    .notice { margin-bottom: var(--space-4, 1rem); padding: var(--space-3, .75rem); border-radius: var(--radius-sm, .25rem); }
-    .notice.error { color: #991b1b; background: var(--color-danger-light, #fef2f2); }
-    .notice.success { color: #166534; background: var(--color-success-light, #f0fdf4); }
-    .deck-list { display: grid; gap: var(--space-3, .75rem); padding: 0; margin: var(--space-5, 1.25rem) 0 0; list-style: none; }
-    .deck { display: grid; grid-template-columns: 1fr auto; gap: var(--space-4, 1rem); align-items: center; padding: var(--space-4, 1rem); border: 1px solid var(--color-border, #e2e8f0); border-radius: var(--radius-md, .375rem); }
+    button { min-height: 2.6rem; padding: var(--space-8) var(--space-16); color: var(--fg); border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface); cursor: pointer; font: inherit; font-weight: 600; }
+    button:hover:not(:disabled) { border-color: var(--accent); }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid color-mix(in oklch, var(--accent), white 65%); outline-offset: 2px; }
+    button.primary { color: white; border-color: var(--accent); background: var(--accent); }
+    button.primary:hover:not(:disabled) { filter: brightness(.94); }
+    button.danger { color: var(--danger); }
+    button:disabled { cursor: not-allowed; opacity: .55; }
+    .notice, .capture-state { margin-bottom: var(--space-16); padding: var(--space-12); border: 1px solid var(--border); border-radius: var(--radius-control); }
+    .notice.error, .capture-state.error { color: var(--danger); background: color-mix(in oklch, var(--danger), white 94%); }
+    .notice.success { color: var(--success); background: color-mix(in oklch, var(--success), white 94%); }
+    .capture-state.warning { border-color: var(--warning); background: color-mix(in oklch, var(--warning), white 91%); }
+    .capture-state p { margin-bottom: var(--space-8); }
+    .capture-state p:last-child { margin-bottom: 0; }
+    .deck-list { display: grid; gap: var(--space-12); padding: 0; margin: var(--space-24) 0 0; list-style: none; }
+    .deck { display: grid; grid-template-columns: 1fr auto; gap: var(--space-16); align-items: center; padding: var(--space-16); border: 1px solid var(--border); border-radius: var(--radius-panel); }
     .deck-open { min-height: 0; padding: 0; border: 0; background: transparent; text-align: left; }
     .deck-open:hover:not(:disabled) { background: transparent; text-decoration: underline; }
-    .deck-name { display: block; font-weight: var(--font-weight-semibold, 600); }
-    .deck-stats { display: block; margin-top: var(--space-1, .25rem); color: var(--color-text-secondary, #475569); font-size: var(--font-size-sm, .875rem); }
-    .empty, .loading { padding: var(--space-8, 2rem) 0; text-align: center; color: var(--color-text-secondary, #475569); }
-    .confirm { border-color: var(--color-warning, #d97706); background: var(--color-warning-light, #fffbeb); }
-    .workflow-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: var(--space-5, 1.25rem); margin-top: var(--space-6, 1.5rem); }
-    .workflow { padding-top: var(--space-5, 1.25rem); border-top: 1px solid var(--color-border, #e2e8f0); }
-    .workflow h3 { margin: 0 0 var(--space-2, .5rem); font-size: var(--font-size-lg, 1.125rem); }
-    .workflow form { display: grid; gap: var(--space-3, .75rem); }
-    .choice-list, .candidate-list { display: grid; gap: var(--space-2, .5rem); margin: 0; padding: 0; list-style: none; }
-    .choice { display: flex; align-items: center; gap: var(--space-2, .5rem); font-weight: var(--font-weight-medium, 500); }
-    .choice input { width: auto; }
+    .deck-name { display: block; font-family: var(--font-display); font-size: 1.2rem; font-weight: 600; }
+    .deck-stats { display: block; margin-top: var(--space-4); color: var(--muted); font-family: var(--font-mono); font-size: .75rem; }
+    .empty, .loading { padding: var(--space-48) 0; text-align: center; color: var(--muted); }
+    .confirm { border-color: var(--warning); background: color-mix(in oklch, var(--warning), white 92%); }
+    .workflow-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: var(--space-32); margin-top: var(--space-32); }
+    .workflow { padding-top: var(--space-24); border-top: 1px solid var(--border); }
+    .capture-workflow { grid-column: 1 / -1; }
+    .workflow h3 { margin: 0 0 var(--space-8); font-size: 1.4rem; }
+    .workflow form { display: grid; gap: var(--space-12); }
+    .choice-list, .candidate-list { display: grid; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
+    .choice, .candidate-choice { display: flex; align-items: center; gap: var(--space-8); font-weight: 500; }
+    .choice input, .candidate-choice input { width: auto; }
     .candidate { width: 100%; min-height: 0; text-align: left; }
-    .candidate.selected { border-color: var(--color-primary, #2563eb); background: var(--color-primary-light, #dbeafe); }
-    .candidate small { display: block; margin-top: var(--space-1, .25rem); color: var(--color-text-secondary, #475569); }
-    .selection { margin: 0; padding: var(--space-3, .75rem); border: 1px solid var(--color-border, #e2e8f0); border-radius: var(--radius-sm, .25rem); }
-    .selection legend { padding: 0 var(--space-1, .25rem); font-weight: var(--font-weight-semibold, 600); }
-    .pending { color: var(--color-text-secondary, #475569); background: var(--color-surface-hover, #f1f5f9); }
-    .result { margin: 0; color: var(--color-text-secondary, #475569); font-size: var(--font-size-sm, .875rem); }
-    @media (max-width: 560px) { header, .form-row, .deck-heading { align-items: stretch; flex-direction: column; } .deck { grid-template-columns: 1fr; } }
+    .candidate.selected { border-color: var(--accent); background: color-mix(in oklch, var(--accent), white 94%); }
+    .candidate small { display: block; margin-top: var(--space-4); color: var(--muted); }
+    .selection { margin: 0; padding: var(--space-16); border: 1px solid var(--border); border-radius: var(--radius-panel); }
+    .selection legend { padding: 0 var(--space-4); font-family: var(--font-display); font-weight: 600; }
+    .pending { color: var(--muted); background: var(--bg); }
+    .selection-preview { margin: 0; padding: var(--space-8) var(--space-12); border-left: 3px solid var(--accent); color: var(--muted); }
+    .capture-picker { margin-top: var(--space-24); }
+    .capture-candidate { padding: var(--space-12); border: 1px solid var(--border); border-radius: var(--radius-control); }
+    .capture-candidate.chosen { border-color: var(--accent); }
+    .lemma { font-family: var(--font-display); font-size: 1.25rem; }
+    .sense-choices { display: grid; gap: var(--space-8); margin: var(--space-12) 0 0 var(--space-24); border: 0; padding: 0; }
+    .sense-choices legend { margin-bottom: var(--space-4); color: var(--muted); font-size: .8rem; }
+    .language-chips { display: flex; flex-wrap: wrap; gap: var(--space-8); align-items: center; }
+    .language-chips > p { width: 100%; }
+    .chip.selected { color: white; border-color: var(--accent); background: var(--accent); }
+    .create-actions { flex-wrap: wrap; }
+    .disabled-explanation { margin: 0; color: var(--muted); font-size: .875rem; }
+    .primary-nav, .bottom-nav { display: flex; gap: var(--space-8); }
+    .primary-nav button[aria-current="page"], .bottom-nav button[aria-current="page"] { color: white; border-color: var(--accent); background: var(--accent); }
+    .study { max-width: 760px; margin: 0 auto; }
+    .study-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-16); margin-bottom: var(--space-16); }
+    .study-heading h2 { margin: 0; }
+    .card-stage { min-height: 25rem; display: grid; align-content: center; gap: var(--space-24); padding: clamp(var(--space-24), 7vw, var(--space-72)); border: 1px solid var(--border); border-radius: var(--radius-dialog); background: var(--surface); box-shadow: var(--shadow-sm); }
+    .card-stage:focus { outline: none; }
+    .card-stage:focus-visible { outline: 3px solid color-mix(in oklch, var(--accent), white 65%); outline-offset: 3px; }
+    .card-side { display: grid; gap: var(--space-16); }
+    .front-label, .meaning-label { color: var(--muted); font-family: var(--font-mono); font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; }
+    .study-lemma { margin: 0; font-family: var(--font-display); font-size: clamp(3rem, 10vw, 6rem); font-weight: 600; line-height: .98; letter-spacing: -.045em; overflow-wrap: anywhere; }
+    .study-meta { margin: 0; color: var(--muted); font-family: var(--font-mono); font-size: .82rem; }
+    .reveal-action { justify-self: start; }
+    .answer-rule { border: 0; border-top: 1px solid var(--border); width: 100%; margin: var(--space-8) 0; }
+    .meaning { margin: 0; font-size: 1.25rem; }
+    .example { margin: 0; padding-left: var(--space-16); border-left: 3px solid var(--accent); font-size: 1.05rem; }
+    .example-translation { display: block; margin-top: var(--space-4); color: var(--muted); font-size: .9rem; }
+    .details { border-top: 1px solid var(--border); padding-top: var(--space-16); }
+    .details summary { cursor: pointer; font-weight: 650; }
+    .detail-block { margin-top: var(--space-16); }
+    .detail-block p, .detail-block ul { margin-bottom: 0; }
+    .detail-block ul { padding-left: var(--space-24); }
+    .confidence-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: var(--space-8); }
+    .confidence { min-height: 5rem; display: grid; align-content: center; justify-items: start; gap: var(--space-4); border-top: 4px solid var(--border); text-align: left; }
+    .confidence:nth-child(1) { border-top-color: var(--danger); }
+    .confidence:nth-child(2) { border-top-color: var(--warning); }
+    .confidence:nth-child(3) { border-top-color: oklch(65% .1 95); }
+    .confidence:nth-child(4) { border-top-color: oklch(62% .12 155); }
+    .confidence:nth-child(5) { border-top-color: var(--accent); }
+    .confidence-number { font-family: var(--font-mono); font-size: 1.1rem; }
+    .confidence-text { font-size: .75rem; line-height: 1.15; }
+    .study-state { min-height: 25rem; display: grid; place-content: center; text-align: center; }
+    .study-state h2 { margin-bottom: var(--space-8); }
+    .inline-status { margin: 0; color: var(--muted); }
+    .inline-status.error { color: var(--danger); }
+    .edit-meanings, .pronunciation { padding: var(--space-16); border: 1px solid var(--border); border-radius: var(--radius-panel); background: color-mix(in oklch, var(--bg), white 45%); }
+    .edit-meanings h3, .pronunciation h3 { margin-bottom: var(--space-8); font-size: 1.25rem; }
+    .gloss-row { display: grid; grid-template-columns: 1fr auto auto; gap: var(--space-8); align-items: end; margin-top: var(--space-12); }
+    .audio-actions, .recording-actions { display: flex; flex-wrap: wrap; gap: var(--space-8); }
+    .audio-preview { width: 100%; margin-top: var(--space-12); }
+    .local-take { margin-top: var(--space-12); padding: var(--space-12); border: 1px dashed var(--accent); border-radius: var(--radius-control); }
+    .bottom-nav { display: none; }
+    @media (max-width: 800px) {
+      .shell { padding: var(--space-24) var(--space-16) calc(var(--space-72) + var(--space-24)); }
+      header, .form-row, .deck-heading { align-items: stretch; flex-direction: column; }
+      header { align-items: flex-start; }
+      header > .primary-nav { display: none; }
+      .deck { grid-template-columns: 1fr; }
+      .workflow-grid { grid-template-columns: 1fr; }
+      .card-stage { min-height: 20rem; padding: var(--space-24); }
+      .confidence-grid { grid-template-columns: 1fr; }
+      .confidence { min-height: 3.6rem; grid-template-columns: 2rem 1fr; align-items: center; justify-items: start; }
+      .confidence-text { font-size: .9rem; }
+      .gloss-row { grid-template-columns: 1fr auto; }
+      .gloss-row label { grid-column: 1 / -1; }
+      .bottom-nav { position: fixed; z-index: 10; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 0; padding: var(--space-8) var(--space-16) calc(var(--space-8) + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: color-mix(in oklch, var(--surface), white 12%); box-shadow: 0 -8px 24px oklch(20% .02 240 / 6%); }
+      .bottom-nav button { min-height: 3rem; border: 0; background: transparent; }
+    }
   `;
 
   @state() private decks: DeckSummary[] = [];
@@ -100,11 +185,71 @@ export class FlashcardApp extends LitElement {
   @state() private importFileName = '';
   @state() private isReadingImportFile = false;
   @state() private isImporting = false;
-  @state() private isExporting = false;
+  @state() private exportingFormat: 'apkg' | 'tsv' | null = null;
+  @state() private captureSentence = '';
+  @state() private captureLessonLabel = '';
+  @state() private captureSpanStart = 0;
+  @state() private captureSpanEnd = 0;
+  @state() private captureStatus: CaptureStatus = 'idle';
+  @state() private captureCandidates: Candidate[] = [];
+  @state() private captureAssetToken = '';
+  @state() private captureContext: CaptureContext | null = null;
+  @state() private captureSelections: Record<string, CaptureCandidateSelection> = {};
+  @state() private captureMeaningLanguages: MeaningLanguage[] = ['de', 'en'];
+  @state() private captureUserMeaningDe = '';
+  @state() private captureUserMeaningEn = '';
+  @state() private captureDeckId: number | null = null;
+  @state() private captureError = '';
+  @state() private captureDictionaryChanged = false;
+  @state() private isCapturing = false;
+  @state() private view: AppView = 'decks';
+  @state() private studyDeckId: number | null = null;
+  @state() private studyStatus: StudyStatus = 'idle';
+  @state() private studyCard: NextCardData | null = null;
+  @state() private isRevealed = false;
+  @state() private isReviewing = false;
+  @state() private studyError = '';
+  @state() private moreDetails = false;
+  @state() private glossDrafts: Record<MeaningLanguage, string> = { de: '', en: '' };
+  @state() private glossState = '';
+  @state() private glossError = '';
+  @state() private glossSavingLanguage: MeaningLanguage | null = null;
+  @state() private audioStatus: AudioStatus = 'idle';
+  @state() private audioMessage = '';
+  @state() private recordingStatus: RecordingStatus = 'idle';
+  @state() private recordingBlob: Blob | null = null;
+  @state() private recordingNoteId: number | null = null;
+  @state() private recordingPreviewUrl = '';
+  @state() private recordingError = '';
+  @state() private showRecordingControls = false;
+  @state() private revertConfirmation = false;
+  @state() private hasCustomAudio = false;
+  private focusTarget: 'answer' | 'empty' | null = null;
+  private audioPlayer: HTMLAudioElement | null = null;
+  private mediaRecorder: MediaRecorder | null = null;
+  private recordingChunks: Blob[] = [];
 
   connectedCallback(): void {
     super.connectedCallback();
     void this.loadDecks();
+    window.addEventListener('keydown', this.handleStudyKeydown);
+  }
+
+  disconnectedCallback(): void {
+    window.removeEventListener('keydown', this.handleStudyKeydown);
+    this.stopAudio();
+    this.releaseRecordingPreview();
+    super.disconnectedCallback();
+  }
+
+  updated(): void {
+    if (!this.focusTarget) return;
+    const selector = this.focusTarget === 'answer' ? '[data-study-answer]' : '[data-study-empty]';
+    const target = this.renderRoot.querySelector<HTMLElement>(selector);
+    if (target) {
+      target.focus();
+      this.focusTarget = null;
+    }
   }
 
   /**
@@ -124,6 +269,9 @@ export class FlashcardApp extends LitElement {
       }
       if (this.manualDeckId !== null && !decks.some((deck) => deck.id === this.manualDeckId)) {
         this.manualDeckId = null;
+      }
+      if (this.captureDeckId !== null && !decks.some((deck) => deck.id === this.captureDeckId)) {
+        this.captureDeckId = null;
       }
       this.deckStatus = 'ready';
       return decks;
@@ -161,6 +309,7 @@ export class FlashcardApp extends LitElement {
       }
       this.selectedDeckId = refreshedDeck.id;
       this.manualDeckId = refreshedDeck.id;
+      this.captureDeckId = refreshedDeck.id;
       this.importDeckName = refreshedDeck.name;
       this.successMessage = `Created and opened “${refreshedDeck.name}”.`;
     } catch (error) {
@@ -204,6 +353,289 @@ export class FlashcardApp extends LitElement {
     if (error instanceof ApiError && error.detail) return error.detail;
     if (error instanceof Error && error.message) return error.message;
     return fallback;
+  }
+
+  private openDeck(deck: DeckSummary): void {
+    this.selectedDeckId = deck.id;
+    this.manualDeckId = deck.id;
+    this.captureDeckId = deck.id;
+    this.importDeckName = deck.name;
+    this.view = 'deck';
+    this.successMessage = '';
+  }
+
+  private async openStudy(deckId?: number): Promise<void> {
+    if (this.recordingBlob || this.recordingStatus === 'recording') {
+      this.view = 'study';
+      this.errorMessage = 'Save or discard the local recording before changing study sessions.';
+      return;
+    }
+    this.view = 'study';
+    this.studyDeckId = deckId ?? null;
+    this.studyCard = null;
+    this.isRevealed = false;
+    this.moreDetails = false;
+    this.studyError = '';
+    this.clearPronunciationState();
+    await this.loadStudyCard();
+  }
+
+  private clearPronunciationState(): void {
+    this.stopAudio();
+    this.audioMessage = '';
+    this.audioStatus = 'idle';
+    this.showRecordingControls = false;
+    this.revertConfirmation = false;
+  }
+
+  private async loadStudyCard(): Promise<void> {
+    this.studyStatus = 'loading';
+    this.studyError = '';
+    try {
+      const response = await vocabClient.getNextCard(this.studyDeckId ?? undefined);
+      this.studyCard = response.card;
+      this.isRevealed = false;
+      this.moreDetails = false;
+      this.hasCustomAudio = Boolean(response.card?.front.audio_trigger.token?.startsWith('custom:'));
+      this.glossDrafts = { de: this.userGlossValue(response.card, 'de'), en: this.userGlossValue(response.card, 'en') };
+      this.glossState = '';
+      this.glossError = '';
+      this.studyStatus = response.card ? 'ready' : 'empty';
+      if (!response.card) this.focusTarget = 'empty';
+    } catch (error) {
+      this.studyCard = null;
+      this.studyStatus = 'error';
+      this.studyError = this.messageFor(error, 'The next card could not be loaded.');
+    }
+  }
+
+  private revealCard(): void {
+    if (!this.studyCard || this.isRevealed || this.isReviewing) return;
+    this.isRevealed = true;
+    this.moreDetails = false;
+    this.focusTarget = 'answer';
+  }
+
+  private async submitConfidence(confidence: number): Promise<void> {
+    const card = this.studyCard;
+    if (!card || !this.isRevealed || this.isReviewing) return;
+    if (this.recordingBlob) {
+      this.studyError = 'Save or discard the local recording before continuing to the next card.';
+      return;
+    }
+    this.isReviewing = true;
+    this.studyError = '';
+    try {
+      await vocabClient.reviewCard(card.card_id, confidence);
+      await this.loadStudyCard();
+    } catch (error) {
+      this.studyError = this.messageFor(error, 'Your confidence could not be saved. Try the same rating again.');
+    } finally {
+      this.isReviewing = false;
+    }
+  }
+
+  private readonly handleStudyKeydown = (event: KeyboardEvent): void => {
+    if (this.view !== 'study') return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+    if (event.code === 'Space' && !this.isRevealed) {
+      event.preventDefault();
+      this.revealCard();
+      return;
+    }
+    if (event.key >= '1' && event.key <= '5' && this.isRevealed) {
+      event.preventDefault();
+      void this.submitConfidence(Number(event.key));
+      return;
+    }
+    if (event.key.toLowerCase() === 'r') {
+      event.preventDefault();
+      void this.playPronunciation();
+    }
+  };
+
+  private meaningFor(card: NextCardData | null, language: MeaningLanguage): RenderedMeaning | undefined {
+    return card?.back.meanings.find((meaning) => meaning.language === language);
+  }
+
+  private userGlossValue(card: NextCardData | null, language: MeaningLanguage): string {
+    const meaning = this.meaningFor(card, language);
+    return meaning?.is_user_authored ? meaning.lines.join(' ') : '';
+  }
+
+  private async saveGloss(language: MeaningLanguage): Promise<void> {
+    const card = this.studyCard;
+    const meaningText = this.glossDrafts[language].trim();
+    if (!card || !meaningText) return;
+    this.glossSavingLanguage = language;
+    this.glossError = '';
+    this.glossState = '';
+    try {
+      const result = await vocabClient.setGloss(card.note_id, language, meaningText);
+      this.glossDrafts = { ...this.glossDrafts, [language]: result.meaning_text };
+      this.glossState = `${language === 'de' ? 'German' : 'English'} meaning saved.`;
+      await this.refreshStudyFace(card.card_id);
+    } catch (error) {
+      this.glossError = this.messageFor(error, 'That meaning could not be saved.');
+    } finally {
+      this.glossSavingLanguage = null;
+    }
+  }
+
+  private async deleteGloss(language: MeaningLanguage): Promise<void> {
+    const card = this.studyCard;
+    if (!card) return;
+    this.glossSavingLanguage = language;
+    this.glossError = '';
+    this.glossState = '';
+    try {
+      const result = await vocabClient.deleteGloss(card.note_id, language);
+      if (!result.deleted) throw new Error('The server did not confirm removal.');
+      this.glossDrafts = { ...this.glossDrafts, [language]: '' };
+      this.glossState = `${language === 'de' ? 'German' : 'English'} meaning removed.`;
+      await this.refreshStudyFace(card.card_id);
+    } catch (error) {
+      this.glossError = this.messageFor(error, 'That meaning could not be removed.');
+    } finally {
+      this.glossSavingLanguage = null;
+    }
+  }
+
+  private async refreshStudyFace(cardId: number): Promise<void> {
+    try {
+      const response = await vocabClient.getNextCard(this.studyDeckId ?? undefined);
+      if (response.card?.card_id === cardId) {
+        this.studyCard = response.card;
+        this.hasCustomAudio = Boolean(response.card.front.audio_trigger.token?.startsWith('custom:'));
+      }
+    } catch {
+      // The mutation result is already server-confirmed; leave the visible face usable.
+    }
+  }
+
+  private audioRequestId(card: NextCardData): string | number {
+    return this.hasCustomAudio ? card.note_id : card.front.audio_trigger.lemma;
+  }
+
+  private stopAudio(): void {
+    if (this.audioPlayer) {
+      this.audioPlayer.pause();
+      this.audioPlayer.src = '';
+      this.audioPlayer = null;
+    }
+    if (this.audioStatus === 'playing') this.audioStatus = 'idle';
+  }
+
+  private async playPronunciation(): Promise<void> {
+    const card = this.studyCard;
+    if (!card || !card.front.audio_trigger.available || this.audioStatus === 'loading') return;
+    this.stopAudio();
+    this.audioStatus = 'loading';
+    this.audioMessage = 'Loading pronunciation…';
+    try {
+      const blob = await vocabClient.fetchAudio(this.audioRequestId(card));
+      const url = URL.createObjectURL(blob);
+      const player = new Audio(url);
+      this.audioPlayer = player;
+      player.onended = () => { URL.revokeObjectURL(url); this.audioPlayer = null; this.audioStatus = 'idle'; this.audioMessage = ''; };
+      await player.play();
+      this.audioStatus = 'playing';
+      this.audioMessage = 'Playing pronunciation…';
+    } catch (error) {
+      this.audioStatus = 'unavailable';
+      this.audioMessage = this.messageFor(error, 'Pronunciation is unavailable right now.');
+    }
+  }
+
+  private releaseRecordingPreview(): void {
+    if (this.recordingPreviewUrl) URL.revokeObjectURL(this.recordingPreviewUrl);
+    this.recordingPreviewUrl = '';
+  }
+
+  private setLocalRecording(blob: Blob): void {
+    this.releaseRecordingPreview();
+    this.recordingBlob = blob;
+    this.recordingNoteId = this.studyCard?.note_id ?? null;
+    this.recordingPreviewUrl = URL.createObjectURL(blob);
+    this.recordingStatus = 'ready';
+    this.recordingError = '';
+  }
+
+  private async startRecording(): Promise<void> {
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      this.recordingError = 'Recording is not available in this browser. You can choose an audio file instead.';
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      this.recordingChunks = [];
+      recorder.ondataavailable = (event) => { if (event.data.size) this.recordingChunks.push(event.data); };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((track) => track.stop());
+        this.setLocalRecording(new Blob(this.recordingChunks, { type: recorder.mimeType || 'audio/webm' }));
+      };
+      recorder.start();
+      this.mediaRecorder = recorder;
+      this.recordingStatus = 'recording';
+      this.recordingError = '';
+    } catch (error) {
+      this.recordingError = this.messageFor(error, 'Microphone access was not granted. You can choose an audio file instead.');
+    }
+  }
+
+  private stopRecording(): void {
+    if (this.mediaRecorder?.state === 'recording') this.mediaRecorder.stop();
+    this.mediaRecorder = null;
+  }
+
+  private selectAudioFile(event: Event): void {
+    const file = (event.target as HTMLInputElement).files?.[0];
+    if (file) this.setLocalRecording(file);
+  }
+
+  private discardRecording(): void {
+    this.releaseRecordingPreview();
+    this.recordingBlob = null;
+    this.recordingNoteId = null;
+    this.recordingStatus = 'idle';
+    this.recordingError = '';
+  }
+
+  private async saveRecording(): Promise<void> {
+    const card = this.studyCard;
+    const recording = this.recordingBlob;
+    if (!card || !recording || this.recordingNoteId !== card.note_id) return;
+    this.recordingStatus = 'saving';
+    this.recordingError = '';
+    try {
+      await vocabClient.uploadAudio(card.note_id, recording, recording.type || 'audio/webm');
+      this.discardRecording();
+      this.showRecordingControls = false;
+      this.hasCustomAudio = true;
+      this.audioMessage = 'Custom pronunciation saved.';
+      await this.refreshStudyFace(card.card_id);
+    } catch (error) {
+      this.recordingStatus = 'save-error';
+      this.recordingError = this.messageFor(error, 'The recording was not saved. Your local take is still available.');
+    }
+  }
+
+  private async revertCustomAudio(): Promise<void> {
+    const card = this.studyCard;
+    if (!card) return;
+    this.audioMessage = '';
+    try {
+      const result = await vocabClient.revertAudio(card.note_id);
+      if (!result.reverted) throw new Error('The server did not confirm the change.');
+      this.hasCustomAudio = false;
+      this.revertConfirmation = false;
+      this.audioMessage = 'Automatic pronunciation restored.';
+      await this.refreshStudyFace(card.card_id);
+    } catch (error) {
+      this.audioMessage = this.messageFor(error, 'Automatic pronunciation could not be restored.');
+    }
   }
 
   private selectedDeck(): DeckSummary | undefined {
@@ -252,10 +684,18 @@ export class FlashcardApp extends LitElement {
     this.successMessage = '';
     try {
       const result = await vocabClient.lookup(query);
-      this.lookupCandidates = result.candidates;
+      const candidates = result.candidates.map((candidate) => ({
+        ...candidate,
+        status: candidate.status ?? (candidate.senses?.length ? 'resolved' : 'needs_gloss'),
+        senses: candidate.senses?.map((sense) => ({
+          ...sense,
+          gloss: sense.gloss ?? sense.meanings?.[0]?.text ?? '',
+        })),
+      }));
+      this.lookupCandidates = candidates;
       this.lookupAssetToken = result.asset_token;
       this.lookupStatus = 'ready';
-      const soleCandidate = result.candidates.length === 1 ? result.candidates[0] : undefined;
+      const soleCandidate = candidates.length === 1 ? candidates[0] : undefined;
       if (soleCandidate) this.selectCandidate(soleCandidate);
     } catch (error) {
       this.lookupStatus = 'error';
@@ -340,6 +780,175 @@ export class FlashcardApp extends LitElement {
     }
   }
 
+  private captureKey(candidate: Candidate): string {
+    return `${candidate.lemma_semantic_ref}:${candidate.status}`;
+  }
+
+  private updateCaptureSpan(event: Event): void {
+    const input = event.target as HTMLTextAreaElement;
+    this.captureSpanStart = input.selectionStart ?? 0;
+    this.captureSpanEnd = input.selectionEnd ?? 0;
+  }
+
+  private resetCapturePicker(): void {
+    this.captureCandidates = [];
+    this.captureAssetToken = '';
+    this.captureContext = null;
+    this.captureSelections = {};
+    this.captureDictionaryChanged = false;
+  }
+
+  private async highlightCapture(event?: Event): Promise<void> {
+    event?.preventDefault();
+    const sentenceText = this.captureSentence;
+    const lessonLabel = this.captureLessonLabel.trim();
+    const selectedSpan = { start: this.captureSpanStart, end: this.captureSpanEnd };
+    if (!sentenceText.trim()) {
+      this.captureStatus = 'error';
+      this.captureError = 'Enter the sentence you want this card to remember.';
+      return;
+    }
+    if (selectedSpan.start === selectedSpan.end) {
+      this.captureStatus = 'error';
+      this.captureError = 'Select the German word or phrase in the sentence before finding candidates.';
+      return;
+    }
+    if (!lessonLabel) {
+      this.captureStatus = 'error';
+      this.captureError = 'Add a lesson label so this capture keeps its provenance.';
+      return;
+    }
+
+    this.captureStatus = 'loading';
+    this.captureError = '';
+    this.resetCapturePicker();
+    try {
+      const result = await vocabClient.highlight({
+        sentence_text: sentenceText,
+        selected_span: selectedSpan,
+        lesson_label: lessonLabel,
+      });
+      this.captureCandidates = result.candidates;
+      this.captureAssetToken = result.asset_token;
+      this.captureContext = result.capture_context;
+      this.captureStatus = 'ready';
+      const soleCandidate = result.candidates.length === 1 ? result.candidates[0] : undefined;
+      if (soleCandidate) this.toggleCaptureCandidate(soleCandidate, true);
+    } catch (error) {
+      this.captureStatus = 'error';
+      this.captureError = this.messageFor(error, 'Candidates could not be found.');
+    }
+  }
+
+  private toggleCaptureCandidate(candidate: Candidate, checked: boolean): void {
+    const key = this.captureKey(candidate);
+    const selections = { ...this.captureSelections };
+    if (checked) {
+      selections[key] = {
+        candidate,
+        senseRef: candidate.status === 'resolved' ? candidate.senses?.[0]?.sense_semantic_ref ?? null : null,
+      };
+    } else {
+      delete selections[key];
+    }
+    this.captureSelections = selections;
+  }
+
+  private setCaptureSense(candidate: Candidate, senseRef: string): void {
+    const key = this.captureKey(candidate);
+    const current = this.captureSelections[key];
+    if (!current) return;
+    this.captureSelections = { ...this.captureSelections, [key]: { ...current, senseRef } };
+  }
+
+  private toggleCaptureMeaningLanguage(language: MeaningLanguage): void {
+    const selected = this.captureMeaningLanguages;
+    if (selected.includes(language)) {
+      if (selected.length === 1) return;
+      this.captureMeaningLanguages = selected.filter((item) => item !== language);
+      return;
+    }
+    this.captureMeaningLanguages = [...selected, language];
+  }
+
+  private captureUserMeanings(): Record<string, string> | undefined {
+    const meanings: Record<string, string> = {};
+    if (this.captureUserMeaningDe.trim()) meanings.de = this.captureUserMeaningDe.trim();
+    if (this.captureUserMeaningEn.trim()) meanings.en = this.captureUserMeaningEn.trim();
+    return Object.keys(meanings).length ? meanings : undefined;
+  }
+
+  private async saveCapture(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    const deck = this.decks.find((item) => item.id === this.captureDeckId);
+    const selections = Object.values(this.captureSelections);
+    if (!selections.length) return;
+    if (!deck) {
+      this.captureError = 'Choose a destination deck before creating cards.';
+      return;
+    }
+    if (!this.captureContext || !this.captureAssetToken) {
+      this.captureError = 'Find candidates again before creating cards.';
+      return;
+    }
+    const incomplete = selections.some(({ candidate, senseRef }) => candidate.status === 'resolved' && !senseRef);
+    if (incomplete) {
+      this.captureError = 'Choose a dictionary meaning for every selected candidate.';
+      return;
+    }
+
+    this.isCapturing = true;
+    this.captureError = '';
+    this.captureDictionaryChanged = false;
+    this.successMessage = '';
+    try {
+      const result = await vocabClient.captureCards({
+        asset_token: this.captureAssetToken,
+        deck: { name: deck.name, lesson_label: this.captureContext.lesson_label },
+        capture_context: this.captureContext,
+        selections: selections.map(({ candidate, senseRef }) => ({
+          lemma_semantic_ref: candidate.lemma_semantic_ref,
+          sense_semantic_ref: senseRef,
+          status: candidate.status,
+          component_refs: candidate.component_refs,
+          overrides: {
+            meaning_langs: this.captureMeaningLanguages,
+            user_meanings: this.captureUserMeanings(),
+          },
+        })),
+      });
+      const refreshedDecks = await this.loadDecks();
+      const selectedDeck = refreshedDecks?.find((item) => item.id === result.deck_id);
+      if (!selectedDeck || selectedDeck.id !== deck.id) {
+        this.captureError = 'The server did not confirm the selected destination deck. Cards were not reported as created.';
+        return;
+      }
+      const created = result.notes.filter((note) => note.created).length;
+      const reused = result.notes.length - created;
+      this.selectedDeckId = selectedDeck.id;
+      this.manualDeckId = selectedDeck.id;
+      this.captureDeckId = selectedDeck.id;
+      this.successMessage = `Server confirmed ${created} ${created === 1 ? 'card' : 'cards'} created and ${reused} ${reused === 1 ? 'card' : 'cards'} reused in “${selectedDeck.name}”.`;
+      this.captureStatus = 'idle';
+      this.captureSentence = '';
+      this.captureLessonLabel = '';
+      this.captureSpanStart = 0;
+      this.captureSpanEnd = 0;
+      this.captureUserMeaningDe = '';
+      this.captureUserMeaningEn = '';
+      this.resetCapturePicker();
+    } catch (error) {
+      if (error instanceof ApiError && error.isConflict) {
+        this.captureDictionaryChanged = true;
+        this.captureError = '';
+      } else {
+        this.captureError = this.messageFor(error, 'Cards could not be created.');
+      }
+    } finally {
+      this.isCapturing = false;
+    }
+  }
+
   private async readImportFile(event: Event): Promise<void> {
     const file = (event.target as HTMLInputElement).files?.[0];
     if (!file) return;
@@ -402,7 +1011,7 @@ export class FlashcardApp extends LitElement {
   }
 
   private async exportTsv(deck: DeckSummary): Promise<void> {
-    this.isExporting = true;
+    this.exportingFormat = 'tsv';
     this.errorMessage = '';
     this.successMessage = '';
     try {
@@ -417,7 +1026,27 @@ export class FlashcardApp extends LitElement {
     } catch (error) {
       this.errorMessage = this.messageFor(error, 'TSV export could not be prepared.');
     } finally {
-      this.isExporting = false;
+      this.exportingFormat = null;
+    }
+  }
+
+  private async exportApkg(deck: DeckSummary): Promise<void> {
+    this.exportingFormat = 'apkg';
+    this.errorMessage = '';
+    this.successMessage = '';
+    try {
+      const apkg = await vocabClient.exportApkg(deck.id);
+      const url = URL.createObjectURL(apkg);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${deck.name.replace(/[^a-z0-9._-]+/gi, '-') || 'flashcards'}.apkg`;
+      link.click();
+      URL.revokeObjectURL(url);
+      this.successMessage = `Prepared an APKG export for “${deck.name}”.`;
+    } catch (error) {
+      this.errorMessage = this.messageFor(error, 'APKG export could not be prepared.');
+    } finally {
+      this.exportingFormat = null;
     }
   }
 
@@ -442,7 +1071,7 @@ export class FlashcardApp extends LitElement {
       <ul class="deck-list" aria-label="Your decks">
         ${this.decks.map((deck) => html`
           <li class="deck">
-            <button class="deck-open" @click=${() => { this.selectedDeckId = deck.id; this.manualDeckId = deck.id; this.importDeckName = deck.name; this.successMessage = ''; }} aria-label=${`Open ${deck.name}`}>
+            <button class="deck-open" @click=${() => this.openDeck(deck)} aria-label=${`Open ${deck.name}`}>
               <span class="deck-name">${deck.name}</span>
               <span class="deck-stats">${deck.card_count} ${deck.card_count === 1 ? 'card' : 'cards'} · ${deck.due_count} due · ${deck.mastery_percent}% mastered</span>
             </button>
@@ -559,6 +1188,118 @@ export class FlashcardApp extends LitElement {
     `;
   }
 
+  private renderCaptureCreation(deck: DeckSummary) {
+    const selectedCount = Object.keys(this.captureSelections).length;
+    const captureDeck = this.decks.find((item) => item.id === this.captureDeckId);
+    const selectedText = this.captureSentence.slice(this.captureSpanStart, this.captureSpanEnd);
+    return html`
+      <section class="workflow capture-workflow" aria-labelledby="capture-title">
+        <h3 id="capture-title">Capture from a sentence</h3>
+        <p class="muted">Paste or type a sentence, select its German word or phrase, then choose the cards to create.</p>
+        <form @submit=${this.highlightCapture}>
+          <label>Sentence text
+            <textarea
+              .value=${this.captureSentence}
+              @input=${(event: InputEvent) => { this.captureSentence = (event.target as HTMLTextAreaElement).value; this.updateCaptureSpan(event); this.resetCapturePicker(); this.captureStatus = 'idle'; this.captureError = ''; }}
+              @select=${this.updateCaptureSpan}
+              @keyup=${this.updateCaptureSpan}
+              @click=${this.updateCaptureSpan}
+              ?disabled=${this.captureStatus === 'loading' || this.isCapturing}
+              placeholder="Ich rufe dich morgen an."
+            ></textarea>
+          </label>
+          <p class="selection-preview" aria-live="polite">${selectedText ? html`Selected: <strong>“${selectedText}”</strong>` : 'Select a German word or phrase in the sentence.'}</p>
+          <label>Lesson label
+            <input
+              .value=${this.captureLessonLabel}
+              @input=${(event: InputEvent) => { this.captureLessonLabel = (event.target as HTMLInputElement).value; this.resetCapturePicker(); this.captureStatus = 'idle'; this.captureError = ''; }}
+              ?disabled=${this.captureStatus === 'loading' || this.isCapturing}
+              autocomplete="off"
+              placeholder="Lesson 4 · Telephone calls"
+            />
+          </label>
+          <div class="actions">
+            <button class="primary" type="submit" ?disabled=${this.captureStatus === 'loading' || this.isCapturing}>${this.captureStatus === 'loading' ? 'Finding candidates…' : 'Find candidates'}</button>
+          </div>
+        </form>
+        ${this.captureStatus === 'loading' ? html`<p class="result" role="status">Checking the active dictionary…</p>` : nothing}
+        ${this.captureStatus === 'error' ? html`<div class="capture-state error" role="alert"><p>${this.captureError}</p><button @click=${() => void this.highlightCapture()}>Try again</button></div>` : nothing}
+        ${this.captureStatus === 'ready' && this.captureCandidates.length === 0 ? html`<div class="capture-state"><p>No dictionary candidates were found for “${selectedText}”. Adjust the selected text and try again.</p></div>` : nothing}
+        ${this.captureCandidates.length ? html`
+          <form class="capture-picker" @submit=${this.saveCapture}>
+            <fieldset class="selection">
+              <legend>Choose vocabulary <span class="muted">(select one or more)</span></legend>
+              <p class="result">Each checked German candidate becomes its own card. You can select multiple candidates.</p>
+              <ul class="candidate-list">
+                ${this.captureCandidates.map((candidate) => {
+                  const key = this.captureKey(candidate);
+                  const selection = this.captureSelections[key];
+                  return html`
+                    <li class="capture-candidate ${selection ? 'chosen' : ''}">
+                      <label class="candidate-choice">
+                        <input
+                          type="checkbox"
+                          .checked=${Boolean(selection)}
+                          @change=${(event: Event) => this.toggleCaptureCandidate(candidate, (event.target as HTMLInputElement).checked)}
+                          ?disabled=${this.isCapturing}
+                        />
+                        <span><strong class="lemma">${candidate.lemma}</strong> <span class="caption">${candidate.pos}</span></span>
+                      </label>
+                      ${selection && candidate.status === 'resolved' ? (candidate.senses?.length ? html`
+                        <fieldset class="sense-choices">
+                          <legend>Dictionary meaning for ${candidate.lemma}</legend>
+                          ${candidate.senses.map((sense) => html`
+                            <label class="choice">
+                              <input type="radio" name=${`capture-sense-${key}`} .value=${sense.sense_semantic_ref} .checked=${selection.senseRef === sense.sense_semantic_ref} @change=${() => this.setCaptureSense(candidate, sense.sense_semantic_ref)} ?disabled=${this.isCapturing} />
+                              ${sense.gloss || `Meaning ${sense.ord}`}
+                            </label>
+                          `)}
+                        </fieldset>
+                      ` : html`<p class="result">This entry has no selectable dictionary meaning.</p>`) : nothing}
+                      ${selection && candidate.status === 'derived_compound' ? html`<p class="result">The server will preserve the compound’s dictionary component bindings.</p>` : nothing}
+                    </li>
+                  `;
+                })}
+              </ul>
+            </fieldset>
+            ${this.captureDictionaryChanged ? html`
+              <div class="capture-state warning" role="alert">
+                <p>The dictionary changed while you were choosing cards. Your selections have not been saved.</p>
+                <button type="button" @click=${() => void this.highlightCapture()}>Find fresh candidates</button>
+              </div>
+            ` : nothing}
+            ${this.captureError ? html`<div class="capture-state error" role="alert"><p>${this.captureError}</p></div>` : nothing}
+            <fieldset class="selection language-chips">
+              <legend>Meaning languages</legend>
+              <p class="result">Choose German, English, or both. At least one language stays selected.</p>
+              ${(['de', 'en'] as MeaningLanguage[]).map((language) => html`
+                <button
+                  class="chip ${this.captureMeaningLanguages.includes(language) ? 'selected' : ''}"
+                  type="button"
+                  aria-pressed=${this.captureMeaningLanguages.includes(language) ? 'true' : 'false'}
+                  @click=${() => this.toggleCaptureMeaningLanguage(language)}
+                  ?disabled=${this.isCapturing || (this.captureMeaningLanguages.length === 1 && this.captureMeaningLanguages.includes(language))}
+                >${language === 'de' ? 'German · DE' : 'English · EN'}</button>
+              `)}
+            </fieldset>
+            ${this.captureMeaningLanguages.includes('de') ? html`<label>Your German meaning <span class="muted">(optional)</span><input .value=${this.captureUserMeaningDe} @input=${(event: InputEvent) => { this.captureUserMeaningDe = (event.target as HTMLInputElement).value; }} ?disabled=${this.isCapturing} autocomplete="off" /></label>` : nothing}
+            ${this.captureMeaningLanguages.includes('en') ? html`<label>Your English meaning <span class="muted">(optional)</span><input .value=${this.captureUserMeaningEn} @input=${(event: InputEvent) => { this.captureUserMeaningEn = (event.target as HTMLInputElement).value; }} ?disabled=${this.isCapturing} autocomplete="off" /></label>` : nothing}
+            <label>Destination deck
+              <select .value=${captureDeck ? String(captureDeck.id) : String(deck.id)} @change=${(event: Event) => { const value = (event.target as HTMLSelectElement).value; this.captureDeckId = value ? Number(value) : null; }} ?disabled=${this.isCapturing}>
+                <option value="">Select a deck</option>
+                ${this.decks.map((item) => html`<option value=${item.id}>${item.name}</option>`)}
+              </select>
+            </label>
+            <div class="actions create-actions">
+              <button class="primary" type="submit" ?disabled=${selectedCount === 0 || this.isCapturing || this.captureDictionaryChanged}>${this.isCapturing ? 'Creating cards…' : `Create ${selectedCount || ''} card${selectedCount === 1 ? '' : 's'}`}</button>
+              ${selectedCount === 0 ? html`<p class="disabled-explanation">Select at least one candidate to create cards.</p>` : nothing}
+            </div>
+          </form>
+        ` : nothing}
+      </section>
+    `;
+  }
+
   private renderImportExport(deck: DeckSummary) {
     return html`
       <section class="workflow" aria-labelledby="import-export-title">
@@ -586,9 +1327,14 @@ export class FlashcardApp extends LitElement {
         </form>
         <div class="workflow-grid">
           <div>
+            <h3>APKG export</h3>
+            <p class="muted">Download the selected deck as a ready-to-import Anki package.</p>
+            <button class="primary" @click=${() => void this.exportApkg(deck)} ?disabled=${this.exportingFormat !== null}>${this.exportingFormat === 'apkg' ? 'Preparing APKG…' : `Export “${deck.name}” APKG`}</button>
+          </div>
+          <div>
             <h3>TSV export</h3>
-            <p class="muted">Download the selected deck in the available Anki TSV format.</p>
-            <button @click=${() => void this.exportTsv(deck)} ?disabled=${this.isExporting}>${this.isExporting ? 'Preparing TSV…' : `Export “${deck.name}” TSV`}</button>
+            <p class="muted">Secondary export for the available Anki TSV format.</p>
+            <button @click=${() => void this.exportTsv(deck)} ?disabled=${this.exportingFormat !== null}>${this.exportingFormat === 'tsv' ? 'Preparing TSV…' : `Export “${deck.name}” TSV`}</button>
           </div>
           <div>
             <h3>TSV import</h3>
@@ -600,13 +1346,165 @@ export class FlashcardApp extends LitElement {
             <p class="muted">Pending — this product has no accepted APKG import contract yet.</p>
             <button class="pending" disabled>APKG import pending</button>
           </div>
-          <div>
-            <h3>APKG export</h3>
-            <p class="muted">Pending — this product has no accepted APKG export contract yet.</p>
-            <button class="pending" disabled>APKG export pending</button>
-          </div>
         </div>
       </section>
+    `;
+  }
+
+  private renderPronunciation() {
+    const recordingFailed = this.recordingStatus === 'save-error';
+    return html`
+      <section class="pronunciation" aria-labelledby="pronunciation-title">
+        <h3 id="pronunciation-title">Pronunciation</h3>
+        <div class="audio-actions">
+          <button type="button" @click=${() => void this.playPronunciation()} ?disabled=${this.audioStatus === 'loading'}>
+            ${this.audioStatus === 'loading' ? 'Loading pronunciation…' : this.audioStatus === 'playing' ? 'Playing pronunciation…' : 'Play pronunciation'}
+          </button>
+          <span class="caption">Press R to replay</span>
+        </div>
+        ${this.audioMessage ? html`<p class="inline-status ${this.audioStatus === 'unavailable' ? 'error' : ''}" role=${this.audioStatus === 'unavailable' ? 'alert' : 'status'}>${this.audioMessage}</p>` : nothing}
+        ${this.hasCustomAudio ? html`
+          <div class="audio-actions">
+            <button type="button" @click=${() => { this.showRecordingControls = !this.showRecordingControls; this.revertConfirmation = false; }}>
+              ${this.showRecordingControls ? 'Keep current pronunciation' : 'Replace pronunciation'}
+            </button>
+            ${this.revertConfirmation ? html`
+              <span class="caption">Replace your custom pronunciation with automatic pronunciation?</span>
+              <button class="danger" type="button" @click=${() => void this.revertCustomAudio()}>Confirm revert to automatic</button>
+              <button type="button" @click=${() => { this.revertConfirmation = false; }}>Cancel</button>
+            ` : html`<button class="danger" type="button" @click=${() => { this.revertConfirmation = true; this.showRecordingControls = false; }}>Revert to automatic</button>`}
+          </div>
+        ` : html`<button type="button" @click=${() => { this.showRecordingControls = !this.showRecordingControls; }}>Add your pronunciation</button>`}
+        ${this.showRecordingControls ? html`
+          <div class="local-take">
+            <p class="muted">Record a take or choose an audio file. It stays only in this browser until you save it.</p>
+            ${this.recordingBlob ? html`
+              <p class="inline-status">Local recording ready to preview and save.</p>
+              <audio class="audio-preview" controls src=${this.recordingPreviewUrl}></audio>
+            ` : nothing}
+            ${recordingFailed ? html`
+              <p class="inline-status error" role="alert">${this.recordingError}</p>
+              <div class="recording-actions">
+                <button class="primary" type="button" @click=${() => void this.saveRecording()}>Try again</button>
+                <button class="danger" type="button" @click=${this.discardRecording}>Discard recording</button>
+              </div>
+            ` : html`
+              <div class="recording-actions">
+                ${this.recordingStatus === 'recording'
+                  ? html`<button class="danger" type="button" @click=${this.stopRecording}>Stop recording</button>`
+                  : html`<button type="button" @click=${() => void this.startRecording()} ?disabled=${this.recordingStatus === 'saving'}>Record pronunciation</button>`}
+                <label>Choose audio file
+                  <input type="file" accept="audio/*" @change=${this.selectAudioFile} ?disabled=${this.recordingStatus === 'recording' || this.recordingStatus === 'saving'} />
+                </label>
+                ${this.recordingBlob ? html`
+                  <button class="primary" type="button" @click=${() => void this.saveRecording()} ?disabled=${this.recordingStatus === 'saving'}>${this.recordingStatus === 'saving' ? 'Saving pronunciation…' : 'Save recording'}</button>
+                  <button class="danger" type="button" @click=${this.discardRecording} ?disabled=${this.recordingStatus === 'saving'}>Discard recording</button>
+                ` : nothing}
+              </div>
+              ${this.recordingError ? html`<p class="inline-status error" role="alert">${this.recordingError}</p>` : nothing}
+            `}
+          </div>
+        ` : nothing}
+      </section>
+    `;
+  }
+
+  private renderMeaningEditor(card: NextCardData) {
+    return html`
+      <section class="edit-meanings" aria-labelledby="meaning-edit-title">
+        <h3 id="meaning-edit-title">Your meanings</h3>
+        <p class="muted">Save your wording for either language, or remove an existing personal meaning to return to the card’s available meaning.</p>
+        ${(['de', 'en'] as MeaningLanguage[]).map((language) => {
+          const meaning = this.meaningFor(card, language);
+          const userAuthored = Boolean(meaning?.is_user_authored);
+          const languageName = language === 'de' ? 'German' : 'English';
+          return html`
+            <div class="gloss-row">
+              <label>Your ${languageName} meaning
+                <input
+                  .value=${this.glossDrafts[language]}
+                  @input=${(event: InputEvent) => { this.glossDrafts = { ...this.glossDrafts, [language]: (event.target as HTMLInputElement).value }; }}
+                  ?disabled=${this.glossSavingLanguage === language}
+                  autocomplete="off"
+                />
+              </label>
+              <button type="button" @click=${() => void this.saveGloss(language)} ?disabled=${this.glossSavingLanguage === language || !this.glossDrafts[language].trim()}>
+                ${this.glossSavingLanguage === language ? 'Saving…' : 'Save'}
+              </button>
+              ${userAuthored ? html`<button class="danger" type="button" @click=${() => void this.deleteGloss(language)} ?disabled=${this.glossSavingLanguage === language}>Remove</button>` : nothing}
+            </div>
+          `;
+        })}
+        ${this.glossState ? html`<p class="inline-status" role="status">${this.glossState}</p>` : nothing}
+        ${this.glossError ? html`<p class="inline-status error" role="alert">${this.glossError}</p>` : nothing}
+      </section>
+    `;
+  }
+
+  private renderStudyCard(card: NextCardData) {
+    const deMeaning = this.meaningFor(card, 'de');
+    const enMeaning = this.meaningFor(card, 'en');
+    const primaryExample = card.back.examples[0];
+    const otherExamples = card.back.examples.slice(1);
+    const extraMeaningLines = card.back.meanings.flatMap((meaning) => meaning.lines.slice(1).map((line) => `${meaning.heading}: ${line}`));
+    return html`
+      <div class="card-stage">
+        <div class="card-side">
+          <span class="front-label">German vocabulary</span>
+          <h2 class="study-lemma">${card.front.display_headword}</h2>
+          <p class="study-meta">${card.front.pos}${card.front.ipa ? ` · ${card.front.ipa}` : ''}</p>
+          ${!this.isRevealed ? html`
+            <button class="primary reveal-action" type="button" @click=${this.revealCard}>Reveal answer <span class="caption">Space</span></button>
+          ` : html`
+            <div class="card-side" data-study-answer tabindex="-1">
+              <hr class="answer-rule" />
+              <span class="front-label">Answer</span>
+              <p class="meaning"><span class="meaning-label">German</span><br />${deMeaning?.lines[0] ?? 'No German learner meaning is available.'}</p>
+              ${enMeaning ? html`<p class="meaning"><span class="meaning-label">English</span><br />${enMeaning.lines[0] ?? ''}</p>` : nothing}
+              ${primaryExample ? html`<p class="example">${primaryExample.de}${primaryExample.en ? html`<span class="example-translation">${primaryExample.en}</span>` : nothing}</p>` : nothing}
+              <button type="button" aria-expanded=${this.moreDetails ? 'true' : 'false'} @click=${() => { this.moreDetails = !this.moreDetails; }}>More details</button>
+              ${this.moreDetails ? html`
+                <div class="details">
+                  <div class="detail-block"><span class="meaning-label">Grammar</span><p>${card.back.grammar.lines.join(' · ') || card.back.pos}</p>${card.back.plural ? html`<p>Plural: ${card.back.plural}</p>` : nothing}</div>
+                  ${extraMeaningLines.length ? html`<div class="detail-block"><span class="meaning-label">Extended notes</span><ul>${extraMeaningLines.map((line) => html`<li>${line}</li>`)}</ul></div>` : nothing}
+                  ${otherExamples.length ? html`<div class="detail-block"><span class="meaning-label">Additional examples</span>${otherExamples.map((example) => html`<p class="example">${example.de}${example.en ? html`<span class="example-translation">${example.en}</span>` : nothing}</p>`)}</div>` : nothing}
+                </div>
+              ` : nothing}
+              ${this.renderPronunciation()}
+              ${this.renderMeaningEditor(card)}
+              <div>
+                <p class="front-label">How well did you know it?</p>
+                <div class="confidence-grid">
+                  ${confidenceLabels.map(([number, label]) => html`
+                    <button class="confidence" type="button" ?disabled=${this.isReviewing || Boolean(this.recordingBlob)} @click=${() => void this.submitConfidence(Number(number))}>
+                      <span class="confidence-number">${number}</span><span class="confidence-text">${label}</span>
+                    </button>
+                  `)}
+                </div>
+              </div>
+              ${this.isReviewing ? html`<p class="inline-status" role="status">Saving your confidence…</p>` : nothing}
+              ${this.recordingBlob ? html`<p class="inline-status">Save or discard the local recording before choosing a confidence.</p>` : nothing}
+            </div>
+          `}
+        </div>
+      </div>
+    `;
+  }
+
+  private renderStudy() {
+    const deck = this.decks.find((item) => item.id === this.studyDeckId);
+    return html`
+      <main class="study" aria-labelledby="study-title">
+        <div class="study-heading">
+          <div><p class="caption">Study</p><h2 id="study-title">${deck ? deck.name : 'All due cards'}</h2></div>
+          <button type="button" @click=${() => void this.loadStudyCard()} ?disabled=${this.studyStatus === 'loading'}>${this.studyStatus === 'loading' ? 'Loading…' : 'Refresh'}</button>
+        </div>
+        ${this.studyStatus === 'ready' && this.studyError ? html`<p class="inline-status error" role="alert">${this.studyError}</p>` : nothing}
+        ${this.studyStatus === 'loading' ? html`<div class="card-stage study-state" role="status">Loading the next due card…</div>` : nothing}
+        ${this.studyStatus === 'error' ? html`<div class="card-stage study-state"><div><h2>Could not load a card</h2><p class="inline-status error" role="alert">${this.studyError}</p><button class="primary" type="button" @click=${() => void this.loadStudyCard()}>Try again</button></div></div>` : nothing}
+        ${this.studyStatus === 'empty' ? html`<div class="card-stage study-state" data-study-empty tabindex="-1"><div><h2>Nothing due right now</h2><p class="muted">Your next due card will appear here when the server has one ready.</p><button type="button" @click=${() => void this.loadStudyCard()}>Check again</button></div></div>` : nothing}
+        ${this.studyStatus === 'ready' && this.studyCard ? this.renderStudyCard(this.studyCard) : nothing}
+      </main>
     `;
   }
 
@@ -618,10 +1516,11 @@ export class FlashcardApp extends LitElement {
             <h2 id="deck-title">${deck.name}</h2>
             <p class="muted">${deck.card_count} ${deck.card_count === 1 ? 'card' : 'cards'} · ${deck.due_count} due · ${deck.mastery_percent}% mastered</p>
           </div>
-          <button @click=${() => { this.selectedDeckId = null; }}>All decks</button>
+          <div class="actions"><button class="primary" @click=${() => void this.openStudy(deck.id)}>Study this deck</button><button @click=${() => { this.selectedDeckId = null; this.view = 'decks'; }}>All decks</button></div>
         </div>
         <p>Card data and review scheduling remain on the server.</p>
         <div class="workflow-grid">
+          ${this.renderCaptureCreation(deck)}
           ${this.renderManualCreation()}
           ${this.renderImportExport(deck)}
         </div>
@@ -639,10 +1538,14 @@ export class FlashcardApp extends LitElement {
             <h1>Flashcards</h1>
             <div class="subtitle">German vocabulary</div>
           </div>
-          <button @click=${this.loadDecks} ?disabled=${this.deckStatus === 'loading'}>${this.deckStatus === 'loading' ? 'Refreshing…' : 'Refresh decks'}</button>
+          <nav class="primary-nav" aria-label="Main navigation">
+            <button type="button" aria-current=${this.view === 'study' ? 'false' : 'page'} @click=${() => { this.view = 'decks'; this.selectedDeckId = null; }}>Decks</button>
+            <button type="button" aria-current=${this.view === 'study' ? 'page' : 'false'} @click=${() => void this.openStudy()}>Study due</button>
+            <button type="button" @click=${this.loadDecks} ?disabled=${this.deckStatus === 'loading'}>${this.deckStatus === 'loading' ? 'Refreshing…' : 'Refresh decks'}</button>
+          </nav>
         </header>
         ${this.renderNotices()}
-        ${showDeckList ? html`
+        ${this.view === 'study' ? this.renderStudy() : showDeckList ? html`
           <main class="panel">
             <div class="toolbar"><h2>Your decks</h2><span class="muted" aria-live="polite">${this.deckStatus === 'ready' ? 'Server-synced' : ''}</span></div>
             <form class="form-row" @submit=${this.createDeck}>
@@ -655,6 +1558,10 @@ export class FlashcardApp extends LitElement {
           </main>
         ` : this.renderDeckDetail(selectedDeck)}
       </div>
+      <nav class="bottom-nav" aria-label="Main navigation">
+        <button type="button" aria-current=${this.view === 'study' ? 'false' : 'page'} @click=${() => { this.view = 'decks'; this.selectedDeckId = null; }}>Decks</button>
+        <button type="button" aria-current=${this.view === 'study' ? 'page' : 'false'} @click=${() => void this.openStudy()}>Study due</button>
+      </nav>
     `;
   }
 }
