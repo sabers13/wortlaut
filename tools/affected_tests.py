@@ -6,10 +6,6 @@ unmapped paths, ambiguous ownership, malformed metadata, missing focused
 tests, or invalid dependency graphs force a BROAD/FAIL-CLOSED
 recommendation; verification is never silently omitted.
 
-Direct-owner semantics only: each changed path resolves to exactly one
-directly owning module; focused tests/commands are the union of those
-direct modules only. No automatic reverse-dependency expansion.
-
 This is iteration tooling only; the authoritative `make gate` is unchanged
 (WORKFLOW.md §16.4).
 """
@@ -245,6 +241,37 @@ def _find_owning_module(
     return best_modules[0], None
 
 
+def _build_reverse_graph(
+    modules: dict[str, dict[str, object]],
+) -> dict[str, list[str]]:
+    reverse: dict[str, list[str]] = {mid: [] for mid in modules}
+    for mid, mod in modules.items():
+        deps = mod.get("dependencies", [])
+        if not isinstance(deps, list):
+            continue
+        for dep in deps:
+            if isinstance(dep, str) and dep in reverse:
+                reverse[dep].append(mid)
+    for k in reverse:
+        reverse[k] = sorted(set(reverse[k]))
+    return reverse
+
+
+def _reverse_closure(
+    direct: set[str],
+    reverse_graph: dict[str, list[str]],
+) -> set[str]:
+    affected: set[str] = set(direct)
+    stack: list[str] = sorted(direct)
+    while stack:
+        cur = stack.pop()
+        for dependent in reverse_graph.get(cur, []):
+            if dependent not in affected:
+                affected.add(dependent)
+                stack.append(dependent)
+    return affected
+
+
 def _get_git_changed(
     repo_root: Path, base: str, head: str
 ) -> tuple[list[str] | None, str | None]:
@@ -323,8 +350,8 @@ def _resolve_emit(
         assert owner is not None
         direct.add(owner)
 
-    # Direct-owner only: no reverse-dependency closure.
-    affected = direct
+    reverse = _build_reverse_graph(modules)
+    affected = _reverse_closure(direct, reverse)
 
     py_tests: set[str] = set()
     frontend_tests: set[str] = set()
@@ -371,7 +398,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Resolve changed paths to focused pytest/frontend commands "
-            "via MODULES.toml direct-owner mapping only."
+            "via MODULES.toml + reverse-dependency closure."
         ),
     )
     parser.add_argument(

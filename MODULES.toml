@@ -12,12 +12,9 @@
 #                           inventory roots (app, tools, frontend/src,
 #                           reference) MUST resolve to exactly one module.
 #   dependencies    list    module ids this module directly depends on
-#                           (imports/uses). Architecture/context metadata
-#                           only; the iteration-time resolver
-#                           tools/affected_tests.py does NOT automatically
-#                           walk reverse dependency closure — it resolves
-#                           the directly owning module only (see
-#                           docs/agent-efficiency-audit.md Option C).
+#                           (imports/uses). The resolver walks the reverse
+#                           closure transitively: changing a dependency
+#                           re-triggers this module's focused tests.
 #   focused_tests   list    pytest-style test paths (forward-slash, relative
 #                           to repo root). May be shared across modules.
 #   focused_commands list  optional non-pytest focused commands (npm
