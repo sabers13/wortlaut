@@ -47,13 +47,28 @@ async function openStudy(page: import('@playwright/test').Page): Promise<void> {
 }
 
 test('FastAPI static product has explicit loading, error, and empty deck states', async ({ page }) => {
+  // Deterministic loading/error synchronization. We hold the intercepted
+  // /vocab/decks request in a pending state behind a Promise barrier so the
+  // sequence is provable rather than dependent on timing:
+  //   1. request begins (interception matched);
+  //   2. request remains pending (barrier unreleased);
+  //   3. visible role="status" contains "Loading decks…";
+  //   4. barrier released → route aborts → product shows error state;
+  //   5. interception removed, reload → product shows empty-deck state.
+  let releaseInterceptedRequest: () => void = () => {};
+  const interceptedRequestBarrier = new Promise<void>((resolve) => {
+    releaseInterceptedRequest = resolve;
+  });
+
   await page.route('**/vocab/decks', async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await interceptedRequestBarrier;
     await route.abort();
   });
+
   const documentResponse = await page.goto('/');
   expect(documentResponse?.headers()['content-type']).toContain('text/html');
   await expect(page.getByRole('status')).toContainText('Loading decks');
+  releaseInterceptedRequest();
   await expect(page.getByText('We could not reach your deck list.')).toBeVisible();
   await page.unroute('**/vocab/decks');
   await page.reload();
