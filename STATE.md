@@ -43,10 +43,66 @@ Updated only at session CLOSE from repository/gate evidence.
   server errors (transport, not content); owner directive made terra the last
   reviewer of each cycle.
 
+* **slice-8 is ACCEPTED, MERGED AND CLOSED.**
+  Standalone browser product on `main`: ADR-0002 §6 order 9 closure on the
+  accepted Slice-7 runtime. S8A repaired the executable smoke baseline,
+  removed `reference` tool exclusions, and implemented the stateless
+  two-stage capture endpoints (`POST /vocab/highlight`,
+  `POST /vocab/cards`), CSV word-list import, and the pure deterministic
+  example ranking engine (`app/examples.py`); S8B established the locked
+  Lit/Vite/TypeScript/Playwright frontend source tree with CSS design tokens,
+  the root `<flashcard-app>` Lit custom element, the typed `/vocab` fetch
+  client (R12 header enforcement + ADR-0004 D47 typed picker/active token
+  extraction), and the Vite build that emits the generated `app/frontend/`
+  bundle; S8C turned the foundation into the usable standalone product UI
+  (navigable deck shell, manual/capture/CSV import, server-authoritative
+  refresh-confirm-create/delete, review surface with five confidence
+  buttons 1–5 + keyboard contract, DE/EN meaning persistence,
+  pronunciation lifecycle + browser-local preview + explicit Save/Revert),
+  and added the late E2E-discovered S8C corrective repairs (cards/next
+  filters to actually-due cards via `c.due_at <= ?`; the highlight
+  materializer preserves multi-gender candidates by selecting the lemma row
+  matching the ref's `pos`+`gender`; associated regression coverage in
+  `tests/test_api.py` and `tests/test_capture.py`); S8D added the isolated
+  APKG export boundary (`app/export.py`, genanki==0.13.1, stable semantic
+  GUIDs, basename-only `[sound:...]` references, audio precedence custom →
+  eligible human → Piper → absent, no second scheduler, no persisted
+  rendered faces), deck-scoped `GET /vocab/export/apkg`, static Vite
+  serving at `/` after every `/vocab` route with explicit path-traversal
+  protection, multi-stage Docker image with frontend build stage, and
+  `uvicorn … --factory --host 127.0.0.1 --port 8000`; S8E added the
+  authoritative Playwright E2E coverage against the actual FastAPI-served
+  compiled product (`frontend/tests/e2e/product.spec.ts` with deterministic
+  Promise-barrier loading/error/empty state, manual creation + local audio
+  + review + unavailable fallback + TSV and APKG export, two-stage capture
+  with stale asset-token zero-write recovery, and responsive viewport
+  behaviour for 360/768/1366/1920 widths). Recovery branch
+  `recovery/s8e-rp20-final-candidate` recorded the closure lineage:
+  `ef087ff` (final implementation candidate), `af1af7b` (pre-final
+  acceptance evidence reclassification of S8C late repairs, separate S8E
+  Playwright scope, pending final-validation section), `8f94875` (Promise-
+  barrier repair replacing the fixed-150 ms sleep in the deterministic
+  loading-state E2E scenario, no product-code change), `a01ab3c`
+  (final-authoritative-validation evidence + T3 full-diff review PASS,
+  recorded under section `## Final Authoritative Validation` in the report).
+  Slice-8 closure lineage on canonical branches: `fb5031b` (slice/8 merge
+  of recovery with `-X theirs` to favor the accepted recovery content on
+  the two `frontend/src/app.ts` / `tasks/slice-8.report.md` conflicts whose
+  slice/8 side was the abandoned intermediate work), `ac2b4d6` (main merge
+  of slice/8 with `--no-ff`). Acceptance gate at the validation starting
+  candidate `8f94875`: 691 pytest pass, ruff clean, mypy --strict clean on
+  35 source files, AGENTS R1/R3/R6/R7/R12/R13 PASS, npm ci 26 packages
+  clean, `tsc --noEmit` clean, 25 frontend unit tests pass, vite build
+  clean (~88 kB JS bundle), 4/4 Playwright scenarios pass against the real
+  FastAPI-served compiled product (12.8 s wall clock).
+
 ## Gate
 
 * Fresh gate on slice/7 @ `3e6898b`: PASS — ruff clean, mypy strict,
   667 tests, AGENTS R1/R3/R6/R7/R12/R13.
+* Fresh gate on slice/8 @ `8f94875` (validation starting candidate):
+  PASS — ruff clean, mypy --strict clean on 35 source files,
+  691 pytest pass (216.92 s), AGENTS R1/R3/R6/R7/R12/R13.
 * Final main gate after closure commits: see `handoff/main-gate.txt`.
 
 ## Escalation status
@@ -56,10 +112,20 @@ Updated only at session CLOSE from repository/gate evidence.
   re-dispatch, one final convergence fix) and the full-diff review lineage
   (one bounded repair plus one final mechanical repair inside the
   three-review cap).
+* Slice-8 consumed its recovery lineage as follows: one orchestrator
+  recovery attempt (the `recovery/s8e-rp20-final-candidate` branch from
+  `8f94875`), the deterministic-loading E2E repair commit `8f94875` on top
+  of the pre-existing evidence-reorganisation commit `af1af7b`, and a
+  single T3 full-diff risk review of `main...recovery/s8e-rp20-final-candidate`
+  that found no blocker. No §5 escalation tier was triggered; the recovery
+  branch's two follow-on commits (`8f94875` repair, `a01ab3c` final
+  evidence) live within the same closure lineage, not a fresh
+  implementation dispatch.
 
 ## Sessions since last audit
 
-* 1 (slice-7 closure session; counter incremented exactly once at close)
+* 2 (slice-7 closure session; slice-8 closure session. Counter incremented
+  exactly once at each session close.)
 
 ## Blocked
 
@@ -70,10 +136,13 @@ Updated only at session CLOSE from repository/gate evidence.
 
 ## Next three actions
 
-1. Fresh Slice-8 orchestrator: S8A → S8B → S8C → S8D → S8E → mandatory final
-   full-diff review → closure. Slice 8 is not started.
-2. Route Slice-8 workers and reviewers through Gemini/GPT entries permitted by
-   `/home/saber/.config/orchestrator-v2/routing.json`; do not use stale forward
-   routes. No lecture integration yet.
-3. Only after Slice-8 closure: read-only donor inspection, then the separately
-   gated lecture-app composition/integration work in slice-9.
+1. Fresh Slice-9 orchestrator: lecture-app Phase-4 decomposition; ADR-0002
+   donor-evidence file `tasks/adr-0002-donor-notes.md`; supervised compose-
+   level integration per ADR-0002 §7. Slice 9 is not started.
+2. Read-only donor inspection of `~/projects/german app` and
+   `~/projects/flashcard app` per WORKFLOW §12 before any slice-9 code
+   moves; donor-specific machinery (FABLE/orchestrator governance,
+   content-boundary checks scoped to its rules, web persistence layer)
+   remains excluded by default.
+3. After slice-9 closure: audit trigger re-evaluation per `Sessions since
+   last audit` ≥ 10 or phase-boundary conditions, whichever arrives first.
