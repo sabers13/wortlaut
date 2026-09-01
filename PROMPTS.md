@@ -189,7 +189,7 @@ commands, gate command, and executable fail conditions. "Check the branch" is
 not a procedure.
 
 ```
-Read AGENTS.md, then tasks/<ID>.md. Execute it on branch slice/<ID>.
+Read global binding governance required by the current workflow (AGENTS.md and WORKFLOW.md as required), then tasks/<ID>.md including its `Required reading:` field. Load exactly the files listed in `Required reading:` (the minimal committed file set per MODULES.toml closure) plus global invariants; use MODULES.toml to identify dependency-neighbor context and focused tests when needed. Do not routinely crawl unrelated source/history. Execute it on branch slice/<ID>.
 
 Terminal procedure (run exactly; nonzero exit on any check = STOP and report):
   git status --porcelain          # must be empty before starting
@@ -198,10 +198,10 @@ Terminal procedure (run exactly; nonzero exit on any check = STOP and report):
   <gate command>                  # STOP on nonzero exit; record numbers
 
 Obey WORKFLOW.md §15: launch long-running commands (gate, builds, tests) once using the longest practical blocking timeout; do not poll, narrate, or check status while healthy and running. Resume reasoning only on completion, failure, genuine timeout, or a decision point. Preserve final stdout/stderr.
-Obey WORKFLOW.md §16: during implementation/repair use focused validation (tests for the changed module/subsystem, nearby regression tests, targeted lint/type checks); run the full gate once, when the candidate is believed final — not after every edit. Any code change after the last successful full validation invalidates it; run one fresh full validation before reporting final evidence.
+Obey WORKFLOW.md §16: during implementation/repair use focused validation (tests for the changed module/subsystem, nearby regression tests, targeted lint/type checks — use MODULES.toml / tools/affected_tests.py to identify them); run the full gate once, when the candidate is believed final — not after every edit. Any code change after the last successful full validation invalidates it; run one fresh full validation before reporting final evidence.
 
 The Allowlist block is exhaustive — anything changed outside it is a scope
-violation. Stop and report on any Stop-and-ask condition rather than resolving
+violation. The `Required reading:` list narrows task-specific source/ADR/test context, not global invariants; do not broaden context merely "to be safe" when the brief and MODULES.toml give a dependency-closed set. You MAY inspect outside the declared reading list when concrete evidence reveals an ambiguity or dependency; such expansion must be targeted, not whole-repository rediscovery. Stop and report on any Stop-and-ask condition rather than resolving
 it yourself. You have no context beyond these files by design; if the brief is
 insufficient to execute, that is a Stop-and-ask condition, not a license to
 guess.
@@ -400,11 +400,11 @@ Open a T3 session:
 ```
 Read AGENTS.md, tasks/<ID>.md, tasks/<ID>.report.md, then the FULL diff of
 branch slice/<ID> against main (directly from the pushed GitHub branch/compare,
-or via local git diff if offline).
+or via local git diff if offline). MODULES.toml and any generated context pack are an INDEX ONLY and must never substitute for evidence.
 
 This slice is risk-labeled <label>. The gate is green; you are here for what
 the gate cannot see: idempotency, partial-failure states, rollback safety, and
-divergence between what the report claims and what the diff does.
+divergence between what the report claims and what the diff does. The reviewer must still independently inspect: the required full diff when governance requires it; binding AGENTS rules; binding ADR sections; exact-final-candidate evidence required by governance. Generated or module metadata never replaces that evidence.
 
 Output: fill the "Review:" line in the report with PASS or a numbered blocker
 list. No merge until this line is filled. Then stop.
@@ -540,7 +540,7 @@ supervised local worker in the authoritative local checkout. The owner relays th
 and returns the worker's machine-verifiable evidence back to the orchestrator.
 
 ```
-Read AGENTS.md, WORKFLOW.md §14, and tasks/<ID>.md (or the task specification below).
+Read global binding governance required by the current workflow (AGENTS.md, WORKFLOW.md §14 as required), and tasks/<ID>.md including its `Required reading:` field. Load exactly the files listed in `Required reading:` plus global invariants; use MODULES.toml to identify dependency-neighbor context and focused tests when needed. Do not routinely crawl unrelated source/history. (Or the task specification below if provided.)
 
 You are the supervised local worker executing in the authoritative local checkout:
   <AUTHORITATIVE_REPO_PATH>

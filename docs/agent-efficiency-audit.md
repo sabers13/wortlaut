@@ -33,8 +33,8 @@ top recommendation is therefore **not a refactor or a build-system
 adoption**; it is a **module-metadata + affected-test infrastructure**
 that turns the current "read the whole repo" worker model into a "read
 the brief, the explicitly required files, the relevant `MODULES.toml`
-rows, and the focused tests" model. Final candidate validation (`make
-` make gate` plus slice-specific frontend checks plus Playwright) is
+rows, and the focused tests" model. Final candidate validation (`make gate`
+plus slice-specific frontend checks plus Playwright) is
 **unchanged**.
 
 **Architecture decision (single, consistent):**
@@ -212,8 +212,8 @@ check-agents:python tools/check_agents.py
 ```
 
 `tools/check_agents.py` enforces R1 / R3 / R6 / R7 / R12 / R13 (6 of
-the 7 `[executable]` rules; R2 is structurally enforced because
-`tools/check_agents.py` scans `app/`). AGENTS R8, R9, R10, R11 are
+the 7 `[executable]` rules; R2 remains `[reviewed]` unless repository
+evidence proves otherwise). AGENTS R8, R9, R10, R11 are
 `[reviewed]`.
 
 ### Committed gate timing (observed from `handoff/main-gate.stdout`)
@@ -834,13 +834,29 @@ slice-9 dispatch lands:
    verifies every Python module under `app/`, `tools/` has a
    `MODULES.toml` row; every `focused_tests` path exists on disk;
    every referenced `dependencies` id exists.
-8. **Focused tests for the resolver itself** —
+7. **Focused tests for the resolver itself** —
    `tests/test_affected_tests.py` exercising the conservative
    fallback, the unmapped-path behavior, and a happy-path diff.
 
 This BEFORE-SLICE-9 package is a small infrastructure/governance
 change, not a product slice. It MUST NOT alter the final-full-gate
 requirement.
+
+### SHOULD FOLLOW
+
+- `tools/context_pack.py` (~80 LOC) — consumes `MODULES.toml` and the task brief to emit a compact reading list; the brief and `MODULES.toml` remain authoritative.
+- Conversion of straightforward `[reviewed]` rules to executable checks (already on the backlog).
+- Nested per-domain `AGENTS.md` (`app/AGENTS.md`, `frontend/AGENTS.md`, `tools/AGENTS.md`) only after explicit inheritance and duplication rules are defined in the root `AGENTS.md`.
+
+### DEFER / REJECT
+
+- Pants, Bazel, Nx, Turborepo — current scale not justified; staged validation already formalizes focused versus final.
+- Multi-repo split — cross-cutting governance and ADR corpus; triples discovery cost.
+- Python package explosion — natural `app/*.py` boundaries already provide 1:1 test ownership; the graph has intentional one-way dependencies and no observed reverse cycles.
+- Frontend component split for LLM context — slice-8 froze the design.
+- Auto-refactoring `app/api.py` purely on file length — cohesive single factory.
+- Microservice decomposition — rejected because it is unnecessary at current scale; ADR-0002 composition + R7 already provide the required integration boundary.
+- Auto-AST `MODULES.toml` generation, smaller handoff ZIP using `MODULES.toml`, root `AGENTS.md` reduction, `pytest -xdist` and pytest markers for LLM context — deferred as not a token lever or premature.
 
 ---
 
@@ -856,10 +872,10 @@ reader can audit what was *not* chosen.
 | Nx | no JS monorepo | single frontend (`frontend/`); no pipeline |
 | Turborepo | no JS monorepo | same as Nx |
 | Multi-repo split | cross-cutting governance / ADRs | ADR corpus is binding across sub-trees; triples per-session discovery cost |
-| Python package explosion | already natural boundaries | 1:1 test ownership already works; `app/*.py` are not coupled in either direction |
+| Python package explosion | already natural boundaries | 1:1 test ownership already works; the graph has intentional one-way dependencies and no observed reverse cycles |
 | Frontend component split for LLM context | slice-8 froze the design | `tasks/slice-8.md` "Frozen frontend and ownership rules" |
 | Auto-refactor `app/api.py` for length | cohesive single factory | slice-8 S8A `_manage_transaction=False` choreography depends on it being one file |
-| Microservice decomposition | zero lecture-app coupling | AGENTS R7 forbids; ADR-0002 §7 governs compose |
+| Microservice decomposition | unnecessary at current scale | microservice decomposition is rejected because it is unnecessary at current scale; ADR-0002 composition + R7 already provide the required integration boundary |
 | Auto-AST `MODULES.toml` | cannot guess intended ownership | AST sees edges, not semantic roles |
 | Smaller handoff ZIP using `MODULES.toml` | sub-1 MB acceptable | current ZIP 72–475 KB; intentional offline fallback (WORKFLOW §10) |
 | Root `AGENTS.md` reduction as prerequisite | cross-cutting binding rules | root rules (R1/R3/R6/R7/R12/R13) bind every worker; shrink is separate governance |

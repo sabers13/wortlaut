@@ -131,6 +131,7 @@ Every brief in `tasks/<ID>.md` contains, exhaustively:
 ```
 Task:        <concrete, single outcome>
 Allowlist:   <exhaustive file list — anything else is a scope violation>
+Required reading: <explicit minimal committed file list for a cold worker — governance + ADR subset + source + tests per MODULES.toml closure>
 Acceptance:  <gate numbers / tests that prove completion>
 Stop-and-ask:<conditions where the worker halts and reports>
 Risk:        <none | migration | auth-security | public-api | data-loss>
@@ -139,8 +140,16 @@ Why:         <one line — which §4 row triggered this routing>
 Fallback:    <same-tier alternative if primary is out of tokens>
 ```
 
+`Required reading` lists the smallest sufficient committed file set for a cold worker, derived from the task scope and `MODULES.toml` dependency closure.
+
 The `Why` line is mandatory: it makes routing auditable. When routing turns out
 wrong, fix the rubric row it cites, not the vibe.
+
+**Required reading — scope and binding:**
+
+- Root `AGENTS.md` and other globally binding files required by current governance remain binding and are not repeated in `Required reading`; `Required reading` narrows task-specific source/ADR/test context, not global invariants.
+- Workers should not broaden context merely "to be safe" when the brief and `MODULES.toml` give a dependency-closed context set.
+- Workers MAY inspect outside the declared reading list when concrete evidence reveals an ambiguity or dependency; such expansion should be targeted, not whole-repository rediscovery.
 
 ---
 
