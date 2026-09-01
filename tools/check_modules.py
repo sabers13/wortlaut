@@ -1,14 +1,20 @@
 """Validator for MODULES.toml.
 
 Ensures the canonical machine-readable module map is internally consistent
-and that every tracked source file under the inventory roots
-(`app/`, `tools/`, `frontend/src/`, `reference/`, plus `Dockerfile`) is
-claimed by exactly one module. Wired into the authoritative `make gate`
-via the `check-modules` Makefile target; standalone-invokable for
-maintainers and CI.
+and that every tracked and nonignored-untracked source file under the
+inventory roots (`app/`, `tools/`, `reference/`, `frontend/src/`, plus
+`Dockerfile`) is claimed by exactly one module. Wired into the
+authoritative `make gate` via the `check-modules` Makefile target;
+standalone-invokable for maintainers and CI.
 
 All checks fail closed: any inconsistency prints a numbered diagnostic
 to stderr and exits 1. Success prints a single concise line to stdout.
+
+This module is the single authoritative MODULES validator. The
+`tools/affected_tests.py` focused-test resolver imports
+`load_and_validate` from here and treats any returned violation as
+fail-closed (BROAD/pytest -q) — it does not reimplement schema or graph
+validation.
 """
 
 from __future__ import annotations
@@ -16,15 +22,18 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import re
+import subprocess
 import sys
 import tomllib
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT_DEFAULT: Path = Path(__file__).resolve().parent.parent
 MODULES_FILENAME: str = "MODULES.toml"
 
 REQUIRED_FIELDS: tuple[str, ...] = (
+    "id",
     "owned_paths",
     "dependencies",
     "focused_tests",
@@ -32,7 +41,6 @@ REQUIRED_FIELDS: tuple[str, ...] = (
 )
 
 OPTIONAL_FIELDS: tuple[str, ...] = (
-    "id",
     "focused_commands",
     "adrs",
 )
@@ -47,22 +55,23 @@ INVENTORY_ROOTS: tuple[str, ...] = (
 )
 INVENTORY_FILES: tuple[str, ...] = ("Dockerfile",)
 
-EXCLUDED_TOP_DIRS: frozenset[str] = frozenset({
-    ".git",
-    ".venv",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    "node_modules",
-    "build",
-    "dist",
-    "handoff",
-    "tmp",
-    "frontend/test-results",
-    "frontend/playwright-report",
-})
-
 VALID_GLOB_CHARS: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_./*?\[\]!+\-]+$")
+
+
+@dataclass(frozen=True)
+class ModuleLoadResult:
+    """Result of loading and fully validating MODULES.toml.
+
+    `modules` is keyed by module id. Every entry has its `id` field set
+    and every required field populated with a list of strings. It is
+    `None` when any violation was detected — downstream callers MUST
+    treat that as a fail-closed signal and not attempt further
+    per-module inspection.
+    """
+
+    modules: dict[str, dict[str, object]] | None
+    violations: tuple[str, ...]
+    module_count: int
 
 
 def _print_diagnostics(prefix: str, items: Iterable[str]) -> None:
@@ -83,26 +92,70 @@ def _load_modules(modules_path: Path) -> tuple[dict[str, object] | None, str | N
         return None, f"failed to read MODULES.toml at {modules_path}: {exc}"
 
 
+def _validate_module_id(
+    raw_id: str,
+    mod: dict[str, object],
+    seen_ids: dict[str, str],
+) -> list[str]:
+    """Validate the explicit `id` field on a single module entry.
+
+    Returns a list of violation strings. Empty list means the id is
+    valid and unique. The caller is responsible for skipping the
+    module from further validation when this returns any violation.
+
+    A module may report both a mismatch and a duplicate (e.g. table
+    key ``b`` with ``id = "a"`` when ``a`` is already declared); both
+    errors are surfaced together.
+    """
+    violations: list[str] = []
+    if "id" not in mod:
+        violations.append(
+            f"MODULES.toml: module '{raw_id}' is missing required field 'id'"
+        )
+        return violations
+    id_value = mod["id"]
+    if not isinstance(id_value, str):
+        violations.append(
+            f"MODULES.toml: module '{raw_id}' field 'id' must be a string"
+        )
+        return violations
+    if id_value == "":
+        violations.append(
+            f"MODULES.toml: module '{raw_id}' field 'id' must be non-empty"
+        )
+        return violations
+    # id_value is a non-empty string; report both duplicate and mismatch.
+    if id_value in seen_ids:
+        violations.append(
+            f"MODULES.toml: duplicate module id '{id_value}' "
+            f"(first declared under table key '{seen_ids[id_value]}', "
+            f"also under '{raw_id}')"
+        )
+    if id_value != raw_id:
+        violations.append(
+            f"MODULES.toml: module table key '{raw_id}' does not match "
+            f"its explicit 'id' field '{id_value}'"
+        )
+    return violations
+
+
 def _validate_module_schema(
     modules: dict[str, object],
 ) -> tuple[list[str], dict[str, dict[str, object]]]:
-    """Validate every module entry's type and required fields.
+    """Validate every module entry's type, required id, and required fields.
 
-    Returns (violations, valid_modules) keyed by table-key (the implicit
-    id). On any per-module violation, that module is omitted from the
-    returned dict so the rest of the validator does not raise on absent
-    fields. Duplicate table keys are caught by the underlying TOML parser
-    before this is reached; the defensive check is on a per-table
-    explicit ``id`` field that collides with another module's id.
+    Returns (violations, valid_modules) keyed by id. On any per-module
+    violation, that module is omitted from the returned dict so the
+    rest of the validator does not raise on absent fields.
     """
     violations: list[str] = []
     valid: dict[str, dict[str, object]] = {}
+    seen_ids: dict[str, str] = {}
 
     if not isinstance(modules, dict):
         violations.append("MODULES.toml: top-level [modules] table is missing or not a table")
         return violations, valid
 
-    seen_ids: dict[str, str] = {}
     for raw_id, raw_mod in modules.items():
         if not isinstance(raw_mod, dict):
             violations.append(
@@ -112,32 +165,24 @@ def _validate_module_schema(
 
         mod = dict(raw_mod)
 
-        explicit_id_obj = mod.get("id")
-        if explicit_id_obj is None:
-            effective_id = raw_id
-        elif isinstance(explicit_id_obj, str):
-            effective_id = explicit_id_obj
-            if explicit_id_obj != raw_id:
-                violations.append(
-                    f"MODULES.toml: module table key '{raw_id}' does not match "
-                    f"its explicit 'id' field '{explicit_id_obj}'"
-                )
-        else:
-            violations.append(
-                f"MODULES.toml: module '{raw_id}' field 'id' must be a string"
-            )
-            effective_id = raw_id
+        id_violations = _validate_module_id(raw_id, mod, seen_ids)
+        if id_violations:
+            violations.extend(id_violations)
+            continue
 
-        if effective_id in seen_ids:
-            violations.append(
-                f"MODULES.toml: duplicate module id '{effective_id}' "
-                f"(first declared under table key '{seen_ids[effective_id]}', "
-                f"also under '{raw_id}')"
-            )
-        else:
-            seen_ids[effective_id] = raw_id
+        seen_ids[raw_id] = raw_id
+        mod["id"] = raw_id
 
-        mod["id"] = effective_id
+        # Always record the effective id (even when there were id
+        # violations) so subsequent modules claiming the same
+        # effective id are flagged as duplicates.
+        effective = mod["id"]
+        if (
+            isinstance(effective, str)
+            and effective
+            and effective not in seen_ids
+        ):
+            seen_ids[effective] = raw_id
 
         extra = set(mod) - ALLOWED_FIELDS
         if extra:
@@ -155,6 +200,8 @@ def _validate_module_schema(
             continue
 
         for field in REQUIRED_FIELDS:
+            if field == "id":
+                continue
             value = mod.get(field)
             if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
                 violations.append(
@@ -162,11 +209,31 @@ def _validate_module_schema(
                 )
 
         for opt in OPTIONAL_FIELDS:
-            if opt in mod and opt != "id":
+            if opt in mod:
                 value = mod[opt]
                 if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
                     violations.append(
                         f"MODULES.toml: module '{raw_id}' field '{opt}' must be a list of strings"
+                    )
+
+        if "owned_paths" in mod:
+            for pat in mod["owned_paths"]:
+                if not isinstance(pat, str):
+                    continue
+                err = _check_glob_pattern(pat)
+                if err is not None:
+                    violations.append(
+                        f"MODULES.toml: module '{raw_id}' owned_paths pattern invalid: {pat}: {err}"
+                    )
+
+        if "focused_tests" in mod:
+            for t in mod["focused_tests"]:
+                if not isinstance(t, str):
+                    continue
+                err = _check_glob_pattern(t)
+                if err is not None:
+                    violations.append(
+                        f"MODULES.toml: module '{raw_id}' focused_tests pattern invalid: {t}: {err}"
                     )
 
         valid[raw_id] = mod
@@ -296,39 +363,69 @@ def _check_focused_tests(
     return violations
 
 
-def _enumerate_tracked_inventory(repo_root: Path) -> list[str]:
-    """Return repo-relative paths under inventory roots/files."""
-    repo_root = repo_root.resolve()
-    inventory: set[str] = set()
+def _git_inventory_paths() -> tuple[str, ...]:
+    """Return the pathspec passed to `git ls-files` for inventory discovery."""
+    return (*INVENTORY_ROOTS, *INVENTORY_FILES)
 
-    for root in INVENTORY_ROOTS:
-        root_path = repo_root / root
-        if not root_path.exists():
-            continue
-        for path in sorted(root_path.rglob("*")):
-            if not path.is_file():
-                continue
-            rel = path.relative_to(repo_root).as_posix()
-            if "__pycache__" in rel:
-                continue
-            parts = set(rel.split("/"))
-            if parts & EXCLUDED_TOP_DIRS:
-                continue
-            inventory.add(rel)
 
-    for top in INVENTORY_FILES:
-        top_path = repo_root / top
-        if top_path.is_file():
-            inventory.add(top)
+def _git_inventory(
+    repo_root: Path,
+) -> tuple[frozenset[str] | None, str | None]:
+    """Return (paths, error) from `git ls-files --cached --others --exclude-standard`.
 
-    return sorted(inventory)
+    `paths` is a frozenset of repo-relative forward-slash paths
+    matching tracked files plus untracked, non-ignored files. Ignored
+    files (per `.gitignore` / Git's exclude machinery) are NOT
+    included — Git, not a hand-written directory list, is the
+    ignored-file authority.
+
+    On any subprocess failure, returns `(None, error_message)` so the
+    caller can fail closed.
+    """
+    pathspec = _git_inventory_paths()
+    cmd = [
+        "git",
+        "-C",
+        str(repo_root),
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--",
+        *pathspec,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"git ls-files failed: {exc}"
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or "(no stderr)"
+        return None, f"git ls-files failed (exit {result.returncode}): {stderr}"
+    found: set[str] = set()
+    for line in result.stdout.splitlines():
+        cleaned = line.strip().replace("\\", "/")
+        if cleaned:
+            found.add(cleaned)
+    return frozenset(found), None
 
 
 def _check_ownership(
     modules: dict[str, dict[str, object]],
     repo_root: Path,
 ) -> list[str]:
-    """Ensure every inventory file is owned by exactly one module."""
+    """Ensure every inventory file is owned by exactly one module.
+
+    Inventory is the Git-aware union of tracked and nonignored-untracked
+    files under the inventory roots/files. Git is the only authority
+    for what is excluded; no parallel hand-written exclude list is
+    maintained.
+    """
     violations: list[str] = []
 
     patterns_by_module: dict[str, list[str]] = {}
@@ -347,8 +444,11 @@ def _check_ownership(
                     f"module '{mid}' owned_paths pattern invalid: {pat}: {err}"
                 )
 
-    inventory = _enumerate_tracked_inventory(repo_root)
-    for rel in inventory:
+    inventory, git_err = _git_inventory(repo_root)
+    if git_err is not None or inventory is None:
+        return [f"git inventory failure: {git_err or 'unknown'}"]
+
+    for rel in sorted(inventory):
         matched: list[str] = []
         for mid, patterns in patterns_by_module.items():
             if any(fnmatch.fnmatch(rel, pat) for pat in patterns):
@@ -393,29 +493,38 @@ def _check_module_metadata_self(
     return violations
 
 
-def check_all(modules_path: Path) -> tuple[list[str], int]:
-    """Run all MODULES.toml validations.
+def load_and_validate(modules_path: Path) -> ModuleLoadResult:
+    """Load MODULES.toml and run the full authoritative validation.
 
-    Returns (violations, module_count). On file-not-found / parse error,
-    the violations list contains a single explanatory entry and the count
-    is 0 so the CLI can still emit a non-zero exit and a single
-    diagnostic line.
+    This is the single authoritative MODULES validator. Both the
+    standalone `check_modules` CLI and `tools/affected_tests.py` route
+    through it so schema and graph semantics cannot drift between
+    callers.
+
+    Returns a `ModuleLoadResult` with:
+    - `modules`: dict keyed by module id (every entry has its `id`
+      field set and every required field populated with a list of
+      strings). `None` if any violation was detected — downstream
+      callers MUST treat that as a fail-closed signal.
+    - `violations`: tuple of violation strings (empty on success).
+    - `module_count`: number of valid modules (0 on failure).
     """
-    repo_root = modules_path.resolve().parent
+    modules_path = modules_path.resolve()
+    repo_root = modules_path.parent
 
     data, err = _load_modules(modules_path)
     if err is not None or data is None:
-        return ([err or "failed to load MODULES.toml"], 0)
+        return ModuleLoadResult(None, (err or "failed to load MODULES.toml",), 0)
 
     modules_raw = data.get("modules")
     if modules_raw is None:
-        return (["MODULES.toml: missing [modules] table"], 0)
+        return ModuleLoadResult(None, ("MODULES.toml: missing [modules] table",), 0)
     if not isinstance(modules_raw, dict):
-        return (["MODULES.toml: [modules] must be a table"], 0)
+        return ModuleLoadResult(None, ("MODULES.toml: [modules] must be a table",), 0)
 
     schema_violations, valid = _validate_module_schema(modules_raw)
     if schema_violations:
-        return (schema_violations, 0)
+        return ModuleLoadResult(None, tuple(schema_violations), 0)
 
     violations: list[str] = []
     violations.extend(_check_dependencies(valid))
@@ -423,7 +532,23 @@ def check_all(modules_path: Path) -> tuple[list[str], int]:
     violations.extend(_check_focused_tests(valid, repo_root))
     violations.extend(_check_ownership(valid, repo_root))
     violations.extend(_check_module_metadata_self(valid))
-    return (violations, len(valid))
+
+    if violations:
+        return ModuleLoadResult(None, tuple(violations), 0)
+
+    return ModuleLoadResult(valid, (), len(valid))
+
+
+def check_all(modules_path: Path) -> tuple[list[str], int]:
+    """Run all MODULES.toml validations.
+
+    Returns (violations, module_count). On file-not-found / parse error
+    / any metadata or ownership violation, the violations list contains
+    the corresponding explanatory entries and the count is 0 so the CLI
+    can still emit a non-zero exit and a single diagnostic line.
+    """
+    result = load_and_validate(modules_path)
+    return (list(result.violations), result.module_count)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

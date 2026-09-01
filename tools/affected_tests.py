@@ -6,6 +6,34 @@ unmapped paths, ambiguous ownership, malformed metadata, missing focused
 tests, or invalid dependency graphs force a BROAD/FAIL-CLOSED
 recommendation; verification is never silently omitted.
 
+Source semantics:
+
+  changed source
+      ↓
+  owning module
+      ↓
+  transitive reverse/dependent closure
+      ↓
+  union of focused validation
+
+A changed path is resolved in two passes:
+
+1.  Source ownership via `owned_paths` (any matching module is added to
+    the direct set; closure is computed over the union of direct
+    modules when any source path is involved).
+2.  Known focused-test path via `focused_tests`. A known focused-test
+    path is FOCUSED for the module(s) it directly tests and does NOT
+    expand reverse dependencies solely because the test changed.
+
+If neither pass matches a path, the resolver fails closed to BROAD.
+Source-only changes expand the reverse closure; test-only changes do
+not.
+
+This module does NOT re-implement MODULES validation. It delegates
+schema and graph validation to `tools.check_modules.load_and_validate`,
+the single authoritative validator. Any violation returned there is
+treated as BROAD/pytest -q.
+
 This is iteration tooling only; the authoritative `make gate` is unchanged
 (WORKFLOW.md §16.4).
 """
@@ -14,184 +42,44 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
-import re
 import subprocess
 import sys
-import tomllib
 from collections.abc import Sequence
 from pathlib import Path
+
+# Allow `python tools/affected_tests.py ...` (the documented CLI form)
+# and `python -m tools.affected_tests` to resolve `tools.check_modules`.
+_PKG_PARENT = Path(__file__).resolve().parent.parent
+if str(_PKG_PARENT) not in sys.path:
+    sys.path.insert(0, str(_PKG_PARENT))
+
+from tools.check_modules import load_and_validate  # noqa: E402
 
 REPO_ROOT_DEFAULT: Path = Path(__file__).resolve().parent.parent
 MODULES_FILENAME: str = "MODULES.toml"
 FRONTEND_PATH_PREFIX: str = "frontend/"
-
-VALID_GLOB_CHARS: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_./*?\[\]!+\-]+$")
-
-
-def _check_glob_pattern(pattern: str) -> str | None:
-    """Return an error message if the glob pattern is invalid; None if OK."""
-    if not pattern:
-        return "empty pattern"
-    if pattern.startswith("/"):
-        return "absolute path patterns are forbidden"
-    if "\\" in pattern:
-        return "patterns must use forward slashes"
-    segments = pattern.split("/")
-    if any(seg == ".." for seg in segments):
-        return "patterns must not contain '..' segments"
-    if not VALID_GLOB_CHARS.match(pattern):
-        return "pattern contains characters outside the allowed glob grammar"
-    return None
+PYTHON_TEST_SUFFIX: str = ".py"
+PYTHON_TEST_PREFIX: str = "tests/"
 
 
-def _is_escaping(repo_root: Path, rel: str) -> bool:
-    """True if the relative path resolves outside the repo root."""
-    if not rel:
-        return True
-    if rel.startswith("/"):
-        return True
-    if "\\" in rel:
-        return True
-    if ".." in Path(rel).parts:
-        return True
-    try:
-        (repo_root / rel).resolve().relative_to(repo_root.resolve())
-        return False
-    except ValueError:
-        return True
-
-
-def _load_modules(repo_root: Path) -> tuple[dict[str, dict[str, object]] | None, str | None]:
-    """Return (modules_by_id, error_message). modules_by_id is keyed by id."""
-    modules_path = repo_root / MODULES_FILENAME
-    if not modules_path.is_file():
-        return None, f"missing MODULES.toml at {modules_path}"
-    try:
-        with modules_path.open("rb") as fh:
-            data = tomllib.load(fh)
-    except tomllib.TOMLDecodeError as exc:
-        return None, f"malformed TOML: {exc}"
-    except OSError as exc:
-        return None, f"failed to read MODULES.toml: {exc}"
-
-    raw = data.get("modules")
-    if not isinstance(raw, dict):
-        return None, "MODULES.toml: top-level [modules] table is missing or not a table"
-
-    by_id: dict[str, dict[str, object]] = {}
-    seen: set[str] = set()
-    for raw_id, raw_mod in raw.items():
-        if not isinstance(raw_mod, dict):
-            return None, f"MODULES.toml: module '{raw_id}' must be a table"
-        if raw_id in seen:
-            return None, f"MODULES.toml: duplicate module id '{raw_id}'"
-        seen.add(raw_id)
-        by_id[raw_id] = dict(raw_mod)
-        by_id[raw_id]["id"] = raw_id
-
-    return by_id, None
-
-
-def _validate_graph(
-    modules: dict[str, dict[str, object]],
+def _load_valid_modules(
     repo_root: Path,
-) -> list[str]:
-    """Static checks that don't require the resolver's input data."""
-    violations: list[str] = []
-    ids = set(modules)
+) -> tuple[dict[str, dict[str, object]] | None, str | None]:
+    """Load MODULES.toml via the authoritative validator.
 
-    for mod_id, mod in modules.items():
-        for field in ("owned_paths", "dependencies", "focused_tests"):
-            value = mod.get(field)
-            if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
-                violations.append(
-                    f"module '{mod_id}' field '{field}' must be a list of strings"
-                )
-
-        deps = mod.get("dependencies", [])
-        if isinstance(deps, list):
-            seen: set[str] = set()
-            for dep in deps:
-                if not isinstance(dep, str):
-                    continue
-                if dep == mod_id:
-                    violations.append(f"module '{mod_id}' has self-dependency '{dep}'")
-                elif dep in seen:
-                    violations.append(f"module '{mod_id}' has duplicate dependency '{dep}'")
-                elif dep not in ids:
-                    violations.append(
-                        f"module '{mod_id}' has unknown dependency '{dep}'"
-                    )
-                seen.add(dep)
-
-        owned = mod.get("owned_paths", [])
-        if isinstance(owned, list):
-            for pat in owned:
-                if not isinstance(pat, str):
-                    continue
-                err = _check_glob_pattern(pat)
-                if err is not None:
-                    violations.append(
-                        f"module '{mod_id}' owned_paths pattern invalid: {pat}: {err}"
-                    )
-
-        ftests = mod.get("focused_tests", [])
-        if isinstance(ftests, list):
-            for tpath in ftests:
-                if not isinstance(tpath, str):
-                    continue
-                if _is_escaping(repo_root, tpath):
-                    violations.append(
-                        f"module '{mod_id}' focused-test path escapes repo root: {tpath}"
-                    )
-                    continue
-                if not (repo_root / tpath).exists():
-                    violations.append(
-                        f"module '{mod_id}' focused-test path does not exist on disk: {tpath}"
-                    )
-
-    violations.extend(_detect_cycles(modules))
-    return violations
-
-
-def _detect_cycles(
-    modules: dict[str, dict[str, object]],
-) -> list[str]:
-    """Detect cycles in the dependency graph using DFS colouring."""
-    violations: list[str] = []
-    WHITE, GRAY, BLACK = 0, 1, 2
-    colour: dict[str, int] = {mid: WHITE for mid in modules}
-    deps_by: dict[str, list[str]] = {}
-    for mid, mod in modules.items():
-        raw = mod.get("dependencies", [])
-        if isinstance(raw, list):
-            deps_by[mid] = [str(d) for d in raw if isinstance(d, str)]
-        else:
-            deps_by[mid] = []
-
-    def dfs(node: str, stack: list[str]) -> None:
-        colour[node] = GRAY
-        stack.append(node)
-        for dep in deps_by.get(node, []):
-            if dep not in colour:
-                continue
-            if colour[dep] == GRAY:
-                idx = stack.index(dep)
-                cycle: list[str] = stack[idx:] + [dep]
-                violations.append(
-                    "module dependency cycle: " + " -> ".join(cycle)
-                )
-                continue
-            if colour[dep] == WHITE:
-                dfs(dep, stack)
-        stack.pop()
-        colour[node] = BLACK
-
-    for mid in modules:
-        if colour[mid] == WHITE:
-            dfs(mid, [])
-
-    return violations
+    Returns (modules, error). modules is None on any violation (including
+    malformed TOML, missing/invalid id, unknown dependency, cycle,
+    missing focused test, invalid path, ambiguous ownership, unowned
+    inventory path, or git inventory failure).
+    """
+    modules_path = repo_root / MODULES_FILENAME
+    result = load_and_validate(modules_path)
+    if result.modules is None:
+        summary = "; ".join(result.violations[:3])
+        if len(result.violations) > 3:
+            summary += f" (+{len(result.violations) - 3} more)"
+        return None, f"invalid MODULES.toml: {summary}"
+    return result.modules, None
 
 
 def _find_owning_module(
@@ -239,6 +127,30 @@ def _find_owning_module(
             + ", ".join(sorted(set(best_modules)))
         )
     return best_modules[0], None
+
+
+def _find_focused_test_modules(
+    rel_path: str,
+    modules: dict[str, dict[str, object]],
+) -> list[str]:
+    """Return module ids whose `focused_tests` include this path.
+
+    A focused-test path is "known" if it matches any module's
+    `focused_tests` entry. A focused-test change selects its
+    directly associated module(s) and does NOT cause reverse closure
+    expansion.
+    """
+    matched: list[str] = []
+    for mid, mod in modules.items():
+        focused = mod.get("focused_tests", [])
+        if not isinstance(focused, list):
+            continue
+        for t in focused:
+            if isinstance(t, str) and fnmatch.fnmatch(rel_path, t):
+                if mid not in matched:
+                    matched.append(mid)
+                break
+    return sorted(matched)
 
 
 def _build_reverse_graph(
@@ -336,22 +248,36 @@ def _resolve_emit(
         return (
             "MODE=FOCUSED\n"
             "MODULES=\n"
-            "PYTEST=pytest -q\n"
+            "PYTEST=NONE\n"
         )
 
     direct: set[str] = set()
-    for rel in changed_paths:
-        owner, err = _find_owning_module(rel, modules)
-        if err is not None:
-            is_frontend = rel.startswith(FRONTEND_PATH_PREFIX)
-            if err == "unmapped":
-                return _emit_broad(f"unmapped path: {rel}", is_frontend)
-            return _emit_broad(err, is_frontend)
-        assert owner is not None
-        direct.add(owner)
+    has_source: bool = False
 
-    reverse = _build_reverse_graph(modules)
-    affected = _reverse_closure(direct, reverse)
+    for rel in changed_paths:
+        is_frontend = rel.startswith(FRONTEND_PATH_PREFIX)
+
+        owner, err = _find_owning_module(rel, modules)
+        if owner is not None:
+            direct.add(owner)
+            has_source = True
+            continue
+        if err is not None and err != "unmapped":
+            return _emit_broad(err, is_frontend)
+
+        test_modules = _find_focused_test_modules(rel, modules)
+        if test_modules:
+            for mid in test_modules:
+                direct.add(mid)
+            continue
+
+        return _emit_broad(f"unmapped path: {rel}", is_frontend)
+
+    if has_source:
+        reverse = _build_reverse_graph(modules)
+        affected = _reverse_closure(direct, reverse)
+    else:
+        affected = set(direct)
 
     py_tests: set[str] = set()
     frontend_tests: set[str] = set()
@@ -361,12 +287,11 @@ def _resolve_emit(
         ftests = mod.get("focused_tests", [])
         if isinstance(ftests, list):
             for t in ftests:
-                if not isinstance(t, str):
-                    continue
-                if t.startswith("tests/") and t.endswith(".py"):
-                    py_tests.add(t)
-                else:
-                    frontend_tests.add(t)
+                if isinstance(t, str):
+                    if t.startswith(PYTHON_TEST_PREFIX) and t.endswith(PYTHON_TEST_SUFFIX):
+                        py_tests.add(t)
+                    else:
+                        frontend_tests.add(t)
         fcmds = mod.get("focused_commands", [])
         if isinstance(fcmds, list):
             for c in fcmds:
@@ -383,7 +308,7 @@ def _resolve_emit(
     if sorted_py:
         lines.append(f"PYTEST=pytest -q {' '.join(sorted_py)}")
     else:
-        lines.append("PYTEST=pytest -q")
+        lines.append("PYTEST=NONE")
 
     if sorted_frontend:
         lines.append(f"FRONTEND_TESTS={' '.join(sorted_frontend)}")
@@ -426,17 +351,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(f"ERROR: --repo-root is not a directory: {repo_root}\n")
         return 1
 
-    modules, err = _load_modules(repo_root)
+    modules, err = _load_valid_modules(repo_root)
     if err is not None or modules is None:
-        sys.stdout.write(_emit_broad(f"malformed MODULES.toml: {err or 'load failed'}") + "\n")
-        return 2
-
-    graph_violations = _validate_graph(modules, repo_root)
-    if graph_violations:
-        summary = "; ".join(graph_violations[:3])
-        if len(graph_violations) > 3:
-            summary += f" (+{len(graph_violations) - 3} more)"
-        sys.stdout.write(_emit_broad(f"invalid MODULES.toml: {summary}") + "\n")
+        sys.stdout.write(_emit_broad(err or "invalid MODULES.toml") + "\n")
         return 2
 
     changed: list[str]

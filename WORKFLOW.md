@@ -151,6 +151,18 @@ wrong, fix the rubric row it cites, not the vibe.
 - Workers should not broaden context merely "to be safe" when the brief and `MODULES.toml` give a dependency-closed context set.
 - Workers MAY inspect outside the declared reading list when concrete evidence reveals an ambiguity or dependency; such expansion should be targeted, not whole-repository rediscovery.
 
+**Required reading — retroactivity on existing briefs:**
+
+- Accepted/closed historical briefs are not retroactively rewritten solely
+  to add a `Required reading:` line. The slice evidence trail stays as
+  written; no patch-the-history operation is implied by this field's
+  existence.
+- An OPEN / next-dispatch brief written before the `Required reading:`
+  field existed must receive a `Required reading:` line BEFORE its first
+  future implementation or review dispatch. The line is filled in at
+  re-dispatch time (typically by the orchestrator opening the next
+  iteration), not by a retroactive edit of the original brief.
+
 ---
 
 ## 3. Routing — the Model line
