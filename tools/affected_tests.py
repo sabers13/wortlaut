@@ -13,21 +13,34 @@ Source semantics:
   owning module
       ↓
   transitive reverse/dependent closure
+
+PLUS
+
+  changed focused test
       ↓
-  union of focused validation
+  direct module(s) only (no closure)
 
-A changed path is resolved in two passes:
+Final affected set:
 
-1.  Source ownership via `owned_paths` (any matching module is added to
-    the direct set; closure is computed over the union of direct
-    modules when any source path is involved).
-2.  Known focused-test path via `focused_tests`. A known focused-test
-    path is FOCUSED for the module(s) it directly tests and does NOT
-    expand reverse dependencies solely because the test changed.
+  reverse_closure(source_direct) UNION test_direct
+
+A changed path is resolved in two ordered passes:
+
+1.  Known focused-test path via `focused_tests` (exact equality — not
+    wildcard expansion — because focused_tests entries are canonical
+    concrete test paths). An exact known focused-test path is added to
+    the test-direct set and does NOT trigger reverse closure even
+    when the same path is also a source owned path of the same module.
+2.  Source ownership via `owned_paths` (longest-literal specificity;
+    ties are ambiguous). A matched source is added to the
+    source-direct set.
+
+Reverse closure is computed over `source_direct` only, then unioned
+with `test_direct`. A test-only change never acquires reverse
+dependents. If `source_direct` is empty, no reverse closure is
+calculated at all.
 
 If neither pass matches a path, the resolver fails closed to BROAD.
-Source-only changes expand the reverse closure; test-only changes do
-not.
 
 This module does NOT re-implement MODULES validation. It delegates
 schema and graph validation to `tools.check_modules.load_and_validate`,
@@ -135,10 +148,13 @@ def _find_focused_test_modules(
 ) -> list[str]:
     """Return module ids whose `focused_tests` include this path.
 
-    A focused-test path is "known" if it matches any module's
-    `focused_tests` entry. A focused-test change selects its
-    directly associated module(s) and does NOT cause reverse closure
-    expansion.
+    A focused-test path is "known" if it exactly equals any module's
+    `focused_tests` entry. `focused_tests` entries are canonical
+    concrete test paths, so exact equality (not wildcard expansion)
+    is the correct classification rule. A focused-test change selects
+    its directly associated module(s) and does NOT cause reverse
+    closure expansion, even when the same path is also an owned path
+    of a module.
     """
     matched: list[str] = []
     for mid, mod in modules.items():
@@ -146,7 +162,7 @@ def _find_focused_test_modules(
         if not isinstance(focused, list):
             continue
         for t in focused:
-            if isinstance(t, str) and fnmatch.fnmatch(rel_path, t):
+            if isinstance(t, str) and t == rel_path:
                 if mid not in matched:
                     matched.append(mid)
                 break
@@ -251,33 +267,39 @@ def _resolve_emit(
             "PYTEST=NONE\n"
         )
 
-    direct: set[str] = set()
-    has_source: bool = False
+    source_direct: set[str] = set()
+    test_direct: set[str] = set()
 
     for rel in changed_paths:
         is_frontend = rel.startswith(FRONTEND_PATH_PREFIX)
 
+        # Pass 1: exact known focused-test path. Wins over source
+        # ownership so a focused-test path that is also an owned
+        # path (e.g. frontend/src/api/client.test.ts) is classified
+        # as a test, not as a source change. A test-only change
+        # never triggers reverse closure.
+        test_modules = _find_focused_test_modules(rel, modules)
+        if test_modules:
+            for mid in test_modules:
+                test_direct.add(mid)
+            continue
+
+        # Pass 2: source ownership via `owned_paths`. Only paths
+        # classified here participate in reverse closure.
         owner, err = _find_owning_module(rel, modules)
         if owner is not None:
-            direct.add(owner)
-            has_source = True
+            source_direct.add(owner)
             continue
         if err is not None and err != "unmapped":
             return _emit_broad(err, is_frontend)
 
-        test_modules = _find_focused_test_modules(rel, modules)
-        if test_modules:
-            for mid in test_modules:
-                direct.add(mid)
-            continue
-
         return _emit_broad(f"unmapped path: {rel}", is_frontend)
 
-    if has_source:
+    if source_direct:
         reverse = _build_reverse_graph(modules)
-        affected = _reverse_closure(direct, reverse)
+        affected = _reverse_closure(source_direct, reverse) | test_direct
     else:
-        affected = set(direct)
+        affected = set(test_direct)
 
     py_tests: set[str] = set()
     frontend_tests: set[str] = set()

@@ -244,6 +244,108 @@ def test_affected_tests_test_only_focused(
             )
 
 
+def test_mixed_source_and_python_test_keeps_resolve_only(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """app/audio.py + tests/test_resolve.py → exactly audio,resolve,runtime_api.
+
+    audio is a source path (reverse closure → runtime_api). test_resolve.py
+    is a test-only path; resolve must NOT acquire the reverse
+    dependency neighborhood of audio (dictionary, render, deck, export,
+    build_dict, gate2) just because the slice also touched a source file.
+    """
+    code, out, _ = _run_affected(
+        capsys, ["app/audio.py", "tests/test_resolve.py"]
+    )
+    assert code == 0
+    assert "MODE=FOCUSED" in out
+    assert "MODULES=audio,resolve,runtime_api" in out
+    for forbidden in [
+        "dictionary",
+        "deck",
+        "render",
+        "export",
+        "build_dict",
+        "gate2",
+    ]:
+        assert forbidden not in out, (
+            f"unexpected module/word '{forbidden}' in output:\n{out}"
+        )
+
+
+def test_frontend_test_only_classified_as_test(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """frontend/src/api/client.test.ts is BOTH a frontend_api owned_path
+    AND the exact focused_tests entry of frontend_api. The exact focused
+    test classification wins; the path MUST be classified as TEST, so:
+    - MODULES=frontend_api (no frontend_shell)
+    - PYTEST=NONE (it is not a Python test path)
+    - frontend_api's own focused_commands (npm test, typecheck) present
+    - frontend_shell, test:e2e, and frontend build are absent
+    """
+    code, out, _ = _run_affected(
+        capsys, ["frontend/src/api/client.test.ts"]
+    )
+    assert code == 0
+    assert "MODE=FOCUSED" in out
+    for line in out.splitlines():
+        if line.startswith("MODULES="):
+            assert line.strip() == "MODULES=frontend_api", out
+        if line.startswith("PYTEST="):
+            assert line.strip() == "PYTEST=NONE", out
+    assert "pytest -q" not in out
+    assert "tests/test_" not in out
+    assert "npm test --prefix frontend" in out
+    assert "npm run --prefix frontend typecheck" in out
+    for forbidden in [
+        "frontend_shell",
+        "test:e2e",
+        "npm run --prefix frontend build",
+    ]:
+        assert forbidden not in out, (
+            f"unexpected token '{forbidden}' in output:\n{out}"
+        )
+
+
+def test_mixed_source_and_frontend_test(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """app/audio.py + frontend/src/api/client.test.ts → exactly
+    audio,frontend_api,runtime_api.
+
+    audio is a source (closure → runtime_api). client.test.ts is a
+    frontend_api focused test (direct, no closure). frontend_shell,
+    test:e2e, and frontend build MUST NOT be selected solely because
+    of the test path.
+    """
+    code, out, _ = _run_affected(
+        capsys, ["app/audio.py", "frontend/src/api/client.test.ts"]
+    )
+    assert code == 0
+    assert "MODE=FOCUSED" in out
+    for line in out.splitlines():
+        if line.startswith("MODULES="):
+            assert line.strip() == (
+                "MODULES=audio,frontend_api,runtime_api"
+            ), out
+    # audio + runtime_api Python focused tests are present.
+    assert "tests/test_audio.py" in out
+    assert "tests/test_api.py" in out
+    # frontend_api focused_commands are present.
+    assert "npm test --prefix frontend" in out
+    assert "npm run --prefix frontend typecheck" in out
+    # Solely-because-of-test forbidden tokens are absent.
+    for forbidden in [
+        "frontend_shell",
+        "test:e2e",
+        "npm run --prefix frontend build",
+    ]:
+        assert forbidden not in out, (
+            f"unexpected token '{forbidden}' in output:\n{out}"
+        )
+
+
 def test_unknown_test_path_broad(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

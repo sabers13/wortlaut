@@ -8,9 +8,11 @@
 # Schema (per module):
 #   id              string  unique module identifier (must match table key)
 #   owned_paths     list    glob patterns (forward-slash paths, relative to
-#                           repo root). Every tracked file under the
+#                           repo root). Every tracked plus nonignored-
+#                           untracked source file under the configured
 #                           inventory roots (app, tools, frontend/src,
-#                           reference) MUST resolve to exactly one module.
+#                           reference, plus Dockerfile) MUST resolve to
+#                           exactly one module.
 #   dependencies    list    module ids this module directly depends on
 #                           (imports/uses). The resolver walks the reverse
 #                           closure transitively: changing a dependency

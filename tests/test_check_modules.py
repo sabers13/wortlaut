@@ -250,6 +250,47 @@ def test_duplicate_effective_id_fails(tmp_path: Path) -> None:
     assert any("duplicate module id 'a'" in v for v in violations)
 
 
+def test_mismatched_keys_with_shared_effective_id_reports_duplicate(
+    tmp_path: Path,
+) -> None:
+    """Two table keys with different names but the same non-empty
+    effective id must surface BOTH per-key mismatch diagnostics AND
+    a duplicate-effective-id diagnostic. Neither violation may be
+    silently absorbed.
+    """
+    _synthetic_base(tmp_path)
+    content = textwrap.dedent("""
+        [modules.a]
+        id = "shared"
+        owned_paths = ["app/dummy.py", "tools/dummy.py", "reference/schema.sql", "reference/smoke_test.py", "frontend/src/app.ts", "Dockerfile"]
+        dependencies = []
+        focused_tests = ["tests/test_dummy.py"]
+        agents_rules = []
+
+        [modules.b]
+        id = "shared"
+        owned_paths = ["MODULES.toml", "tools/check_modules.py", "tools/affected_tests.py"]
+        dependencies = []
+        focused_tests = ["tests/test_dummy.py"]
+        agents_rules = []
+    """)
+    (tmp_path / "MODULES.toml").write_text(content, encoding="utf-8")
+    violations, count = check_all(tmp_path / "MODULES.toml")
+    assert count == 0
+    mismatch_count = sum(
+        1
+        for v in violations
+        if "does not match its explicit 'id' field 'shared'" in v
+    )
+    assert mismatch_count == 2, (
+        "expected two mismatch diagnostics, one per mismatched table "
+        f"key, got: {violations}"
+    )
+    assert any(
+        "duplicate module id 'shared'" in v for v in violations
+    ), f"expected duplicate-effective-id diagnostic, got: {violations}"
+
+
 # ---------------------------------------------------------------------------
 # Graph / dependency validation
 # ---------------------------------------------------------------------------

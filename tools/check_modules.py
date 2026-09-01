@@ -106,6 +106,11 @@ def _validate_module_id(
     A module may report both a mismatch and a duplicate (e.g. table
     key ``b`` with ``id = "a"`` when ``a`` is already declared); both
     errors are surfaced together.
+
+    Once the id has been confirmed to be a non-empty string, that
+    effective id is recorded in `seen_ids` even when it mismatches
+    its table key, so subsequent modules claiming the same
+    effective id are flagged as duplicates.
     """
     violations: list[str] = []
     if "id" not in mod:
@@ -124,13 +129,20 @@ def _validate_module_id(
             f"MODULES.toml: module '{raw_id}' field 'id' must be non-empty"
         )
         return violations
-    # id_value is a non-empty string; report both duplicate and mismatch.
+    # id_value is a confirmed non-empty string. Record it in seen_ids
+    # so subsequent modules claiming the same effective id are flagged
+    # as duplicates — even when the id mismatches its table key. Two
+    # table keys with the same non-empty id must surface BOTH the
+    # per-key mismatch diagnostic AND the effective-id duplicate
+    # diagnostic; neither violation may be silently absorbed.
     if id_value in seen_ids:
         violations.append(
             f"MODULES.toml: duplicate module id '{id_value}' "
             f"(first declared under table key '{seen_ids[id_value]}', "
             f"also under '{raw_id}')"
         )
+    else:
+        seen_ids[id_value] = raw_id
     if id_value != raw_id:
         violations.append(
             f"MODULES.toml: module table key '{raw_id}' does not match "
@@ -172,17 +184,6 @@ def _validate_module_schema(
 
         seen_ids[raw_id] = raw_id
         mod["id"] = raw_id
-
-        # Always record the effective id (even when there were id
-        # violations) so subsequent modules claiming the same
-        # effective id are flagged as duplicates.
-        effective = mod["id"]
-        if (
-            isinstance(effective, str)
-            and effective
-            and effective not in seen_ids
-        ):
-            seen_ids[effective] = raw_id
 
         extra = set(mod) - ALLOWED_FIELDS
         if extra:
