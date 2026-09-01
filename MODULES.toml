@@ -175,7 +175,8 @@ owned_paths = [
 dependencies = ["frontend_api"]
 focused_tests = ["frontend/tests/e2e/product.spec.ts"]
 focused_commands = [
-    "npm run --prefix frontend build",
+    "npm run --prefix frontend test:e2e",
+    "npm run --prefix frontend typecheck",
 ]
 agents_rules = ["R12"]
 adrs = ["0002"]

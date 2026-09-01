@@ -136,6 +136,45 @@ def test_frontend_api_direct_owner_only(capsys: pytest.CaptureFixture[str]) -> N
     # Should contain frontend_api commands, sorted deterministically
     assert "npm test --prefix frontend" in out
     assert "npm run --prefix frontend typecheck" in out
+    # Pure frontend must NOT emit PYTEST fallback; no runtime Python tests
+    assert "PYTEST=" not in out
+    assert "tests/test_" not in out
+    assert "runtime_api" not in out
+    for line in out.splitlines():
+        if line.startswith("MODULES="):
+            assert line.strip() == "MODULES=frontend_api"
+        if line.startswith("FRONTEND_TESTS="):
+            assert "frontend/src/api/client.test.ts" in line
+        if line.startswith("COMMANDS="):
+            assert "npm test --prefix frontend" in line
+
+
+def test_frontend_shell_direct_owner_only(capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, _ = _run_affected(capsys, ["frontend/src/app.ts"])
+    assert code == 0
+    assert "MODE=FOCUSED" in out
+    assert "MODULES=frontend_shell" in out
+    # Pure frontend must NOT emit PYTEST fallback
+    assert "PYTEST=" not in out
+    assert "tests/test_" not in out
+    # Must NOT include frontend_api expansion (direct-owner only)
+    for line in out.splitlines():
+        if line.startswith("MODULES="):
+            assert line.strip() == "MODULES=frontend_shell"
+    assert "frontend_api" not in out
+    # Audit-required iteration validation for frontend_shell
+    assert "npm run --prefix frontend typecheck" in out
+    assert "npm run --prefix frontend test:e2e" in out
+    # Must contain e2e frontend test
+    assert "frontend/tests/e2e/product.spec.ts" in out
+    # Should not contain generic npm test for api (that's frontend_api only)
+    # but ensure at least typecheck + e2e are present in COMMANDS
+    for line in out.splitlines():
+        if line.startswith("FRONTEND_TESTS="):
+            assert "frontend/tests/e2e/product.spec.ts" in line
+        if line.startswith("COMMANDS="):
+            assert "npm run --prefix frontend typecheck" in line
+            assert "npm run --prefix frontend test:e2e" in line
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +221,41 @@ def test_multiple_direct_union_frontend_and_audio(capsys: pytest.CaptureFixture[
     assert "MODULES=audio,frontend_api" in out
     assert "tests/test_audio.py" in out
     assert "frontend/src/api/client.test.ts" in out
+    # Mixed must emit focused Python PYTEST for audio only and frontend validation
+    for line in out.splitlines():
+        if line.startswith("PYTEST="):
+            assert line.strip() == "PYTEST=pytest -q tests/test_audio.py"
+        if line.startswith("MODULES="):
+            assert line.strip() == "MODULES=audio,frontend_api"
+        if line.startswith("FRONTEND_TESTS="):
+            assert "frontend/src/api/client.test.ts" in line
+        if line.startswith("COMMANDS="):
+            assert "npm test --prefix frontend" in line
+    # Must NOT expand to non-direct owners
+    assert "runtime_api" not in out
+    assert "frontend_shell" not in out
+    assert "product.spec.ts" not in out
+    assert "test_capture" not in out
+
+
+def test_mixed_audio_frontend_exact_shape(capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, _ = _run_affected(capsys, ["app/audio.py", "frontend/src/api/client.ts"])
+    assert code == 0
+    assert "MODE=FOCUSED" in out
+    # Order independence: both orderings must produce same sorted output
+    code2, out2, _ = _run_affected(capsys, ["frontend/src/api/client.ts", "app/audio.py"])
+    assert code2 == 0
+    assert out == out2
+    assert "MODULES=audio,frontend_api" in out
+    for line in out.splitlines():
+        if line.startswith("PYTEST="):
+            assert line.strip() == "PYTEST=pytest -q tests/test_audio.py"
+        if line.startswith("MODULES="):
+            assert line.strip() == "MODULES=audio,frontend_api"
+    assert "frontend/src/api/client.test.ts" in out
+    assert "npm test --prefix frontend" in out
+    assert "runtime_api" not in out
+    assert "frontend_shell" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +282,28 @@ def test_deterministic_repeated_frontend(capsys: pytest.CaptureFixture[str]) -> 
     code2, out2, _ = _run_affected(capsys, ["frontend/src/api/client.ts"])
     assert code1 == 0 and code2 == 0
     assert out1 == out2
+
+
+def test_deterministic_repeated_frontend_shell(capsys: pytest.CaptureFixture[str]) -> None:
+    code1, out1, _ = _run_affected(capsys, ["frontend/src/app.ts"])
+    code2, out2, _ = _run_affected(capsys, ["frontend/src/app.ts"])
+    assert code1 == 0 and code2 == 0
+    assert out1 == out2
+    # Deterministic sorted output: repeated mixed ordering same result
+    code3, out3, _ = _run_affected(capsys, ["app/audio.py", "frontend/src/api/client.ts"])
+    code4, out4, _ = _run_affected(capsys, ["frontend/src/api/client.ts", "app/audio.py"])
+    assert out3 == out4
+
+
+def test_deterministic_mixed_and_broad(capsys: pytest.CaptureFixture[str]) -> None:
+    code1, out1, _ = _run_affected(capsys, ["app/audio.py", "frontend/src/api/client.ts"])
+    code2, out2, _ = _run_affected(capsys, ["frontend/src/api/client.ts", "app/audio.py"])
+    assert out1 == out2
+    # Frontend unmapped broad should be deterministic as well (synthetic check via real repo)
+    # Repeated frontend_api call already verified; ensure shell repeatability
+    code3, out3, _ = _run_affected(capsys, ["frontend/src/app.ts"])
+    code4, out4, _ = _run_affected(capsys, ["frontend/src/app.ts"])
+    assert out3 == out4
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +479,48 @@ def test_frontend_unmapped_includes_frontend_note(tmp_path: Path, capsys: pytest
     assert code == 2
     assert "MODE=BROAD" in out
     assert "frontend" in out.lower()
+    # BROAD must keep conservative guidance: PYTEST and FRONTEND present
+    assert "PYTEST=pytest -q" in out
+    assert "FRONTEND=" in out
+    assert "npm test --prefix frontend" in out
+    assert "NOTE=" in out
+
+    # Also verify real repo BROAD frontend-unmapped keeps same behavior
+    code2, out2, _ = _run_affected(capsys, ["frontend/src/does-not-exist.ts"])
+    assert code2 == 2
+    assert "MODE=BROAD" in out2
+    assert "PYTEST=pytest -q" in out2
+    assert "FRONTEND=" in out2
+
+
+def test_broad_frontend_unmapped_conservative(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _synthetic_base(tmp_path)
+    (tmp_path / "tests" / "test_a.py").write_text("", encoding="utf-8")
+    (tmp_path / "app" / "a.py").write_text("", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    (tmp_path / "tools" / "check_modules.py").write_text("", encoding="utf-8")
+    (tmp_path / "tools" / "affected_tests.py").write_text("", encoding="utf-8")
+    content = textwrap.dedent("""
+        [modules.a]
+        owned_paths = ["app/a.py", "tools/a.py", "frontend/src/app.ts", "reference/schema.sql", "Dockerfile"]
+        dependencies = []
+        focused_tests = ["tests/test_a.py"]
+        agents_rules = []
+
+        [modules.meta]
+        owned_paths = ["MODULES.toml", "tools/check_modules.py", "tools/affected_tests.py"]
+        dependencies = []
+        focused_tests = ["tests/test_a.py"]
+        agents_rules = []
+    """)
+    (tmp_path / "MODULES.toml").write_text(content, encoding="utf-8")
+    code, out, _ = _run_affected(capsys, ["frontend/unmapped/random.ts"], repo_root=tmp_path)
+    assert code == 2
+    assert "MODE=BROAD" in out
+    assert "REASON=" in out
+    assert "PYTEST=pytest -q" in out
+    assert "FRONTEND=npm test --prefix frontend" in out
+    assert "NOTE=frontend authoritative checks may be required" in out
 
 
 def test_missing_focused_test_gives_broad(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

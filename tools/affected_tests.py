@@ -355,8 +355,6 @@ def _resolve_emit(
 
     if sorted_py:
         lines.append(f"PYTEST=pytest -q {' '.join(sorted_py)}")
-    else:
-        lines.append("PYTEST=pytest -q")
 
     if sorted_frontend:
         lines.append(f"FRONTEND_TESTS={' '.join(sorted_frontend)}")
