@@ -96,8 +96,31 @@ Updated only at session CLOSE from repository/gate evidence.
   clean (~88 kB JS bundle), 4/4 Playwright scenarios pass against the real
   FastAPI-served compiled product (12.8 s wall clock).
 
+* **Agent-efficiency foundation is ACCEPTED, REVIEWED AND MERGED.**
+  The repository now has the canonical `MODULES.toml` machine-readable
+  16-module map; `tools/check_modules.py` is fail-closed and part of
+  `make gate`; `tools/affected_tests.py` provides iteration-time
+  dependency-scoped validation using source reverse-dependency closure plus
+  direct-only known-test handling; `WORKFLOW.md` / `PROMPTS.md` add explicit
+  `Required reading:` context boundaries without weakening global governance
+  or exact-final-candidate validation. Accepted implementation candidate:
+  `c136a2e`; exact-candidate full gate: ruff clean, mypy --strict clean on
+  39 source files, 731 pytest passed, AGENTS R1/R3/R6/R7/R12/R13 PASS,
+  MODULES validation 16 modules. Independent full-diff review:
+  `0a42fbc`, PASS WITH NON-BLOCKING NOTES, 0 blockers,
+  HISTORY_ACCEPTABLE, PROPORTIONATE. Review follow-ups N1
+  (`build_dict -> check_agents` over-selection) and N2
+  (audit Option-C/direct-owner documentation drift) are explicitly
+  non-blocking and remain recorded in
+  `reviews/agent-efficiency-foundation-c136.md`.
+
 ## Gate
 
+* Agent-efficiency exact candidate `c136a2e`: PASS — ruff clean;
+  mypy --strict clean on 39 source files; 731 pytest passed;
+  AGENTS R1/R3/R6/R7/R12/R13 PASS; MODULES validation passed
+  for 16 modules. Final merged-main gate is performed by this closure
+  worker after the STATE commit.
 * Fresh gate on slice/7 @ `3e6898b`: PASS — ruff clean, mypy strict,
   667 tests, AGENTS R1/R3/R6/R7/R12/R13.
 * Fresh gate on slice/8 @ `8f94875` (validation starting candidate):
@@ -136,13 +159,12 @@ Updated only at session CLOSE from repository/gate evidence.
 
 ## Next three actions
 
-1. Fresh Slice-9 orchestrator: lecture-app Phase-4 decomposition; ADR-0002
-   donor-evidence file `tasks/adr-0002-donor-notes.md`; supervised compose-
-   level integration per ADR-0002 §7. Slice 9 is not started.
-2. Read-only donor inspection of `~/projects/german app` and
-   `~/projects/flashcard app` per WORKFLOW §12 before any slice-9 code
-   moves; donor-specific machinery (FABLE/orchestrator governance,
-   content-boundary checks scoped to its rules, web persistence layer)
-   remains excluded by default.
-3. After slice-9 closure: audit trigger re-evaluation per `Sessions since
-   last audit` ≥ 10 or phase-boundary conditions, whichever arrives first.
+1. Before any Slice-9 implementation/review dispatch, amend the existing
+   `tasks/slice-9.md` brief with its required `Required reading:` field under
+   WORKFLOW §2; do not retroactively rewrite closed slice briefs.
+2. Complete the Slice-9 pre-dispatch blockers: read-only donor inspection and
+   `tasks/adr-0002-donor-notes.md`, plus confirmation that lecture-app Phase-4
+   decomposition is closed on the lecture side. Slice 9 remains NOT STARTED.
+3. Only after both blockers are closed, open the fresh Slice-9 orchestrator,
+   run normal startup verification, and proceed with the ADR-0002 §7
+   loopback/HTTP compose boundary and its mandatory T3 risk review.
