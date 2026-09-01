@@ -684,10 +684,18 @@ export class FlashcardApp extends LitElement {
     this.successMessage = '';
     try {
       const result = await vocabClient.lookup(query);
-      this.lookupCandidates = result.candidates;
+      const candidates = result.candidates.map((candidate) => ({
+        ...candidate,
+        status: candidate.status ?? (candidate.senses?.length ? 'resolved' : 'needs_gloss'),
+        senses: candidate.senses?.map((sense) => ({
+          ...sense,
+          gloss: sense.gloss ?? sense.meanings?.[0]?.text ?? '',
+        })),
+      }));
+      this.lookupCandidates = candidates;
       this.lookupAssetToken = result.asset_token;
       this.lookupStatus = 'ready';
-      const soleCandidate = result.candidates.length === 1 ? result.candidates[0] : undefined;
+      const soleCandidate = candidates.length === 1 ? candidates[0] : undefined;
       if (soleCandidate) this.selectCandidate(soleCandidate);
     } catch (error) {
       this.lookupStatus = 'error';

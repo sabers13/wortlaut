@@ -985,6 +985,66 @@ def test_cards_next_rendering(
     assert len(back["examples"]) > 0
 
 
+def test_cards_next_skips_not_yet_due_cards(
+    client: TestClient, app_instance: Any, user_db: sqlite3.Connection
+) -> None:
+    """GET /vocab/cards/next returns only cards due at the request time."""
+    active_token = app_instance.state.runtime.asset_token
+    headers_valid = {"X-Flashcards-Request": "1", "Content-Type": "application/json"}
+    lemma_ref = compute_lemma_semantic_ref("Haus", "NOUN", "das")
+    sense_ref = compute_sense_semantic_ref(
+        lemma_ref, "wiktextract:enwiktionary", "senseid:en-house-1"
+    )
+
+    r_note = client.post(
+        "/vocab/notes",
+        json={
+            "lemma_semantic_ref": lemma_ref,
+            "sense_semantic_ref": sense_ref,
+            "status": "resolved",
+            "meaning_languages": ["en"],
+            "asset_token": active_token,
+            "deck_name": "Due filter",
+        },
+        headers=headers_valid,
+    )
+    assert r_note.status_code == 201
+    note_id = r_note.json()["note_id"]
+    card_row = user_db.execute("SELECT id FROM card WHERE note_id = ?", (note_id,)).fetchone()
+    assert card_row is not None
+    card_id = int(card_row[0])
+
+    r_due = client.get("/vocab/cards/next")
+    assert r_due.status_code == 200
+    assert r_due.json()["card"]["card_id"] == card_id
+
+    r_review = client.post(
+        f"/vocab/cards/{card_id}/review",
+        json={"confidence": 5},
+        headers=headers_valid,
+    )
+    assert r_review.status_code == 200
+    assert client.get("/vocab/cards/next").json()["card"] is None
+
+    future_due_at = "2099-01-01T00:00:00+00:00"
+    with user_db:
+        future_note = user_db.execute(
+            """
+            INSERT INTO note (lemma_semantic_ref, status, created_at, due_at)
+            VALUES (?, 'needs_gloss', ?, ?)
+            """,
+            ("future-only", future_due_at, future_due_at),
+        )
+        assert future_note.lastrowid is not None
+        future_note_id = future_note.lastrowid
+        user_db.execute(
+            "INSERT INTO card (note_id, state, step, due_at) VALUES (?, ?, ?, ?)",
+            (future_note_id, 1, None, future_due_at),
+        )
+
+    assert client.get("/vocab/cards/next").json()["card"] is None
+
+
 # ---------------------------------------------------------------------------
 # 9. Review confidence-only contract (ADR-0003)
 # ---------------------------------------------------------------------------
