@@ -28,6 +28,7 @@ import venv
 from contextlib import closing
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -166,7 +167,10 @@ def _instrument_launcher_for_reexec(launcher: Path) -> None:
 
 def _post_reexec_record(stdout: str) -> dict[str, object]:
     line = next(line for line in stdout.splitlines() if line.startswith("REEXEC_TEST="))
-    return json.loads(line.removeprefix("REEXEC_TEST="))
+    return cast(
+        dict[str, object],
+        json.loads(line.removeprefix("REEXEC_TEST=")),
+    )
 
 
 @pytest.mark.parametrize(
