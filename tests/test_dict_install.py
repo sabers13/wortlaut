@@ -29,6 +29,7 @@ from app.dict_install import (
     load_manifest,
     parse_manifest_payload,
     verify_dictionary_bytes,
+    verify_dictionary_identity,
 )
 from tools.build_dict import compute_lemma_semantic_ref, compute_sense_semantic_ref
 
@@ -261,6 +262,98 @@ def test_verify_dictionary_bytes_quick_check_fails(
             expected_sha256="0" * 64,
             expected_bytes=len(b"NOT A SQLITE FILE"),
         )
+
+
+def test_verify_dictionary_identity_ok(synthetic_dict: Path) -> None:
+    digest = verify_dictionary_identity(
+        synthetic_dict,
+        expected_sha256=compute_sha256(synthetic_dict),
+        expected_bytes=synthetic_dict.stat().st_size,
+    )
+    assert digest == compute_sha256(synthetic_dict)
+
+
+def test_verify_dictionary_identity_size_mismatch_no_sqlite_open(
+    monkeypatch: pytest.MonkeyPatch, synthetic_dict: Path
+) -> None:
+    def _boom(*_args: object, **_kwargs: object) -> sqlite3.Connection:
+        raise AssertionError("verify_dictionary_identity must not open SQLite")
+
+    monkeypatch.setattr("app.dict_install._open_readonly_sqlite", _boom)
+    with pytest.raises(DictionaryInstallerError, match="size mismatch"):
+        verify_dictionary_identity(
+            synthetic_dict,
+            expected_sha256=compute_sha256(synthetic_dict),
+            expected_bytes=synthetic_dict.stat().st_size + 1,
+        )
+
+
+def test_verify_dictionary_identity_sha_mismatch_no_sqlite_open(
+    monkeypatch: pytest.MonkeyPatch, synthetic_dict: Path
+) -> None:
+    def _boom(*_args: object, **_kwargs: object) -> sqlite3.Connection:
+        raise AssertionError("verify_dictionary_identity must not open SQLite")
+
+    monkeypatch.setattr("app.dict_install._open_readonly_sqlite", _boom)
+    with pytest.raises(DictionaryInstallerError, match="SHA-256 mismatch"):
+        verify_dictionary_identity(
+            synthetic_dict,
+            expected_sha256="0" * 64,
+            expected_bytes=synthetic_dict.stat().st_size,
+        )
+
+
+def test_verify_dictionary_identity_never_invokes_quick_check_or_validator(
+    monkeypatch: pytest.MonkeyPatch, synthetic_dict: Path
+) -> None:
+    """The identity helper must succeed on a matching candidate without ever
+    opening the file as SQLite or calling the full PART-A candidate
+    validator — those remain ``verify_dictionary_bytes`` / ``DictionaryRuntime``
+    responsibilities.
+    """
+
+    def _sqlite_boom(*_args: object, **_kwargs: object) -> sqlite3.Connection:
+        raise AssertionError("verify_dictionary_identity must not open SQLite")
+
+    def _validator_boom(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("verify_dictionary_identity must not run PART-A validation")
+
+    monkeypatch.setattr("app.dict_install._open_readonly_sqlite", _sqlite_boom)
+    monkeypatch.setattr("app.dictionary.validate_candidate_dictionary", _validator_boom)
+
+    digest = verify_dictionary_identity(
+        synthetic_dict,
+        expected_sha256=compute_sha256(synthetic_dict),
+        expected_bytes=synthetic_dict.stat().st_size,
+    )
+    assert len(digest) == 64
+
+
+def test_verify_dictionary_bytes_still_runs_full_validator(
+    monkeypatch: pytest.MonkeyPatch, synthetic_dict: Path
+) -> None:
+    """Refactoring ``verify_dictionary_bytes`` to reuse the identity helper
+    must not drop its quick_check / full PART-A validation — it must still
+    perform identity, quick_check, AND the full candidate validation.
+    """
+    import app.dictionary as dictionary_module
+
+    real_validate = dictionary_module.validate_candidate_dictionary
+    calls: list[Path] = []
+
+    def _counting(path: Path) -> object:
+        calls.append(Path(path))
+        return real_validate(path)
+
+    monkeypatch.setattr(dictionary_module, "validate_candidate_dictionary", _counting)
+
+    digest = verify_dictionary_bytes(
+        synthetic_dict,
+        expected_sha256=compute_sha256(synthetic_dict),
+        expected_bytes=synthetic_dict.stat().st_size,
+    )
+    assert len(digest) == 64
+    assert calls == [synthetic_dict]
 
 
 def test_install_dictionary_reuses_existing_valid(

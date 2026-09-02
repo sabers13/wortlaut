@@ -6,9 +6,16 @@ asset:
 
 * Manifest parsing — a small JSON document that names the dictionary
   version, file size, SHA-256, classification, and download URL.
-* Verification — exact byte-size match, SHA-256 over the file bytes,
-  ``PRAGMA quick_check``, and the full PART-A schema validation
-  performed by ``app.dictionary.validate_candidate_dictionary``.
+* Verification, in two deliberately separate tiers:
+    - ``verify_dictionary_identity`` — release identity only (exact byte
+      size, streaming SHA-256). No SQLite is opened. This is the tier
+      canonical launcher startup uses before any user data is touched.
+    - ``verify_dictionary_bytes`` — identity plus ``PRAGMA quick_check``
+      and the full PART-A schema validation performed by
+      ``app.dictionary.validate_candidate_dictionary``. This is the
+      installer's full-verification tier; ``DictionaryRuntime``
+      performs the equivalent full validation again at activation, so
+      the ~945 MB asset is never validated twice in the same startup.
 * Atomic install — every successful install ends in a rename of a
   fully-verified temp file onto the active slot. Failed downloads leave
   no partial artifact on disk; a verified existing dictionary is
@@ -213,17 +220,27 @@ def _open_readonly_sqlite(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(uri, uri=True, check_same_thread=False)
 
 
-def verify_dictionary_bytes(
+def verify_dictionary_identity(
     candidate: Path | str,
     *,
     expected_sha256: str,
     expected_bytes: int,
 ) -> str:
-    """Verify byte size, SHA-256, and SQLite quick_check on a candidate.
+    """Verify exact release identity only: file presence, byte size, SHA-256.
+
+    This is the lightweight precheck used before any full validation. It
+    deliberately does NOT open the file as SQLite, run ``PRAGMA
+    quick_check``, or call :func:`app.dictionary.validate_candidate_dictionary`
+    — those remain the responsibility of :func:`verify_dictionary_bytes` (the
+    installer's full verification) and ``DictionaryRuntime`` (runtime
+    integrity/schema activation). Keeping this helper narrow lets callers
+    that only need to prove "this file is exactly the release the manifest
+    names" do so with a single streaming read instead of a full
+    PART-A validation pass.
 
     Returns the recomputed SHA-256 on success; raises
     :class:`DictionaryInstallerError` on any mismatch. The candidate is
-    left untouched so a subsequent atomic rename can install it.
+    left untouched.
     """
     target = Path(candidate)
     if not target.is_file():
@@ -240,6 +257,27 @@ def verify_dictionary_bytes(
             f"dictionary SHA-256 mismatch: got {actual_sha}, "
             f"expected {expected_sha256}"
         )
+    return actual_sha
+
+
+def verify_dictionary_bytes(
+    candidate: Path | str,
+    *,
+    expected_sha256: str,
+    expected_bytes: int,
+) -> str:
+    """Verify byte size, SHA-256, SQLite quick_check, and full PART-A validation.
+
+    Returns the recomputed SHA-256 on success; raises
+    :class:`DictionaryInstallerError` on any mismatch. The candidate is
+    left untouched so a subsequent atomic rename can install it. Identity
+    (size/SHA) is delegated to :func:`verify_dictionary_identity` so the two
+    checks share one implementation instead of drifting apart.
+    """
+    target = Path(candidate)
+    actual_sha = verify_dictionary_identity(
+        target, expected_sha256=expected_sha256, expected_bytes=expected_bytes
+    )
     try:
         conn = _open_readonly_sqlite(target)
     except sqlite3.OperationalError as exc:

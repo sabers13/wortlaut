@@ -150,9 +150,20 @@ def _maybe_install(
     *,
     manifest_path: Path,
     target_dir: Path,
-) -> None:
+) -> Path | None:
+    """Install the manifest's dictionary into ``target_dir`` when requested.
+
+    Returns the installed/verified path on success so ``main`` can skip an
+    immediately-redundant release-identity re-check of the exact same file
+    in the same process (``install_dictionary`` already performed full
+    identity + quick_check + PART-A validation on it). Returns ``None`` when
+    installation was not requested. This is a plain local return value, not
+    a persisted trust marker: it only exists for the remainder of this
+    ``main`` call and is only honoured by the caller when it names the exact
+    canonical path being started.
+    """
     if not install:
-        return
+        return None
     from app.dict_install import (  # noqa: PLC0415
         DictionaryInstallerError,
         install_dictionary,
@@ -165,7 +176,7 @@ def _maybe_install(
         sys.stderr.write(f"manifest error: {exc}\n")
         raise SystemExit(2) from exc
     try:
-        install_dictionary(manifest, target_dir=target_dir)
+        return install_dictionary(manifest, target_dir=target_dir)
     except DictionaryInstallerError as exc:
         sys.stderr.write(f"dictionary install failed: {exc}\n")
         raise SystemExit(3) from exc
@@ -183,10 +194,19 @@ def _load_active_manifest(manifest_path: Path) -> "DictionaryManifest":
 
 
 def _verify_canonical_dictionary(*, dictionary_path: Path, manifest_path: Path) -> None:
-    """Require the canonical asset to match the selected release manifest."""
+    """Require the canonical asset to match the selected release manifest.
+
+    This performs the lightweight release-identity precheck only — exact
+    manifest filename, exact byte size, exact streaming SHA-256 — before any
+    user database write. It deliberately does NOT run ``PRAGMA quick_check``
+    or the full PART-A schema validation: that full validation happens once,
+    in ``DictionaryRuntime``, when the application activates the asset.
+    Running it here too would stream and validate the same ~945 MB file
+    twice on every ordinary startup.
+    """
     from app.dict_install import (  # noqa: PLC0415
         DictionaryInstallerError,
-        verify_dictionary_bytes,
+        verify_dictionary_identity,
     )
 
     manifest = _load_active_manifest(manifest_path)
@@ -205,7 +225,7 @@ def _verify_canonical_dictionary(*, dictionary_path: Path, manifest_path: Path) 
         )
         raise SystemExit(1)
     try:
-        verify_dictionary_bytes(
+        verify_dictionary_identity(
             dictionary_path,
             expected_sha256=manifest.sha256,
             expected_bytes=manifest.bytes,
@@ -248,18 +268,28 @@ def main(argv: list[str] | None = None) -> int:
         else (REPO_ROOT / "release" / "dictionary-manifest-v2.json")
     )
 
+    installed_path: Path | None = None
     if args.install_dictionary:
-        _maybe_install(
+        installed_path = _maybe_install(
             True,
             manifest_path=manifest_path,
             target_dir=paths.dictionary_dir,
         )
 
     if args.dict_path is None:
-        _verify_canonical_dictionary(
-            dictionary_path=paths.dictionary_path,
-            manifest_path=manifest_path,
-        )
+        if installed_path is not None and installed_path == paths.dictionary_path:
+            # install_dictionary() already performed full identity +
+            # quick_check + PART-A validation against this exact manifest
+            # and path in this same process; re-hashing the same ~945 MB
+            # file here for identity alone would be pure duplicate work.
+            # DictionaryRuntime still performs its own full validation
+            # below when the app activates the asset.
+            pass
+        else:
+            _verify_canonical_dictionary(
+                dictionary_path=paths.dictionary_path,
+                manifest_path=manifest_path,
+            )
     elif not paths.dictionary_path.is_file():
         sys.stderr.write(
             f"dictionary asset is missing: {paths.dictionary_path}\n"

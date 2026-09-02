@@ -113,14 +113,18 @@ self-contained file you can import into Anki.
 
 ## Dictionary verification
 
-Every canonical dictionary download (or manual placement) is verified against
-the active `release/dictionary-manifest-v2.json` manifest. The verifier
-checks:
+Dictionary verification happens in two deliberately separate stages so the
+~945 MB asset is never validated twice on the same startup:
 
-1. exact byte size;
-2. SHA-256 over the bytes;
-3. `PRAGMA quick_check` on the SQLite file;
-4. the full PART-A schema validation reused from the live app.
+1. **Release identity precheck** (every ordinary canonical launch, before
+   any user data is touched): exact manifest filename, exact byte size,
+   streaming SHA-256. No SQLite is opened at this stage.
+2. **Full validation**: `PRAGMA quick_check` plus the full PART-A schema
+   validation reused from the live app. This runs once per install
+   (`--install-dictionary`, or when placing a file manually and letting the
+   installer verify it) and once more at runtime activation
+   (`DictionaryRuntime`), which is the authoritative integrity/schema gate
+   for whichever dictionary file is actually opened.
 
 Any failure aborts the install, deletes the partial file, and never
 overwrites a valid dictionary. The dictionary URL is in the manifest

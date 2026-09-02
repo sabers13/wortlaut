@@ -14,6 +14,7 @@ caught.
 from __future__ import annotations
 
 import http.server
+import importlib.util
 import json
 import os
 import socket
@@ -22,8 +23,10 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import venv
 from contextlib import closing
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 import pytest
@@ -34,6 +37,33 @@ from tools.build_dict import compute_lemma_semantic_ref, compute_sense_semantic_
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "reference" / "schema.sql"
 LAUNCHER = Path(__file__).resolve().parents[1] / "flashcard"
 PYTHON = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
+
+
+def _load_launcher_module() -> types.ModuleType:
+    """Load ``./flashcard`` as an in-process module for call-count assertions.
+
+    The launcher has no ``.py`` suffix, so the loader must be constructed
+    explicitly rather than inferred from the filename. Loaded fresh per
+    call; ``if __name__ == "__main__":`` never runs because the module is
+    imported, not executed as ``__main__``, so no venv re-exec happens.
+    """
+    loader = SourceFileLoader("flashcard_launcher_inprocess", str(LAUNCHER))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def _fake_uvicorn() -> types.ModuleType:
+    """A stand-in ``uvicorn`` module whose ``run`` never blocks or binds a port."""
+    fake = types.ModuleType("uvicorn")
+
+    def _run(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    fake.run = _run  # type: ignore[attr-defined]
+    return fake
 
 
 def _part_a_sql() -> str:
@@ -435,6 +465,202 @@ def test_canonical_dictionary_manifest_filename_mismatch_fails(
     assert proc.returncode == 2
     assert "filename does not match the canonical path" in proc.stderr
     assert not (data_dir / "flashcards.sqlite").exists()
+
+
+def test_ordinary_canonical_startup_uses_identity_not_full_installer_verification(
+    tmp_path: Path, synthetic_dict: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ordinary canonical startup must call the lightweight identity helper
+    exactly once, and must NEVER call the installer's full
+    ``verify_dictionary_bytes`` (Repair 4: avoid duplicate validation).
+    """
+    module = _load_launcher_module()
+    monkeypatch.setitem(sys.modules, "uvicorn", _fake_uvicorn())
+
+    data_dir = tmp_path / "data"
+    canonical = data_dir / "dictionary" / "dictionary.sqlite"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_bytes(synthetic_dict.read_bytes())
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, filename="dictionary.sqlite", dictionary=synthetic_dict)
+
+    import app.dict_install as dict_install_module
+
+    real_identity = dict_install_module.verify_dictionary_identity
+    identity_calls: list[Path] = []
+
+    def _counting_identity(
+        path: Path | str, *, expected_sha256: str, expected_bytes: int
+    ) -> str:
+        identity_calls.append(Path(path))
+        return real_identity(
+            path, expected_sha256=expected_sha256, expected_bytes=expected_bytes
+        )
+
+    def _bytes_boom(path: Path | str, *, expected_sha256: str, expected_bytes: int) -> str:
+        raise AssertionError(
+            "ordinary canonical startup must not call verify_dictionary_bytes"
+        )
+
+    monkeypatch.setattr(dict_install_module, "verify_dictionary_identity", _counting_identity)
+    monkeypatch.setattr(dict_install_module, "verify_dictionary_bytes", _bytes_boom)
+
+    rc = module.main(
+        [
+            "--data-dir",
+            str(data_dir),
+            "--manifest",
+            str(manifest_path),
+            "--no-browser",
+        ]
+    )
+    assert rc == 0
+    assert len(identity_calls) == 1
+
+
+def test_same_process_successful_install_skips_redundant_identity_recheck(
+    tmp_path: Path, synthetic_dict: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A same-process successful ``--install-dictionary`` must not repeat a
+    manifest SHA verification of the exact same file right afterward: the
+    installer already ran full identity + quick_check + PART-A validation.
+    """
+    module = _load_launcher_module()
+    monkeypatch.setitem(sys.modules, "uvicorn", _fake_uvicorn())
+
+    data_dir = tmp_path / "data"
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, filename="dictionary.sqlite", dictionary=synthetic_dict)
+
+    # Pre-place an already-verified dictionary at the canonical install slot
+    # so install_dictionary() takes its "existing file verifies" branch
+    # (still one full verify_dictionary_bytes pass) without needing a
+    # download server.
+    canonical_dir = data_dir / "dictionary"
+    canonical_dir.mkdir(parents=True)
+    (canonical_dir / "dictionary.sqlite").write_bytes(synthetic_dict.read_bytes())
+
+    import app.dict_install as dict_install_module
+
+    real_identity = dict_install_module.verify_dictionary_identity
+    identity_calls: list[Path] = []
+
+    def _counting_identity(
+        path: Path | str, *, expected_sha256: str, expected_bytes: int
+    ) -> str:
+        identity_calls.append(Path(path))
+        return real_identity(
+            path, expected_sha256=expected_sha256, expected_bytes=expected_bytes
+        )
+
+    monkeypatch.setattr(dict_install_module, "verify_dictionary_identity", _counting_identity)
+
+    def _canonical_boom(*, dictionary_path: Path, manifest_path: Path) -> None:
+        raise AssertionError(
+            "same-process successful install must not re-run canonical "
+            "identity verification"
+        )
+
+    monkeypatch.setattr(module, "_verify_canonical_dictionary", _canonical_boom)
+
+    rc = module.main(
+        [
+            "--data-dir",
+            str(data_dir),
+            "--manifest",
+            str(manifest_path),
+            "--install-dictionary",
+            "--no-browser",
+        ]
+    )
+    assert rc == 0
+    # Exactly one identity pass total: the installer's own, inside
+    # verify_dictionary_bytes(). No redundant post-install re-check.
+    assert len(identity_calls) == 1
+
+
+def test_runtime_validation_reached_after_valid_canonical_identity(
+    tmp_path: Path, synthetic_dict: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a valid canonical identity precheck, DictionaryRuntime must
+    still perform its own full integrity/schema validation exactly once.
+    """
+    module = _load_launcher_module()
+    monkeypatch.setitem(sys.modules, "uvicorn", _fake_uvicorn())
+
+    data_dir = tmp_path / "data"
+    canonical = data_dir / "dictionary" / "dictionary.sqlite"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_bytes(synthetic_dict.read_bytes())
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, filename="dictionary.sqlite", dictionary=synthetic_dict)
+
+    import app.deck as deck_module
+
+    real_validate = deck_module.validate_candidate_dictionary  # type: ignore[attr-defined]
+    runtime_calls: list[Path] = []
+
+    def _counting_validate(path: Path) -> object:
+        runtime_calls.append(Path(path))
+        return real_validate(path)
+
+    monkeypatch.setattr(deck_module, "validate_candidate_dictionary", _counting_validate)
+
+    rc = module.main(
+        [
+            "--data-dir",
+            str(data_dir),
+            "--manifest",
+            str(manifest_path),
+            "--no-browser",
+        ]
+    )
+    assert rc == 0
+    assert len(runtime_calls) == 1
+
+
+def test_explicit_dict_path_skips_manifest_but_still_runtime_validated(
+    tmp_path: Path, synthetic_dict: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit ``--dict-path`` must not trigger manifest-identity
+    verification, but DictionaryRuntime must still validate it.
+    """
+    module = _load_launcher_module()
+    monkeypatch.setitem(sys.modules, "uvicorn", _fake_uvicorn())
+
+    data_dir = tmp_path / "data"
+
+    import app.deck as deck_module
+    import app.dict_install as dict_install_module
+
+    identity_calls: list[Path] = []
+
+    def _identity_boom(path: Path | str, *, expected_sha256: str, expected_bytes: int) -> str:
+        identity_calls.append(Path(path))
+        raise AssertionError("--dict-path must not trigger manifest identity verification")
+
+    real_validate = deck_module.validate_candidate_dictionary  # type: ignore[attr-defined]
+    runtime_calls: list[Path] = []
+
+    def _counting_validate(path: Path) -> object:
+        runtime_calls.append(Path(path))
+        return real_validate(path)
+
+    monkeypatch.setattr(dict_install_module, "verify_dictionary_identity", _identity_boom)
+    monkeypatch.setattr(deck_module, "validate_candidate_dictionary", _counting_validate)
+
+    rc = module.main(
+        [
+            "--data-dir",
+            str(data_dir),
+            "--dict-path",
+            str(synthetic_dict),
+            "--no-browser",
+        ]
+    )
+    assert rc == 0
+    assert identity_calls == []
+    assert len(runtime_calls) == 1
 
 
 def test_launcher_install_dictionary_lands_at_canonical_filename(
