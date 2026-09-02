@@ -4,6 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const frontendDir = path.dirname(fileURLToPath(import.meta.url));
+const repoDir = path.resolve(frontendDir, '..');
+const repoPython = path.join(repoDir, '.venv', 'bin', 'python');
 const e2eStateDir = path.join(frontendDir, 'test-results', '.e2e-state');
 const e2eTmpDir = path.join(frontendDir, 'test-results', '.e2e-tmp');
 mkdirSync(e2eTmpDir, { recursive: true });
@@ -39,7 +41,7 @@ export default defineConfig({
     env: {
       E2E_STATE_DIR: e2eStateDir,
       E2E_PORT: '8817',
-      PYTHON_BIN: '/home/saber/projects/flashcard/.venv/bin/python',
+      PYTHON_BIN: repoPython,
       TMPDIR: e2eTmpDir,
       TEMP: e2eTmpDir,
       TMP: e2eTmpDir,

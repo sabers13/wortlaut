@@ -3,7 +3,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
-python_bin="${PYTHON_BIN:-/home/saber/projects/flashcard/.venv/bin/python}"
+python_bin="${PYTHON_BIN:-$repo/.venv/bin/python}"
 if ! command -v "$python_bin" >/dev/null 2>&1; then
   python_bin=python3
 fi
