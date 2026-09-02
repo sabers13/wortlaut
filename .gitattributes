@@ -1,4 +1,0 @@
-# Mark generated production frontend assets as vendored/binary so
-# `git diff --check` skips their trailing whitespace / line-length
-# noise (Vite minifies into multi-thousand-character lines).
-app/frontend/** binary

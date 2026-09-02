@@ -54,12 +54,12 @@ python3 -m venv .venv
 # 3. Install the spaCy German model the resolver depends on
 .venv/bin/python -m spacy download de_core_news_md
 
-# 4. Obtain the verified dictionary. Until the production artefact is
+# 4. Obtain the verified v2 dictionary. Until the production artefact is
 #    published (see "Dictionary publication status" below),
 #    `--install-dictionary` will fail closed. Place a verified
 #    `dictionary.sqlite` at the default slot:
 #       $XDG_DATA_HOME/flashcard/dictionary/dictionary.sqlite
-#    using the SHA-256 / size in `release/dictionary-manifest-v1.json`.
+#    using the SHA-256 / size in `release/dictionary-manifest-v2.json`.
 #    Once the dictionary is published, `./flashcard --install-dictionary`
 #    will fetch and verify it automatically.
 
@@ -113,8 +113,8 @@ self-contained file you can import into Anki.
 
 ## Dictionary verification
 
-Every dictionary download (or manual placement) is verified against
-the `release/dictionary-manifest-v1.json` manifest. The verifier
+Every canonical dictionary download (or manual placement) is verified against
+the active `release/dictionary-manifest-v2.json` manifest. The verifier
 checks:
 
 1. exact byte size;
@@ -130,28 +130,28 @@ against any host (GitHub Release, public artifact mirror, local
 
 ## Dictionary publication status
 
-The standalone release code on this branch is ready. The dictionary
-artefact itself is **not yet published**: `download_url` is `null` in
-`release/dictionary-manifest-v1.json` and `--install-dictionary` will
-fail closed. Until a later orchestrator-authorized publication worker
-fills in the real URL, place a verified `dictionary.sqlite` (matching
-the manifest's pinned SHA-256 / size) at the default slot manually:
+The recovered v2 dictionary asset is **not yet publicly published**:
+`download_url` is `null` in `release/dictionary-manifest-v2.json` and
+`--install-dictionary` will fail closed. Until publication is authorized,
+place a verified `dictionary.sqlite` (matching the v2 manifest's pinned
+SHA-256 / size) at the default slot manually:
 
 ```
 $XDG_DATA_HOME/flashcard/dictionary/dictionary.sqlite
 ```
 
-`dictionary.sqlite` is the canonical installed filename; it does not
-change between manifest versions — the manifest's `sha256` is the
-durable identity.
+`dictionary.sqlite` is the canonical installed filename; it does not change
+between manifest versions — the manifest's `sha256` is the durable identity.
+`--dict-path` is an advanced developer/recovery override; it still undergoes
+PART-A validation, but deliberately does not assert the active release identity.
 
 ## Updating the dictionary
 
 The launcher does not silently upgrade. To install a newer
 dictionary release:
 
-1. Place the new `dictionary-manifest-vN.json` (and optionally
-   `ATTRIBUTION.md` / `LICENSE`) in `release/`.
+1. Place the new `dictionary-manifest-vN.json` (and matching attribution /
+   `LICENSE`) in `release/`.
 2. Run `./flashcard --manifest release/dictionary-manifest-vN.json
    --install-dictionary --data-dir <your data dir>`.
 
@@ -212,8 +212,8 @@ a literal newline inside an Anki field).
 | ---------------------------------------- | ----------------------------------------------------------- |
 | "repository virtualenv is missing"       | Run `python3 -m venv .venv && .venv/bin/pip install -e .` once. |
 | "dictionary asset is missing"            | Place a verified `dictionary.sqlite` at the default slot, or run `./flashcard --install-dictionary` (once the production artefact is published). |
-| "dictionary verification failed"        | The file under `dictionary/` does not match the manifest. Remove the file and re-install it. |
-| "no verified dictionary and the manifest has no download_url" | The production artefact is not yet published. Place `dictionary.sqlite` manually at the default slot. |
+| "dictionary verification failed"        | The canonical file under `dictionary/` does not match the active v2 manifest. Remove the file and re-install it. |
+| "no verified dictionary and the manifest has no download_url" | The v2 production artefact is not yet published. Place `dictionary.sqlite` manually at the default slot. |
 | Browser does not open                    | Use `--no-browser` and visit <http://127.0.0.1:8000> yourself. |
 | Port 8000 already in use                 | Pass `--port 8001` (and update your browser bookmark). The same-origin Origin header is accepted at the new port automatically. |
 | `spacy` model not installed              | Run `.venv/bin/python -m spacy download de_core_news_md`.   |

@@ -193,6 +193,19 @@ def test_load_manifest_malformed_json(tmp_path: Path) -> None:
         load_manifest(path)
 
 
+def test_default_v2_manifest_and_historical_v1_manifest_load() -> None:
+    release_dir = Path(__file__).resolve().parents[1] / "release"
+    v2 = load_manifest(release_dir / "dictionary-manifest-v2.json")
+    v1 = load_manifest(release_dir / "dictionary-manifest-v1.json")
+    assert v2.version == "v2"
+    assert v2.filename == "dictionary.sqlite"
+    assert v2.sha256 == "1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c"
+    assert v2.bytes == 945418240
+    assert v2.download_url is None
+    assert v1.version == "v1"
+    assert v1.sha256 == "75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97"
+
+
 def test_expected_helpers(manifest: DictionaryManifest) -> None:
     assert expected_filename(manifest) == manifest.filename
     assert expected_sha256(manifest) == manifest.sha256

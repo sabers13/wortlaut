@@ -1,14 +1,16 @@
-# Flashcard Dictionary Release Manifest (v1)
+# Flashcard Dictionary Release Metadata
 
 This directory contains the standalone release metadata for the
 read-only dictionary asset. The actual `*.sqlite` file is **not**
 checked in: the dictionary is a distributable asset downloaded (or
 manually placed) at install time.
 
-| File                      | Purpose                                            |
-| ------------------------- | -------------------------------------------------- |
-| `dictionary-manifest-v1.json` | Machine-readable manifest: filename, exact SHA-256, byte size, classification, attribution reference, optional download URL. |
-| `ATTRIBUTION.md`          | Human-readable summary of upstream sources and licences (German / English Wiktionary, Tatoeba). |
+| File | Purpose |
+| --- | --- |
+| `dictionary-manifest-v1.json` | Historical Stage-02 manifest. |
+| `ATTRIBUTION.md` | Historical Stage-02 attribution. |
+| `dictionary-manifest-v2.json` | Active technical-candidate manifest for the recovered Stage-04 asset. |
+| `ATTRIBUTION-v2.md` | Attribution and rights status for the v2 candidate. |
 | `LICENSE/`                | (Empty placeholder; CC BY-SA / CC BY 2.0 FR licence texts are bundled with the published dictionary artefact, not with the manifest.) |
 
 The manifest's `filename` field is `dictionary.sqlite`. The standalone
@@ -18,21 +20,26 @@ the next normal launch finds it without needing `--dict-path`. The
 same filename is used for every manifest version (`v1`, `v2`, …); the
 manifest's `sha256` is the durable identity, not the filename.
 
-## Release publication status
+## Release identities and publication status
 
-**Release code: ready.**
+**V1 is historical.** It describes the source-backed Stage-02 asset with SHA-256
+`75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97`. That exact
+asset is no longer locally recovered; its manifest and attribution are immutable
+historical provenance.
 
-**Dictionary publication: pending.** This branch is the standalone
-release candidate: the code, manifest shape, installer, and end-user
-install/launch commands are ready to ship, but the dictionary artefact
-itself is not yet published. The manifest's `download_url` is
-intentionally `null`, and `--install-dictionary` will fail closed
-until a later orchestrator-authorized publication worker fills in the
-real URL. End users can still obtain the dictionary manually by
-placing a verified `dictionary.sqlite` at the default slot — the
-filename and SHA-256 documented in the manifest are the contract.
+**V2 is the active technical candidate.** It represents the exact recovered
+Stage-04 asset:
 
-When the production dictionary is published, the only change required
-in this directory is the `download_url` field. The `filename`,
-`sha256`, `bytes`, and `classification` are pinned for v1 and are not
-edited by this repair.
+| Field | Value |
+| --- | --- |
+| SHA-256 | `1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c` |
+| Bytes | `945418240` |
+| Classification | `source-backed-stage02-plus-stage04-canary` |
+| Canonical local filename | `dictionary.sqlite` |
+
+The v2 `download_url` is intentionally `null`; it is not publicly released.
+Publication of the exact Stage-04 asset remains blocked pending owner confirmation
+of redistribution rights for the contributed rows documented in `ATTRIBUTION-v2.md`.
+Once authorized and published, a remote asset may be named `dictionary-v2.sqlite`,
+while the installer will atomically activate it under the canonical local name
+`dictionary.sqlite`.

@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
 import socket
 import sqlite3
 import subprocess
 import sys
 import threading
 import time
+import venv
 from contextlib import closing
 from pathlib import Path
 
@@ -110,6 +112,100 @@ def _run_launcher(
         check=False,
     )
     return proc
+
+
+def _make_repo_venv(repo: Path) -> Path:
+    """Create a minimal repository-local interpreter for launcher tests."""
+    venv.EnvBuilder(with_pip=False).create(repo / ".venv")
+    return repo / ".venv" / "bin" / "python"
+
+
+def _instrument_launcher_for_reexec(launcher: Path) -> None:
+    """Expose post-reexec state in a disposable launcher copy only."""
+    text = launcher.read_text(encoding="utf-8")
+    text = text.replace("import argparse\n", "import argparse\nimport json\n", 1)
+    text = text.replace(
+        "    _reexec_into_venv()\n    raise SystemExit(main())",
+        "    _reexec_into_venv()\n"
+        "    print('REEXEC_TEST=' + json.dumps({'prefix': sys.prefix, 'argv': sys.argv}))\n"
+        "    raise SystemExit(main())",
+        1,
+    )
+    launcher.write_text(text, encoding="utf-8")
+
+
+def _post_reexec_record(stdout: str) -> dict[str, object]:
+    line = next(line for line in stdout.splitlines() if line.startswith("REEXEC_TEST="))
+    return json.loads(line.removeprefix("REEXEC_TEST="))
+
+
+@pytest.mark.parametrize(
+    ("use_other_venv", "marker"), [(False, False), (True, False), (True, True)]
+)
+def test_launcher_reexecs_only_into_repository_venv(
+    tmp_path: Path, use_other_venv: bool, marker: bool
+) -> None:
+    """System and unrelated venv launches must enter this repository's venv.
+
+    The instrumented disposable launcher copy records post-reexec state, making
+    this a subprocess test rather than a unit test of the helper alone. It also
+    proves the re-exec marker cannot make an unrelated environment acceptable
+    and preserves arguments.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    launcher = repo / "flashcard"
+    launcher.write_bytes(LAUNCHER.read_bytes())
+    _instrument_launcher_for_reexec(launcher)
+    launcher.chmod(0o755)
+    repo_python = _make_repo_venv(repo)
+    system_python = Path(sys.base_prefix) / "bin" / "python3"
+    assert system_python.is_file()
+    command_python = str(system_python)
+    if use_other_venv:
+        other = tmp_path / "other"
+        venv.EnvBuilder(with_pip=False).create(other)
+        command_python = str(other / "bin" / "python")
+    env = dict(os.environ)
+    if marker:
+        env["FLASHCARD_LAUNCHER_REEXEC"] = "1"
+    args = ["--data-dir", str(tmp_path / "data with spaces"), "--help"]
+    proc = subprocess.run(
+        [command_python, str(launcher), *args],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=20,
+        check=False,
+    )
+    assert proc.returncode == 0
+    record = _post_reexec_record(proc.stdout)
+    assert Path(str(record["prefix"])).resolve() == repo_python.parent.parent.resolve()
+    assert record["argv"] == [str(launcher), *args]
+
+
+def test_launcher_inside_repository_venv_does_not_reexec(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    launcher = repo / "flashcard"
+    launcher.write_bytes(LAUNCHER.read_bytes())
+    _instrument_launcher_for_reexec(launcher)
+    launcher.chmod(0o755)
+    repo_python = _make_repo_venv(repo)
+    env = dict(os.environ)
+    proc = subprocess.run(
+        [str(repo_python), str(launcher), "--help"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=20,
+        check=False,
+    )
+    assert proc.returncode == 0
+    record = _post_reexec_record(proc.stdout)
+    assert Path(str(record["prefix"])).resolve() == repo_python.parent.parent.resolve()
 
 
 def test_launcher_help_prints_expected_text(tmp_path: Path) -> None:
@@ -245,6 +341,100 @@ def test_launcher_fails_closed_with_exit_code_on_missing_dict(
     )
     assert proc.returncode != 0
     assert "dictionary asset is missing" in proc.stderr
+
+
+def _write_manifest(
+    path: Path,
+    *,
+    filename: str,
+    dictionary: Path,
+    sha256: str | None = None,
+) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "version": "test",
+                "filename": filename,
+                "sha256": sha256 or compute_sha256(dictionary),
+                "bytes": dictionary.stat().st_size,
+                "classification": "test",
+                "attribution": "ATTRIBUTION-test.md",
+                "download_url": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_canonical_dictionary_wrong_bytes_fails_before_user_db(
+    tmp_path: Path, synthetic_dict: Path
+) -> None:
+    data_dir = tmp_path / "data"
+    canonical = data_dir / "dictionary" / "dictionary.sqlite"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_bytes(b"wrong bytes")
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, filename="dictionary.sqlite", dictionary=synthetic_dict)
+    proc = _run_launcher(
+        "--data-dir",
+        str(data_dir),
+        "--manifest",
+        str(manifest_path),
+        "--no-browser",
+        cwd=tmp_path,
+    )
+    assert proc.returncode == 2
+    assert "size mismatch" in proc.stderr
+    assert not (data_dir / "flashcards.sqlite").exists()
+
+
+def test_canonical_dictionary_wrong_sha_fails_before_user_db(
+    tmp_path: Path, synthetic_dict: Path
+) -> None:
+    data_dir = tmp_path / "data"
+    canonical = data_dir / "dictionary" / "dictionary.sqlite"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_bytes(synthetic_dict.read_bytes())
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(
+        manifest_path,
+        filename="dictionary.sqlite",
+        dictionary=synthetic_dict,
+        sha256="0" * 64,
+    )
+    proc = _run_launcher(
+        "--data-dir",
+        str(data_dir),
+        "--manifest",
+        str(manifest_path),
+        "--no-browser",
+        cwd=tmp_path,
+    )
+    assert proc.returncode == 2
+    assert "SHA-256 mismatch" in proc.stderr
+    assert not (data_dir / "flashcards.sqlite").exists()
+
+
+def test_canonical_dictionary_manifest_filename_mismatch_fails(
+    tmp_path: Path, synthetic_dict: Path
+) -> None:
+    data_dir = tmp_path / "data"
+    canonical = data_dir / "dictionary" / "dictionary.sqlite"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_bytes(synthetic_dict.read_bytes())
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, filename="other.sqlite", dictionary=synthetic_dict)
+    proc = _run_launcher(
+        "--data-dir",
+        str(data_dir),
+        "--manifest",
+        str(manifest_path),
+        "--no-browser",
+        cwd=tmp_path,
+    )
+    assert proc.returncode == 2
+    assert "filename does not match the canonical path" in proc.stderr
+    assert not (data_dir / "flashcards.sqlite").exists()
 
 
 def test_launcher_install_dictionary_lands_at_canonical_filename(
@@ -414,6 +604,8 @@ def test_launcher_install_then_normal_launch_succeeds_without_dict_path(
                 "./flashcard",
                 "--data-dir",
                 str(tmp_path / "data"),
+                "--manifest",
+                str(manifest_path),
                 "--port",
                 str(serve_port),
                 "--no-browser",

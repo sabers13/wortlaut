@@ -28,10 +28,16 @@ import os
 import sys
 import webbrowser
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.dict_install import DictionaryManifest
 
 REPO_ROOT = Path(__file__).resolve().parent
 VENV_PYTHON = REPO_ROOT / ".venv" / "bin" / "python"
-# Mark that we re-executed into the venv interpreter so we never loop.
+# A diagnostic marker retained across re-exec.  It is never used as interpreter
+# identity: users can set environment variables, but they must not be able to
+# bypass the repository-venv requirement that way.
 _REEXEC_ENV = "FLASHCARD_LAUNCHER_REEXEC"
 
 
@@ -44,18 +50,14 @@ def _reexec_into_venv() -> "object | int":
     Python) so the rest of ``main`` can surface a clear error message
     telling the user exactly which command to run first.
 
-    Detection of "already in venv" uses ``sys.prefix`` rather than the
-    ``sys.executable`` path: venv symlinks (e.g. ``.venv/bin/python``
-    → ``.venv/bin/python3`` → ``/usr/bin/python3``) resolve to the same
-    physical file as the system interpreter even when the running
-    interpreter sees the venv's ``site-packages`` on ``sys.path``.
+    Detection of "already in the repository venv" compares the active
+    ``sys.prefix`` with the actual repository ``.venv`` prefix.  Checking
+    merely whether *some* venv is active would let an unrelated environment
+    bypass the project's pinned interpreter.
     """
-    if os.environ.get(_REEXEC_ENV) == "1":
-        return None  # We re-execed; continue without looping.
     if not VENV_PYTHON.is_file():
         return None  # No venv yet; let ``main`` produce the setup hint.
-    in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
-    if in_venv:
+    if Path(sys.prefix).resolve() == VENV_PYTHON.parent.parent.resolve():
         return None  # Already running under the venv interpreter.
     env = dict(os.environ)
     env[_REEXEC_ENV] = "1"
@@ -125,7 +127,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         type=Path,
         default=None,
         help="Path to the dictionary release manifest (defaults to "
-        "release/dictionary-manifest-v1.json).",
+        "release/dictionary-manifest-v2.json).",
     )
     return parser.parse_args(argv)
 
@@ -169,6 +171,50 @@ def _maybe_install(
         raise SystemExit(3) from exc
 
 
+def _load_active_manifest(manifest_path: Path) -> "DictionaryManifest":
+    """Load the release manifest used for canonical installation/startup."""
+    from app.dict_install import DictionaryInstallerError, load_manifest  # noqa: PLC0415
+
+    try:
+        return load_manifest(manifest_path)
+    except DictionaryInstallerError as exc:
+        sys.stderr.write(f"manifest error: {exc}\n")
+        raise SystemExit(2) from exc
+
+
+def _verify_canonical_dictionary(*, dictionary_path: Path, manifest_path: Path) -> None:
+    """Require the canonical asset to match the selected release manifest."""
+    from app.dict_install import (  # noqa: PLC0415
+        DictionaryInstallerError,
+        verify_dictionary_bytes,
+    )
+
+    manifest = _load_active_manifest(manifest_path)
+    expected_path = dictionary_path.parent / manifest.filename
+    if dictionary_path != expected_path:
+        sys.stderr.write(
+            "dictionary manifest filename does not match the canonical path: "
+            f"manifest requires {expected_path}, launcher resolves {dictionary_path}\n"
+        )
+        raise SystemExit(2)
+    if not dictionary_path.is_file():
+        sys.stderr.write(
+            f"dictionary asset is missing: {dictionary_path}\n"
+            "  Place a verified dictionary at that path, or run\n"
+            "  with --install-dictionary to fetch it from the release manifest.\n"
+        )
+        raise SystemExit(1)
+    try:
+        verify_dictionary_bytes(
+            dictionary_path,
+            expected_sha256=manifest.sha256,
+            expected_bytes=manifest.bytes,
+        )
+    except DictionaryInstallerError as exc:
+        sys.stderr.write(f"dictionary verification failed: {exc}\n")
+        raise SystemExit(2) from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     # Ensure the repository-local virtualenv is present before doing
     # any work — the app code expects to run with the install pins.
@@ -196,19 +242,25 @@ def main(argv: list[str] | None = None) -> int:
         user_db_path=args.user_db,
     )
 
+    manifest_path = (
+        args.manifest
+        if args.manifest is not None
+        else (REPO_ROOT / "release" / "dictionary-manifest-v2.json")
+    )
+
     if args.install_dictionary:
-        manifest_path = (
-            args.manifest
-            if args.manifest is not None
-            else (REPO_ROOT / "release" / "dictionary-manifest-v1.json")
-        )
         _maybe_install(
             True,
             manifest_path=manifest_path,
             target_dir=paths.dictionary_dir,
         )
 
-    if not paths.dictionary_path.is_file():
+    if args.dict_path is None:
+        _verify_canonical_dictionary(
+            dictionary_path=paths.dictionary_path,
+            manifest_path=manifest_path,
+        )
+    elif not paths.dictionary_path.is_file():
         sys.stderr.write(
             f"dictionary asset is missing: {paths.dictionary_path}\n"
             f"  Place a verified dictionary at that path, or run\n"
@@ -216,10 +268,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    # The runtime's authoritative validation already runs inside
-    # ``build_standalone_app``; we deliberately do NOT add a second
-    # full-file SHA-256/quick_check pass here, which would re-read the
-    # ~945 MB dictionary twice for no extra safety (Repair G).
+    # Canonical startup verifies exact manifest identity above. Explicit
+    # ``--dict-path`` remains a developer/recovery override and is validated
+    # by DictionaryRuntime during application activation.
 
     ensure_user_db(paths.user_db_path)
     _log(f"data directory: {paths.data_dir}")
