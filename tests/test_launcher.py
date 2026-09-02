@@ -559,7 +559,7 @@ def test_same_process_successful_install_skips_redundant_identity_recheck(
 
     monkeypatch.setattr(dict_install_module, "verify_dictionary_identity", _counting_identity)
 
-    def _canonical_boom(*, dictionary_path: Path, manifest_path: Path) -> None:
+    def _canonical_boom(*, dictionary_path: Path, manifest: object) -> None:
         raise AssertionError(
             "same-process successful install must not re-run canonical "
             "identity verification"
@@ -621,6 +621,41 @@ def test_runtime_validation_reached_after_valid_canonical_identity(
     )
     assert rc == 0
     assert len(runtime_calls) == 1
+
+
+def test_canonical_runtime_rejects_replacement_after_identity_precheck(
+    tmp_path: Path, synthetic_dict: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manifest identity is checked again against the runtime snapshot."""
+    module = _load_launcher_module()
+    monkeypatch.setitem(sys.modules, "uvicorn", _fake_uvicorn())
+    data_dir = tmp_path / "data"
+    canonical = data_dir / "dictionary" / "dictionary.sqlite"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_bytes(synthetic_dict.read_bytes())
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, filename="dictionary.sqlite", dictionary=synthetic_dict)
+
+    replacement = tmp_path / "replacement.sqlite"
+    replacement.write_bytes(synthetic_dict.read_bytes() + b"replaced")
+    import app.dict_install as dict_install_module
+
+    real_identity = dict_install_module.verify_dictionary_identity
+
+    def replace_after_precheck(
+        path: Path | str, *, expected_sha256: str, expected_bytes: int
+    ) -> str:
+        digest = real_identity(
+            path, expected_sha256=expected_sha256, expected_bytes=expected_bytes
+        )
+        replacement.replace(Path(path))
+        return digest
+
+    monkeypatch.setattr(dict_install_module, "verify_dictionary_identity", replace_after_precheck)
+    rc = module.main(
+        ["--data-dir", str(data_dir), "--manifest", str(manifest_path), "--no-browser"]
+    )
+    assert rc == 2
 
 
 def test_explicit_dict_path_skips_manifest_but_still_runtime_validated(

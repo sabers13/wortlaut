@@ -359,23 +359,21 @@ LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({
     "127.0.0.1",
     "localhost",
     "[::1]",
-    "::1",
 })
 
 
-def _is_loopback_host(host_header: str | None) -> bool:
-    """Validate that Host header is a loopback endpoint (127.0.0.1, localhost, [::1])."""
-    if not host_header:
+def _is_loopback_host(host_header: str | None, *, port: int) -> bool:
+    """Return whether ``Host`` is one exact loopback endpoint for ``port``.
+
+    ``Host`` is a browser security boundary, not a hint for routing.  Parsing
+    it by splitting on ``:`` accepted malformed IPv6 and silently ignored a
+    supplied port.  The service never listens on an arbitrary port, so accept
+    only the three contract host spellings with the configured port.
+    """
+    if not host_header or host_header != host_header.strip():
         return False
-    host = host_header.strip()
-    if host.startswith("["):
-        bracket_end = host.find("]")
-        if bracket_end != -1:
-            ipv6 = host[: bracket_end + 1].lower()
-            return ipv6 == "[::1]"
-    # Strip port if present
-    base_host = host.split(":")[0].lower()
-    return base_host in ("127.0.0.1", "localhost")
+    host = host_header.lower()
+    return host in {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
 
 
 class BrowserSecurityMiddleware(BaseHTTPMiddleware):
@@ -385,38 +383,38 @@ class BrowserSecurityMiddleware(BaseHTTPMiddleware):
         self,
         app: ASGIApp,
         cors_origins: set[str],
+        service_port: int,
     ) -> None:
         super().__init__(app)
         self.cors_origins = cors_origins
+        self.service_port = service_port
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         # 1. Host header validation
         host = request.headers.get("host")
-        if not _is_loopback_host(host):
+        if not _is_loopback_host(host, port=self.service_port):
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={
-                    "detail": "Host header must be loopback (127.0.0.1, localhost, [::1])"
+                    "detail": "Host header must be a loopback endpoint on the configured port"
                 },
             )
 
         # 2. Origin header validation (when present)
         origin = request.headers.get("origin")
-        if origin is not None and origin.strip():
-            norm_origin = origin.strip()
-            if norm_origin not in self.cors_origins:
-                return JSONResponse(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    content={"detail": f"Forbidden origin: {origin}"},
-                )
+        if origin is not None and origin not in self.cors_origins:
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": f"Forbidden origin: {origin}"},
+            )
 
         # Handle CORS preflight OPTIONS request
         if request.method == "OPTIONS":
             response = Response(status_code=status.HTTP_200_OK)
-            if origin is not None and origin.strip() in self.cors_origins:
-                response.headers["Access-Control-Allow-Origin"] = origin.strip()
+            if origin is not None and origin in self.cors_origins:
+                response.headers["Access-Control-Allow-Origin"] = origin
                 response.headers["Access-Control-Allow-Methods"] = (
                     "GET, POST, DELETE, OPTIONS, PUT, PATCH"
                 )
@@ -444,7 +442,8 @@ class BrowserSecurityMiddleware(BaseHTTPMiddleware):
             is_delete = request.method == "DELETE"
             if not is_audio_upload and not is_delete:
                 content_type = request.headers.get("content-type", "")
-                if not content_type.lower().startswith("application/json"):
+                media_type = content_type.split(";", maxsplit=1)[0].strip().lower()
+                if media_type != "application/json":
                     return JSONResponse(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         content={"detail": "Content-Type must be application/json"},
@@ -453,8 +452,8 @@ class BrowserSecurityMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
 
         # Set CORS headers on response if origin is valid
-        if origin is not None and origin.strip() in self.cors_origins:
-            response.headers["Access-Control-Allow-Origin"] = origin.strip()
+        if origin is not None and origin in self.cors_origins:
+            response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Access-Control-Allow-Credentials"] = "true"
 
         return response
@@ -706,6 +705,9 @@ def create_app(
     tts_remote_url: str | None = None,
     media_dir: Path | str | None = None,
     cache_dir: Path | str | None = None,
+    service_port: int = 8000,
+    expected_dictionary_sha256: str | None = None,
+    expected_dictionary_version: str = "v1",
     human_audio_id_for_observation: Callable[[Mapping[str, object]], str | None] | None = None,
     human_audio_resolver: Callable[[str], tuple[bytes, HumanAudioProvenance]] | None = None,
     piper_runner: Callable[[str, str], bytes] | None = None,
@@ -716,6 +718,10 @@ def create_app(
     """
     if not isinstance(cors_origins, (list, tuple, set, frozenset)):
         raise TypeError("cors_origins must be a sequence or set of origin strings")
+    if isinstance(service_port, bool) or not isinstance(service_port, int):
+        raise TypeError("service_port must be an integer")
+    if not 1 <= service_port <= 65535:
+        raise ValueError("service_port must be in 1..65535")
 
     for orig in cors_origins:
         if not isinstance(orig, str):
@@ -742,7 +748,12 @@ def create_app(
     resolved_media_dir.mkdir(parents=True, exist_ok=True)
     resolved_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    runtime = DictionaryRuntime(dict_p, user_db_p)
+    runtime = DictionaryRuntime(
+        dict_p,
+        user_db_p,
+        expected_sha256=expected_dictionary_sha256,
+        expected_version=expected_dictionary_version,
+    )
 
     app = FastAPI(title="Flashcard Vocabulary API", version="0.1.0")
 
@@ -757,7 +768,11 @@ def create_app(
     app.state.piper_runner = piper_runner or _piper_runner_if_available()
     app.state.runtime = runtime
 
-    app.add_middleware(BrowserSecurityMiddleware, cors_origins=cors_origins_set)
+    app.add_middleware(
+        BrowserSecurityMiddleware,
+        cors_origins=cors_origins_set,
+        service_port=service_port,
+    )
 
     @app.on_event("shutdown")
     def shutdown_event() -> None:
@@ -2447,9 +2462,10 @@ def create_app(
 
 
 def create_production_app() -> FastAPI:
-    """Container entry-point factory; production state remains supplied by /data."""
+    """Container entry point with separate disposable and persistent mounts."""
     return create_app(
-        dict_path="/data/dictionary.sqlite",
+        dict_path="/dictionary/dictionary.sqlite",
         user_db_path="/data/flashcards.sqlite",
         cors_origins=("http://127.0.0.1:8000", "http://localhost:8000"),
+        service_port=8000,
     )

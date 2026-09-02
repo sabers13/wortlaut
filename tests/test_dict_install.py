@@ -264,6 +264,20 @@ def test_verify_dictionary_bytes_quick_check_fails(
         )
 
 
+def test_verify_dictionary_bytes_normalizes_malformed_sqlite_with_matching_identity(
+    tmp_path: Path,
+) -> None:
+    """SQLite errors reached after a matching identity stay in installer domain."""
+    bad = tmp_path / "matching-but-malformed.sqlite"
+    bad.write_bytes(b"NOT A SQLITE FILE")
+    with pytest.raises(DictionaryInstallerError, match="readable SQLite"):
+        verify_dictionary_bytes(
+            bad,
+            expected_sha256=compute_sha256(bad),
+            expected_bytes=bad.stat().st_size,
+        )
+
+
 def test_verify_dictionary_identity_ok(synthetic_dict: Path) -> None:
     digest = verify_dictionary_identity(
         synthetic_dict,

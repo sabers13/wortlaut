@@ -280,14 +280,14 @@ def verify_dictionary_bytes(
     )
     try:
         conn = _open_readonly_sqlite(target)
-    except sqlite3.OperationalError as exc:
+        try:
+            quick_check = conn.execute("PRAGMA quick_check").fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
         raise DictionaryInstallerError(
             f"dictionary is not a readable SQLite file: {target}"
         ) from exc
-    try:
-        quick_check = conn.execute("PRAGMA quick_check").fetchall()
-    finally:
-        conn.close()
     if not quick_check or any(str(row[0]).lower() != "ok" for row in quick_check):
         raise DictionaryInstallerError(
             f"dictionary SQLite quick_check failed: {quick_check!r}"

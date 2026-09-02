@@ -242,6 +242,7 @@ def main() -> int:
         state_dir / "dictionary.sqlite",
         state_dir / "user.sqlite",
         cors_origins=(f"http://127.0.0.1:{args.port}", f"http://localhost:{args.port}"),
+        service_port=args.port,
     )
     _get_nlp()
     import uvicorn

@@ -64,4 +64,8 @@ RUN printf 'Guten Tag.' | piper --model "${PIPER_VOICE_PATH}" --output_file /tmp
     && rm /tmp/piper-smoke.wav \
     && ! pip freeze | grep -E '^(anthropic|openai|google-genai)=='
 
+# Dictionary assets and user state are deliberately independent mounts.  Run
+# with /dictionary mounted read-only and /data mounted read-write.
+VOLUME ["/dictionary", "/data"]
+
 CMD ["uvicorn", "app.api:create_production_app", "--factory", "--host", "127.0.0.1", "--port", "8000"]

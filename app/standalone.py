@@ -218,6 +218,8 @@ def build_standalone_app(
     cors_origins: Sequence[str] | None = None,
     port: int | None = None,
     tts_remote_url: str | None = None,
+    expected_dictionary_sha256: str | None = None,
+    expected_dictionary_version: str = "v1",
 ) -> Any:
     """Construct a FastAPI app using the standalone XDG path layout.
 
@@ -245,8 +247,8 @@ def build_standalone_app(
             "dictionary asset is missing; place the verified dictionary.sqlite at "
             f"{paths.dictionary_path} or pass --dict-path"
         )
+    port_value = 8000 if port is None else int(port)
     if cors_origins is None:
-        port_value = 8000 if port is None else int(port)
         cors_origins = (
             f"http://127.0.0.1:{port_value}",
             f"http://localhost:{port_value}",
@@ -257,9 +259,12 @@ def build_standalone_app(
         dict_path=paths.dictionary_path,
         user_db_path=paths.user_db_path,
         cors_origins=cors_origins,
+        service_port=port_value,
         tts_remote_url=tts_remote_url,
         media_dir=paths.media_dir,
         cache_dir=paths.cache_dir,
+        expected_dictionary_sha256=expected_dictionary_sha256,
+        expected_dictionary_version=expected_dictionary_version,
     )
 
 

@@ -659,12 +659,9 @@ def test_creation_time_wildcard_rejection(dict_path: Path, user_db_path: Path) -
 @pytest.mark.parametrize(
     "host_header",
     [
-        "127.0.0.1",
         "127.0.0.1:8000",
-        "localhost",
-        "localhost:3000",
-        "[::1]",
-        "[::1]:8080",
+        "localhost:8000",
+        "[::1]:8000",
     ],
 )
 def test_host_guard_accepts_loopback(client: TestClient, host_header: str) -> None:
@@ -676,6 +673,15 @@ def test_host_guard_accepts_loopback(client: TestClient, host_header: str) -> No
 @pytest.mark.parametrize(
     "host_header",
     [
+        "127.0.0.1",
+        "localhost",
+        "[::1]",
+        "127.0.0.1:7999",
+        "localhost:3000",
+        "[::1]:8080",
+        "[::1]evil:8000",
+        "[::1:8000",
+        "::1:8000",
         "evil.com",
         "evil.com:8000",
         "192.168.1.100",
@@ -688,7 +694,7 @@ def test_host_guard_rejects_external_hosts(client: TestClient, host_header: str)
     """External/non-loopback host is rejected with HTTP 403."""
     response = client.get("/vocab/decks", headers={"Host": host_header})
     assert response.status_code == 403
-    assert "Host header must be loopback" in response.json()["detail"]
+    assert "Host header must be a loopback endpoint" in response.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -720,6 +726,10 @@ def test_origin_exact_match_matrix(client: TestClient) -> None:
     # Omitted Origin (e.g. CLI tool / curl) is permitted
     r_no_origin = client.get("/vocab/decks")
     assert r_no_origin.status_code == 200
+
+    # A present blank Origin is not the same as an absent Origin.
+    r_blank = client.get("/vocab/decks", headers={"Origin": "   "})
+    assert r_blank.status_code == 403
 
     # OPTIONS preflight
     r_options = client.options(
@@ -839,6 +849,30 @@ def test_wrong_content_type_on_json_routes(client: TestClient) -> None:
         headers=headers_auth,
     )
     assert r3.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["application/json", "application/json; charset=utf-8"],
+)
+def test_json_content_type_accepts_exact_media_type_with_parameters(
+    client: TestClient, content_type: str
+) -> None:
+    response = client.post(
+        "/vocab/decks",
+        content=b'{"name": "Media type"}',
+        headers={"X-Flashcards-Request": "1", "Content-Type": content_type},
+    )
+    assert response.status_code == 201
+
+
+def test_json_content_type_rejects_jsonp_lookalike(client: TestClient) -> None:
+    response = client.post(
+        "/vocab/decks",
+        content=b'{"name": "Not JSON"}',
+        headers={"X-Flashcards-Request": "1", "Content-Type": "application/jsonp"},
+    )
+    assert response.status_code == 400
 
 
 # ---------------------------------------------------------------------------
@@ -1644,6 +1678,7 @@ def test_post_activation_consistency_regression(
         dict_path=dict_a_path,
         user_db_path=user_db_path,
         cors_origins=["http://localhost:3000"],
+        service_port=3000,
     )
     client = TestClient(app, base_url="http://localhost:3000")
     headers = {"X-Flashcards-Request": "1", "Content-Type": "application/json"}
@@ -1828,7 +1863,12 @@ def test_concurrency_complete_old_observation_during_activation(
     conn_b.commit()
     conn_b.close()
 
-    app = create_app(dict_a_path, user_db_path, ["http://127.0.0.1:3000"])
+    app = create_app(
+        dict_a_path,
+        user_db_path,
+        ["http://127.0.0.1:3000"],
+        service_port=3000,
+    )
     client = TestClient(app, base_url="http://127.0.0.1:3000")
     headers = {
         "Host": "127.0.0.1:3000",

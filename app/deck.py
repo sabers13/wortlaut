@@ -599,11 +599,24 @@ def review(
 class DictionaryRuntime:
     """Manages active dictionary asset lifecycle, atomic relinking, and read pins."""
 
-    def __init__(self, dict_path: Path | str, user_db_path: Path | str) -> None:
+    def __init__(
+        self,
+        dict_path: Path | str,
+        user_db_path: Path | str,
+        *,
+        expected_sha256: str | None = None,
+        expected_version: str = "v1",
+    ) -> None:
         if not isinstance(dict_path, (str, Path)) or isinstance(dict_path, bool):
             raise TypeError("dict_path must be a str or Path")
         if not isinstance(user_db_path, (str, Path)) or isinstance(user_db_path, bool):
             raise TypeError("user_db_path must be a str or Path")
+        if expected_sha256 is not None and (
+            not isinstance(expected_sha256, str) or len(expected_sha256) != 64
+        ):
+            raise ValueError("expected_sha256 must be a 64-character SHA-256 string")
+        if not isinstance(expected_version, str) or not expected_version.strip():
+            raise ValueError("expected_version must be a non-blank string")
 
         self._user_db_path = Path(user_db_path).resolve()
         initial_dict_path = Path(dict_path)
@@ -630,7 +643,11 @@ class DictionaryRuntime:
         self._rollback_failure_hook: Callable[[], None] | None = None
 
         # Check active_dictionary_metadata
-        self._init_active_generation(initial_dict_path)
+        self._init_active_generation(
+            initial_dict_path,
+            expected_sha256=expected_sha256.lower() if expected_sha256 is not None else None,
+            expected_version=expected_version.strip(),
+        )
 
     @property
     def managed_dir(self) -> Path:
@@ -672,7 +689,13 @@ class DictionaryRuntime:
         except sqlite3.Error as exc:
             raise DeckError(f"failed to configure WAL on user database: {exc}") from exc
 
-    def _init_active_generation(self, initial_dict_path: Path) -> None:
+    def _init_active_generation(
+        self,
+        initial_dict_path: Path,
+        *,
+        expected_sha256: str | None,
+        expected_version: str,
+    ) -> None:
         conn = sqlite3.connect(self._user_db_path)
         try:
             row = conn.execute(
@@ -681,6 +704,77 @@ class DictionaryRuntime:
             ).fetchone()
         finally:
             conn.close()
+
+        # Canonical launcher startup supplies the selected manifest identity.
+        # Validate the configured pathname into one immutable snapshot before
+        # consulting durable metadata; that snapshot is the only asset this
+        # runtime can publish.  This closes both the pathname race after the
+        # lightweight launcher precheck and the stale-metadata bypass.
+        if expected_sha256 is not None:
+            if not initial_dict_path.is_file():
+                raise DictionaryRuntimeError(
+                    f"initial dictionary file not found: {initial_dict_path}"
+                )
+            resolved = initial_dict_path.resolve()
+            if resolved.parent != self._managed_dir:
+                raise DictionaryRuntimeError("initial dictionary is outside managed directory")
+            if _is_same_file(resolved, self._user_db_path):
+                raise DictionaryRuntimeError("initial dictionary is the user database file")
+            try:
+                asset = validate_candidate_dictionary(resolved)
+            except Exception as exc:
+                raise DictionaryRuntimeError(
+                    f"failed to validate initial dictionary: {exc}"
+                ) from exc
+            if asset.sha256 != expected_sha256:
+                asset.close()
+                raise DictionaryRuntimeError(
+                    "initial dictionary SHA-256 does not match the selected manifest"
+                )
+
+            metadata_matches = (
+                row is not None
+                and str(row[1]) == resolved.name
+                and str(row[2]) == asset.sha256
+            )
+            if not metadata_matches or str(row[0]) != expected_version:
+                now_text = _timestamp(_utc_now())
+                conn = sqlite3.connect(self._user_db_path)
+                try:
+                    conn.execute("PRAGMA foreign_keys = ON")
+                    conn.execute("BEGIN IMMEDIATE")
+                    if not metadata_matches:
+                        self._relink_part_b(conn, asset, now_text)
+                    conn.execute(
+                        """
+                        INSERT INTO active_dictionary_metadata (
+                            singleton, active_version, active_filename, active_sha256, activated_at
+                        ) VALUES (1, ?, ?, ?, ?)
+                        ON CONFLICT(singleton) DO UPDATE SET
+                            active_version = excluded.active_version,
+                            active_filename = excluded.active_filename,
+                            active_sha256 = excluded.active_sha256,
+                            activated_at = excluded.activated_at
+                        """,
+                        (expected_version, resolved.name, asset.sha256, now_text),
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    asset.close()
+                    raise
+                finally:
+                    conn.close()
+
+            self._generation_counter = 1
+            self._current_generation = _Generation(
+                generation_id=1,
+                asset=asset,
+                pins=0,
+                retired=False,
+                closed=False,
+            )
+            return
 
         if row is not None:
             active_filename, active_sha256 = str(row[1]), str(row[2])

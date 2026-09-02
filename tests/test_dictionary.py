@@ -1387,6 +1387,143 @@ def test_e10_restart_recovery_sha_mismatch_fails_construction(
         DictionaryRuntime(dict_path, user_db_path)
 
 
+def test_canonical_startup_relinks_new_asset_and_preserves_user_state(
+    tmp_path: Path, part_a_schema: str, user_db_path: Path
+) -> None:
+    """Manifest-pinned startup upgrades stale metadata through the atomic relinker."""
+    managed_dir = tmp_path / "managed_dicts"
+    managed_dir.mkdir()
+    canonical = managed_dir / "dictionary.sqlite"
+    v1 = _make_candidate_asset(tmp_path, part_a_schema, lemma="See", source_ref="senseid:see-1")
+    canonical.write_bytes(v1.read_bytes())
+    v1_sha = validate_candidate_dictionary(canonical).sha256
+    lemma_ref = _stable_ref("lemma", ["de", "See", "NOUN", "der"])
+    sense_ref = _stable_ref(
+        "sense", [lemma_ref, "wiktextract:enwiktionary", "senseid:see-1"]
+    )
+
+    conn = sqlite3.connect(user_db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        deck_id = deck.create_deck(conn, "Preserved")
+        note_id = deck.create_note(
+            conn,
+            lemma_ref,
+            sense_semantic_ref=sense_ref,
+            status="resolved",
+            meaning_languages=("en",),
+        )
+        deck.add_note_to_deck(conn, note_id, deck_id)
+        deck.set_user_meaning(conn, note_id, "en", "my house")
+        card_row = conn.execute(
+            "SELECT id FROM card WHERE note_id = ?", (note_id,)
+        ).fetchone()
+        assert card_row is not None
+        card_id = int(card_row[0])
+        deck.review(conn, card_id, 4)
+        before_review = [
+            tuple(row) for row in conn.execute("SELECT * FROM review_log").fetchall()
+        ]
+        before_meaning = [
+            tuple(row) for row in conn.execute("SELECT * FROM note_user_meaning").fetchall()
+        ]
+    finally:
+        conn.close()
+
+    first = DictionaryRuntime(
+        canonical,
+        user_db_path,
+        expected_sha256=v1_sha,
+        expected_version="v1",
+    )
+    first.close()
+
+    v2 = tmp_path / "candidate-v2.sqlite"
+    v2.write_bytes(v1.read_bytes())
+    conn = sqlite3.connect(v2)
+    try:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("UPDATE sense SET id = 10, lemma_id = 20")
+        conn.execute("UPDATE lemma SET id = 20")
+        conn.commit()
+    finally:
+        conn.close()
+    v2.replace(canonical)
+    v2_sha = validate_candidate_dictionary(canonical).sha256
+
+    upgraded = DictionaryRuntime(
+        canonical,
+        user_db_path,
+        expected_sha256=v2_sha,
+        expected_version="v2",
+    )
+    try:
+        assert upgraded.asset_token == v2_sha
+        conn = sqlite3.connect(user_db_path)
+        try:
+            assert conn.execute("SELECT * FROM review_log").fetchall() == before_review
+            assert conn.execute("SELECT * FROM note_user_meaning").fetchall() == before_meaning
+            binding = conn.execute(
+                "SELECT cached_lemma_id, cached_sense_id FROM note_dictionary_binding "
+                "WHERE note_id = ?",
+                (note_id,),
+            ).fetchone()
+            assert binding == (20, 10)
+            metadata = conn.execute(
+                "SELECT active_version, active_filename, active_sha256 "
+                "FROM active_dictionary_metadata WHERE singleton = 1"
+            ).fetchone()
+            assert metadata == ("v2", "dictionary.sqlite", v2_sha)
+        finally:
+            conn.close()
+    finally:
+        upgraded.close()
+
+
+def test_canonical_startup_relink_failure_rolls_back_stale_metadata(
+    tmp_path: Path,
+    part_a_schema: str,
+    user_db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed canonical upgrade cannot partially publish metadata or bindings."""
+    managed_dir = tmp_path / "managed_dicts"
+    managed_dir.mkdir()
+    canonical = managed_dir / "dictionary.sqlite"
+    v1 = _make_candidate_asset(tmp_path, part_a_schema, lemma="See", source_ref="senseid:see-1")
+    canonical.write_bytes(v1.read_bytes())
+    v1_sha = validate_candidate_dictionary(canonical).sha256
+    first = DictionaryRuntime(canonical, user_db_path, expected_sha256=v1_sha)
+    first.close()
+    conn = sqlite3.connect(user_db_path)
+    try:
+        before = conn.execute(
+            "SELECT active_filename, active_sha256 FROM active_dictionary_metadata"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    v2 = _make_candidate_asset(tmp_path, part_a_schema, lemma="Meer", source_ref="senseid:meer-1")
+    v2.replace(canonical)
+    v2_sha = validate_candidate_dictionary(canonical).sha256
+
+    def fail_relink(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("injected relink failure")
+
+    monkeypatch.setattr(DictionaryRuntime, "_relink_part_b", fail_relink)
+    with pytest.raises(RuntimeError, match="injected relink failure"):
+        DictionaryRuntime(canonical, user_db_path, expected_sha256=v2_sha, expected_version="v2")
+
+    conn = sqlite3.connect(user_db_path)
+    try:
+        after = conn.execute(
+            "SELECT active_filename, active_sha256 FROM active_dictionary_metadata"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert after == before
+
+
 def test_e11_teardown_close_failure_contained(
     tmp_path: Path, part_a_schema: str, user_db_path: Path
 ) -> None:

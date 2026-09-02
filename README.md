@@ -120,7 +120,10 @@ Dictionary verification happens in two deliberately separate stages so the
    any user data is touched): exact manifest filename, exact byte size,
    streaming SHA-256. No SQLite is opened at this stage.
 2. **Full validation**: `PRAGMA quick_check` plus the full PART-A schema
-   validation reused from the live app. This runs once per install
+   validation reused from the live app. The live runtime validates an immutable
+   private snapshot and requires its SHA-256 to equal the selected manifest, so
+   replacing the canonical pathname after the precheck cannot change the active
+   dictionary. This runs once per install
    (`--install-dictionary`, or when placing a file manually and letting the
    installer verify it) and once more at runtime activation
    (`DictionaryRuntime`), which is the authoritative integrity/schema gate
@@ -161,6 +164,16 @@ dictionary release:
 
 The installer refuses to overwrite a still-valid dictionary; remove
 the old `dictionary.sqlite` first if you want a forced reinstall.
+On the next normal startup, Flashcard relinks semantic-reference-backed note
+bindings and atomically replaces the active dictionary metadata; cards, review
+history, and user-authored meanings are preserved.
+
+## Docker data mounts
+
+The container keeps the disposable dictionary and persistent user state in
+separate mounts. Mount the dictionary read-only at `/dictionary` and user data
+read-write at `/data`; do not mount both onto one host directory. The service
+still listens only on `127.0.0.1:8000` inside its runtime configuration.
 
 ## Stopping and restarting
 
