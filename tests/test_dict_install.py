@@ -278,6 +278,42 @@ def test_verify_dictionary_bytes_normalizes_malformed_sqlite_with_matching_ident
         )
 
 
+def test_verify_dictionary_bytes_normalizes_part_a_validation_failure(
+    tmp_path: Path,
+) -> None:
+    """A real, valid SQLite file whose PART-A schema is invalid must still
+    surface as DictionaryInstallerError, not the dictionary-domain
+    DictionaryAssetError raised internally by validate_candidate_dictionary.
+
+    This exercises the full path: identity passes, the file opens as
+    SQLite, PRAGMA quick_check succeeds, and only then does PART-A schema
+    validation fail (required tables absent).
+    """
+    candidate = tmp_path / "no-part-a.sqlite"
+    conn = sqlite3.connect(str(candidate))
+    try:
+        # A real, valid SQLite database that passes quick_check but has
+        # none of the required PART-A tables (lemma, sense, ...).
+        conn.execute("CREATE TABLE unrelated (id INTEGER PRIMARY KEY)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    size = candidate.stat().st_size
+    sha = compute_sha256(candidate)
+
+    with pytest.raises(DictionaryInstallerError, match="PART-A validation failed") as excinfo:
+        verify_dictionary_bytes(candidate, expected_sha256=sha, expected_bytes=size)
+
+    from app.dictionary import DictionaryAssetError
+
+    # The public exception must be the installer-domain type, not a raw
+    # dictionary-domain or sqlite3 exception escaping unnormalized.
+    assert not isinstance(excinfo.value, DictionaryAssetError)
+    assert not isinstance(excinfo.value, sqlite3.Error)
+    assert isinstance(excinfo.value.__cause__, DictionaryAssetError)
+
+
 def test_verify_dictionary_identity_ok(synthetic_dict: Path) -> None:
     digest = verify_dictionary_identity(
         synthetic_dict,

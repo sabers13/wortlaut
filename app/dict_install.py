@@ -295,9 +295,17 @@ def verify_dictionary_bytes(
     # Full PART-A schema validation is the canonical gate from
     # app.dictionary; reusing it here keeps the installer consistent
     # with live activation.
-    from app.dictionary import validate_candidate_dictionary  # noqa: PLC0415
+    from app.dictionary import (  # noqa: PLC0415
+        DictionaryAssetError,
+        validate_candidate_dictionary,
+    )
 
-    asset = validate_candidate_dictionary(target)
+    try:
+        asset = validate_candidate_dictionary(target)
+    except DictionaryAssetError as exc:
+        raise DictionaryInstallerError(
+            f"dictionary PART-A validation failed: {exc}"
+        ) from exc
     try:
         if asset.sha256 != actual_sha:
             raise DictionaryInstallerError(
