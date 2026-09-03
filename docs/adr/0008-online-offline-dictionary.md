@@ -1,6 +1,6 @@
 # ADR-0008 — Online and offline dictionary modes
 
-**Status:** NEEDS COLD REVIEW.
+**Status:** NON-CONVERGENT / BLOCKED.
 
 **Lineage:** This is a genuinely new architectural decision made after ADR-0007
 was accepted and frozen. It begins a new cold-review lineage under WORKFLOW §7 /
@@ -1310,13 +1310,12 @@ bytes are needed, not their sum.
 Cold review #1 — broad architecture challenge — is complete; its blockers O1–O5
 are preserved below with their resolution records. Cold review #2 — focused
 remedy verification — is also complete: it verified O1–O5 as **CLOSED** and
-raised exactly one qualifying direct knock-on blocker, O6, recorded below. This
-ADR remains **NEEDS COLD REVIEW** until cold review #3 approves it; this
-revision does not approve itself and does not reopen O1–O5.
+raised exactly one qualifying direct knock-on blocker, O6, recorded below. Cold
+review #3 — FINAL CONVERGENCE REVIEW — found terminal blocker F1 below. This
+ADR is **NON-CONVERGENT / BLOCKED**; its lineage is permanently closed.
 
-Cold-review lineage count: **2 completed / #3 next — FINAL CONVERGENCE REVIEW.**
-Under WORKFLOW §7 / AGENTS G7 review #3 is the last ordinary cold review for
-this lineage; there is no review #4.
+Cold-review lineage count: **3 completed / terminally blocked at FINAL
+CONVERGENCE REVIEW.** Under WORKFLOW §7 / AGENTS G7 there is no review #4.
 
 ### O1 — Sense-reference point reads are not bucket-closed.
 
@@ -1553,3 +1552,32 @@ The preservation remedy is applied.
 - **No production code was changed in this ADR session.** The remedy documents
   and preserves the shipped launcher behaviour; `wortlaut`, `app/**` and
   `tests/**` are untouched.
+
+### F1 — Custom-manifest startup conflicts with the binding persisted-preference state machine.
+
+**Severe defect:** §8.2 requires a valid persisted preference to be honored;
+therefore a stored `online` preference requires the Online provider. But the
+`mode none` / custom-`--manifest` / no-`--dict-path` / no-install matrix row
+says to apply §8.2 while §9.3.1 requires the effective provider to be
+`LocalDictionaryProvider` and §14.2 test 9 requires that no
+`OnlineDictionaryProvider` be constructed for the four custom-manifest,
+no-install rows. The same valid invocation with a stored `online` preference
+is thus required both to activate Online and never to activate Online. It is
+not covered by §9.3.2 because no `--dictionary-mode online` flag is supplied.
+
+**Why this meets the final-convergence threshold:** this is an architecture
+that is impossible to implement as specified and a direct contradiction with
+the binding §8.2 startup-state contract. It also makes the required Slice-10
+acceptance tests mutually non-executable: honoring the persisted preference
+fails the custom-manifest Offline/no-Online-provider assertion, while forcing
+Offline fails §8.2. The ambiguity crosses the Product/Developer trust boundary
+and can change whether Product network/provider activation occurs, so it is not
+a harmless wording or implementation-detail issue.
+
+**Required simplify/split/descope direction:** do not revise this lineage. A
+materially simpler successor ADR or product descope must choose and specify one
+deterministic precedence for a custom Offline manifest when an `online`
+preference exists, with matching CLI rows and acceptance tests. It must either
+segregate the recovery path from persisted-mode startup or define an explicit
+Offline override/rejection rule; it cannot simultaneously honor the stored
+Online preference and require the Offline-only/no-Online-provider outcome.
