@@ -247,3 +247,61 @@ dependencies = ["dictionary"]
 focused_tests = ["tests/test_dict_install.py"]
 agents_rules = ["R9"]
 adrs = ["0001", "0004"]
+
+[modules.provider]
+id = "provider"
+owned_paths = [
+    "app/provider.py",
+    "app/provider_local.py",
+    "app/provider_online.py",
+    "app/routing.py",
+]
+dependencies = ["dictionary", "resolve"]
+focused_tests = [
+    "tests/test_provider_differential.py",
+    "tests/test_routing_equivalence.py",
+]
+agents_rules = ["R2", "R13"]
+adrs = ["0009"]
+
+[modules.online_manifest]
+id = "online_manifest"
+owned_paths = [
+    "app/online_manifest.py",
+    "app/online_filter.py",
+]
+dependencies = []
+focused_tests = [
+    "tests/test_online_manifest.py",
+    "tests/test_routing_equivalence.py",
+]
+agents_rules = ["R13"]
+adrs = ["0009"]
+
+[modules.online_cache]
+id = "online_cache"
+owned_paths = [
+    "app/online_cache.py",
+]
+dependencies = ["online_manifest"]
+focused_tests = [
+    "tests/test_online_cache.py",
+    "tests/test_provider_differential.py",
+]
+agents_rules = ["R13"]
+adrs = ["0009"]
+
+[modules.build_online_dictionary]
+id = "build_online_dictionary"
+owned_paths = ["tools/build_online_dictionary.py"]
+dependencies = [
+    "dictionary",
+    "online_manifest",
+    "online_cache",
+    "provider",
+]
+focused_tests = [
+    "tests/test_build_online_dictionary.py",
+]
+agents_rules = ["R2", "R3", "R13"]
+adrs = ["0009"]
