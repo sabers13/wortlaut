@@ -669,3 +669,44 @@ NO GITHUB RELEASE WAS CREATED OR MODIFIED.
 NO BUILDER RUN AGAINST THE 945 MB PRODUCTION DICTIONARY OCCURRED.
 MAIN WAS NOT MODIFIED.
 ```
+
+## Independent full-diff risk review
+
+Review: **PASS WITH NON-BLOCKING NOTES — 0 BLOCKERS**
+
+- reviewed base:
+  `491a8083094eaf3f011ba393d68a71aceaee4778`
+- reviewed candidate:
+  `ad5d05330a2196d35c33858cf234896cba831247`
+- branch: `slice/11`
+- result: `HISTORY_ACCEPTABLE`
+- proportionality: `PROPORTIONATE`
+- all Slice-11 acceptance items A1–A11: PASS
+- blocking findings: none
+
+The independent reviewer additionally recorded six explicitly NON-BLOCKING
+observations:
+
+1. the report did not contain the requested explicit
+   consumer/callsite-to-provider-operation table, although the reviewer
+   independently verified complete provider coverage;
+2. the provider hit types use `lemma_id` whereas resolver records use `id`,
+   requiring only a mechanical adapter when Slice 12 wires the provider;
+3. Online surface mode may query the lemma table before the surface table;
+   Slice 12 should make surface mode match Local's surface-only semantics while
+   performing the already-required API/provider migration;
+4. no dedicated ß differential lookup-key test exists, although closure was
+   independently verified;
+5. a theoretical clear/download timing window can retain one already-verified
+   immutable cache file after clear, with no integrity or persistent-state risk;
+6. the tiny differential fixture uses Python `lower()` for Bloom construction
+   while the production builder correctly uses SQLite-ASCII lowering; fixture
+   lemmas are ASCII so this does not alter fixture results.
+
+These observations do NOT block Slice 11 and do NOT trigger another Slice-11
+review or repair cycle.
+
+Final review conclusion:
+
+    SLICE 11 INDEPENDENT FULL-DIFF REVIEW PASSED — 0 BLOCKERS.
+    CANDIDATE ad5d05330a2196d35c33858cf234896cba831247 MAY PROCEED TO MECHANICAL CLOSURE.
