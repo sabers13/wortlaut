@@ -1,10 +1,12 @@
 # Slice 10 — Online and offline dictionary modes (ADR-0008)
 
-**BLOCKED until ADR-0008 passes cold review #2.** This brief is dependency-closed
-and dispatch-ready, but ADR-0008 currently carries `NEEDS COLD REVIEW`. Do not
-dispatch implementation while that marker stands (WORKFLOW §7 / AGENTS G7).
+**BLOCKED until ADR-0008 passes cold review #3 — FINAL CONVERGENCE REVIEW.**
+This brief is dependency-closed and dispatch-ready, but ADR-0008 currently
+carries `NEEDS COLD REVIEW`: reviews #1 and #2 are complete (O1–O5 CLOSED, O6
+resolved by the preservation remedy in ADR-0008 §9.3.1/§9.3.2). Do not dispatch
+implementation while that marker stands (WORKFLOW §7 / AGENTS G7).
 
-Depends: ADR-0008 accepted (cold review #2 PASS). **Not** dependent on slice-9,
+Depends: ADR-0008 accepted (cold review #3 PASS). **Not** dependent on slice-9,
 which remains blocked on lecture-app Phase-4 decomposition and
 `tasks/adr-0002-donor-notes.md`; the two slices touch disjoint scopes and may be
 ordered freely.
@@ -51,7 +53,9 @@ Allowlist:   app/provider.py                       (new — DictionaryProvider s
              tests/test_api.py                     (regression + new routes)
              tests/test_deck.py                    (lazy resolver regression)
              tests/test_standalone.py              (startup state machine)
-             tests/test_launcher.py                (CLI table)
+             tests/test_launcher.py                (CLI table; ADDITIVE ONLY — the existing
+                                                    custom-manifest startup cases named in
+                                                    ADR-0008 §9.3.1 must remain unchanged)
              tests/test_dict_install.py            (progress seam)
              tests/test_check_agents.py            (R14 Product/developer boundary gate coverage)
              tests/conftest.py                     (fixture shard set)
@@ -101,7 +105,17 @@ Acceptance:  1. `make gate` passes on the exact final candidate: ruff clean;
                 validation passes for the updated module set.
              2. Every pre-existing test passes unchanged with the local
                 provider active — offline behaviour is byte-identical
-                (ADR-0008 D82, §14.2 test 8).
+                (ADR-0008 D82, §14.2 test 8). This explicitly includes the
+                existing `tests/test_launcher.py` custom-manifest startup class
+                — `--manifest CUSTOM` **without** `--install-dictionary`,
+                Offline/canonical startup — named in ADR-0008 §9.3.1: size
+                mismatch, SHA-256 mismatch, filename/canonical-path mismatch,
+                identity-not-full-installer verification, runtime validation
+                after a valid precheck, replacement after precheck, and
+                `--dict-path` bypassing manifest identity. Those tests must keep
+                exercising the real integrity path; they must not be rewritten,
+                relaxed, or deleted to fit a new CLI contract, and acceptance
+                must not be weakened merely to make tests pass.
              3. The differential harness (tests/test_provider_differential.py)
                 proves observable equality between LocalDictionaryProvider and
                 OnlineDictionaryProvider over the fixture shard set, across the
@@ -150,9 +164,24 @@ Acceptance:  1. `make gate` passes on the exact final candidate: ruff clean;
                 locations, manifest/trust domain, network permission, install
                 then launch/exit behaviour, and all usage errors. Product fetches
                 allow only the exact GitHub initial path and closed redirect-host
-                policy; `--manifest PATH --install-dictionary` is tested as a
-                segregated developer/recovery offline-only path and cannot affect
-                Online or browser/API input.
+                policy; the explicit `--manifest PATH` path is tested as a
+                segregated developer/recovery Offline-only path — in both its
+                `--install-dictionary` install role and its network-free
+                canonical-identity-verification startup role — and cannot affect
+                Online or browser/API input. Specifically, for the four
+                custom-manifest / no-install rows (ADR-0008 §9.3.1): a valid
+                manifest verifies the canonical dictionary under the selected
+                data root and launches Offline successfully; an invalid one
+                produces the exact documented integrity error and exit code with
+                no PART-B database created or written; no
+                `OnlineDictionaryProvider` is constructed; and no custom source
+                or dictionary mode is persisted. Explicit rejection tests for
+                `--dictionary-mode online --manifest CUSTOM` (all four rows,
+                ADR-0008 §9.3.2) must prove deterministic exit 2 before any
+                network access, provider activation, preference mutation or
+                PART-B mutation. `--dict-path` precedence is asserted as shipped:
+                inert manifest without install, manifest-constrained activation
+                with install.
             13. Playwright coverage against the real FastAPI-served compiled
                 product: first-run chooser, both modes, both switch directions,
                 cache size display, clear-cache, UI-initiated offline install

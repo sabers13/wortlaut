@@ -49,15 +49,22 @@ them. REJECTED items are listed so they do not resurface.
   change**, or the repaired file silently escapes the gate that is supposed to
   verify it.
 
-- **Online/offline dictionary modes (ADR-0008) — BLOCKED on focused cold review #2.**
-  `docs/adr/0008-online-offline-dictionary.md` carries `NEEDS COLD REVIEW`;
-  cold review #1 raised O1–O5 and the ADR revision now specifies sense-ref
-  routing inside the existing 256 lookup shards, Product versus explicit
+- **Online/offline dictionary modes (ADR-0008) — BLOCKED on cold review #3, the
+  FINAL CONVERGENCE REVIEW.**
+  `docs/adr/0008-online-offline-dictionary.md` carries `NEEDS COLD REVIEW`.
+  Cold review #1 raised O1–O5; the first revision specified sense-ref routing
+  inside the existing 256 lookup shards, Product versus explicit
   developer/recovery network domains, the exhaustive CLI matrix, verified shard
   leases/clear-cache concurrency, and a hard 32-download budget distinct from
-  Bloom FPR. `tasks/slice-10.md` is dependency-closed and dispatch-ready but
-  must not be dispatched until a fresh focused review #2 verifies those remedies
-  under WORKFLOW §7 / AGENTS G7. Independent of slice-9: the two slices touch
+  Bloom FPR. Cold review #2 verified O1–O5 as CLOSED and raised one knock-on
+  blocker, O6 (the CLI matrix made `--manifest` without `--install-dictionary` a
+  usage error, contradicting the shipped launcher startup contract and its
+  tests); the second revision applied the preservation remedy in ADR-0008 §9.3.1
+  and §9.3.2 — the custom manifest keeps its Offline canonical-identity
+  verification startup role and is still forbidden from configuring Online.
+  `tasks/slice-10.md` is dependency-closed and dispatch-ready but must not be
+  dispatched until cold review #3 approves the ADR under WORKFLOW §7 /
+  AGENTS G7. Review #3 is the last ordinary review for this lineage. Independent of slice-9: the two slices touch
   disjoint scopes and may be ordered freely. The ADR-0008 §13.3 production shard
   build and the `dictionary-online-v2` release are a separate authorized
   operation and are outside slice-10.

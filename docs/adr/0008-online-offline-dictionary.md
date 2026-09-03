@@ -201,16 +201,16 @@ These are recorded as given. They are not alternatives this ADR may reopen.
 | **D91** | **Mode is a local application preference** persisted in a small validated, atomically written `preferences.json` under the existing data directory. States: `unconfigured` \| `online` \| `offline`. No PART-B schema migration is added for it. | Mode is machine-local configuration, not dictionary data and not user study data (AGENTS R9). |
 | **D92** | **Startup never contacts the network before an explicit user choice.** The startup state machine is §8.2. In `unconfigured` state the app starts with no active provider and every dictionary-dependent operation fails with a structured `dictionary_unavailable` state, never a crash. | Requirement I; also keeps `./wortlaut` honest for a user who never opts into online mode. |
 | **D93** | **Settings/Dictionary UI contract** (§9.2) exposes mode, online cache size and shard count with an explicit "Clear online cache", and offline install state with explicit "Download for offline use" / "Remove offline copy". Destructive actions are separate explicit user actions and never touch user data. | Requirement J. |
-| **D94** | **UI-initiated offline install reuses `app/dict_install.py` unchanged in substance**; a progress-reporting seam is added, not a second downloader/verifier. The default `./wortlaut --install-dictionary` uses the committed production manifest. An explicit local `--manifest PATH` retains the present developer/recovery override only for offline installation; its declared source may be `file://` or `http(s)://`, but it never configures Online mode or browser/UI fetches. | Two download/verify implementations means two integrity contracts and one of them will rot; retaining an explicit operator override does not make it a product network source. |
+| **D94** | **UI-initiated offline install reuses `app/dict_install.py` unchanged in substance**; a progress-reporting seam is added, not a second downloader/verifier. The default `./wortlaut --install-dictionary` uses the committed production manifest. An explicit local `--manifest PATH` retains its present developer/recovery override in both of its existing Offline-only roles: selecting the source and expected identity of an explicit offline installation, and supplying the canonical identity verified at ordinary Offline startup when `--install-dictionary` is absent (§9.3.1). Its declared source may be `file://` or `http(s)://` in the install role and is not dereferenced at all in the verification role, and it never configures Online mode or browser/UI fetches. | Two download/verify implementations means two integrity contracts and one of them will rot; retaining an explicit operator override does not make it a product network source. |
 | **D95** | **Online shard cache with verified immutable leases** lives at `<data-dir>/cache/dictionary-online/<version>/<family>/`, is disposable, contains no user data, and never mixes versions. A shard is usable only through a verified immutable lease: a miss is single-flight, temp-written, exact-byte/SHA/schema-validated, fsynced and atomically installed before a private immutable snapshot is leased; a new cache-hit lease revalidates canonical bytes before snapshot creation. Clear-cache serializes mutation, bars new canonical acquisitions, and defers files held by active leases. | Requirement L. This matches and extends the full-dictionary anti-TOCTOU discipline without relying on platform-specific unlinking of an open SQLite pathname. |
-| **D96** | **Two outbound trust domains.** Product/runtime/UI distribution (Online provider, first-run/Settings Online selection, UI offline download, and default `--install-dictionary`) uses only the committed Wortlaut production manifests and pinned GitHub Release asset paths over HTTPS. The fetcher validates every redirect against the closed GitHub distribution host policy in §10. An explicit CLI `--manifest PATH` remains a segregated developer/recovery offline-install override, with credential redaction, but cannot configure Online mode or any browser/API fetch. | R14 can be enforced honestly for automatic product traffic while preserving the existing explicit operator recovery path. |
+| **D96** | **Two outbound trust domains.** Product/runtime/UI distribution (Online provider, first-run/Settings Online selection, UI offline download, and default `--install-dictionary`) uses only the committed Wortlaut production manifests and pinned GitHub Release asset paths over HTTPS. The fetcher validates every redirect against the closed GitHub distribution host policy in §10. An explicit CLI `--manifest PATH` remains a segregated developer/recovery Offline-only override — install (§10.2) and canonical-identity-verification startup (§9.3.1) — with credential redaction, but cannot configure Online mode or any browser/API fetch. | R14 can be enforced honestly for automatic product traffic while preserving the existing explicit operator recovery path. |
 | **D97** | **Honest privacy contract** (§11). Offline: no dictionary network access after installation. Online: GitHub sees the user's IP and an opaque shard access pattern; the searched word never appears in a URL; no telemetry, analytics, account, or upload of user data. Shard access is **not** claimed to be cryptographically private. | A public routing algorithm permits inference. Saying otherwise would be false. |
 | **D98** | **Online failure is explicit and never fabricated.** Unavailable / timeout / wrong size / wrong SHA / invalid SQLite / malformed / wrong dataset version / corrupt cache recovery failure ⇒ the shard is never used, no stub or partial dictionary result is synthesized, an actionable `online_dictionary_unavailable` error is returned, user data is untouched, and the persisted mode is not silently changed. Exceeding D88's remote-download budget instead returns `online_dictionary_budget_exceeded`; it is neither `needs_gloss` nor a dictionary miss and likewise performs no PART-B mutation. A clearly surfaced temporary local fallback is permitted only when a complete verified offline dictionary exists; it is optional and it is never silent. | A "successful" lookup produced by a failed or incomplete fetch would write wrong bindings into PART B. |
 | **D99** | **Provider activation is serialized and atomic.** At any request boundary exactly one coherent provider/dataset identity is active. In-flight requests complete against the provider they pinned; no single logical operation joins data from both providers. | Requirement P; mirrors the existing `DictionaryRuntime` generation/pin discipline. |
 | **D100** | **`ReadingSnapshot`'s eager reference maps become lazy, bounded resolvers.** `lemma_ids` / `sense_ids` keep their `Mapping`-shaped `in` / `[]` contract but resolve refs on demand through the provider with per-snapshot memoization. D47 relink resolves only the refs actually persisted in `note_dictionary_binding`. | Online mode cannot hold 1.1M lemma refs and 480k sense refs eagerly. All current call sites (`app/api.py` lines 1053–1134, 1642–1737 and `_relink_part_b`) are point lookups and are unchanged by this. |
 | **D101** | **Deterministic builder `tools/build_online_dictionary.py`**, input one verified full `dictionary.sqlite`, output outside Git (§13). Verifies the input SHA before any production build, streams/partitions rather than loading the asset into memory, emits rows in deterministic order, preserves exact values including `source`/`license`/`semantic_ref`, never mutates the source, and reports row counts, total bytes, per-family size distribution and a re-verified digest for every emitted asset. | Requirement Q. A non-deterministic builder makes every future rebuild an unreviewable diff. |
 | **D102** | **Differential verification against the local provider is a release gate.** CI runs it over a tiny deterministic fixture; the production v2 build runs it over a large deterministic sample with explicit row/count validation. `make gate` never downloads production shards. | Requirement R. "Looks plausible" is not a dictionary correctness standard. |
-| **D103** | **CLI contract.** `./wortlaut` and the `./flashcard` alias are unchanged. `--install-dictionary` is unchanged. A new `--dictionary-mode online\|offline` is **session-only**, does not write `preferences.json`, and its interactions with `--dict-path` and `--install-dictionary` are specified exhaustively in §9.3. | Requirement U forbids leaving these interactions ambiguous. |
+| **D103** | **CLI contract.** `./wortlaut` and the `./flashcard` alias are unchanged. `--install-dictionary` is unchanged. A new `--dictionary-mode online\|offline` is **session-only**, does not write `preferences.json`, and its interactions with `--manifest`, `--dict-path` and `--install-dictionary` are specified exhaustively in the 24-row §9.3 matrix, whose custom-manifest startup rows record the existing shipped launcher contract (§9.3.1) and whose Online rows reject a custom manifest unconditionally (§9.3.2). | Requirement U forbids leaving these interactions ambiguous. |
 | **D104** | **Online shards publish to a separate GitHub Release `dictionary-online-v2`.** The existing `dictionary-v2` release stays intact and untouched. Publication follows the fixed sequence in §13.3. | 577 assets do not belong in the full-asset release; and the full asset must not be disturbed by online-mode iteration. |
 | **D105** | **Existing users are never forced through the chooser.** A user with a valid `~/.local/share/flashcard/dictionary/dictionary.sqlite` and no persisted preference launches straight into Offline. Persistent user paths are not renamed. | Requirement T. The product rename to Wortlaut is not a reason to move anyone's data. |
 | **D106** | **The build/publication path must not require multiple simultaneous multi-GB duplicate trees.** Shards are emitted and uploaded incrementally against a checked free-space budget on a caller-supplied working directory. Realistic temporary-disk requirements are recorded in §13.4. | The owner has had local storage pressure; the current machine has ~13 GB free. |
@@ -696,14 +696,48 @@ per-user paths. `--user-db` retains its established independent override.
 
 `--manifest PATH` remains an explicit local developer/recovery manifest file
 (not a browser/API value). Its existing `download_url` may be `file://` or
-explicit `http(s)://`, subject to existing credential redaction. It is accepted
-only together with `--install-dictionary`, is never persisted, and never
-configures `OnlineDictionaryProvider`. “Production manifest” below means the
+explicit `http(s)://`, subject to existing credential redaction. It has exactly
+**two Offline-only operator roles**, both of which the shipped launcher already
+implements and both of which this ADR preserves unchanged:
+
+1. **Install role** — together with `--install-dictionary`, it selects the
+   source and the expected identity of the canonical offline asset installed
+   into `<data-dir>/dictionary/`.
+2. **Canonical-identity-verification startup role** — *without*
+   `--install-dictionary`, and only when no `--dict-path` override is present,
+   it supplies the canonical dictionary identity that the already-present
+   canonical asset is verified against before the ordinary Offline launch
+   continues. This is the existing shipped startup contract
+   (`wortlaut` → `_load_active_manifest` → `_verify_canonical_dictionary`, then
+   the `DictionaryRuntime` activation check against the same manifest SHA-256
+   and version) and it is exercised today by `tests/test_launcher.py`. §9.3.1
+   specifies it normatively.
+
+In **neither** role may a custom manifest be persisted as application
+configuration, configure `OnlineDictionaryProvider`, become a Product/UI fetch
+source, silently change the persisted dictionary mode, or weaken credential
+redaction. A custom manifest is never an Online dictionary source under any
+circumstances (§9.3.2).
+
+“Production manifest” below means the
 committed `release/dictionary-manifest-v2.json` for offline installation;
 “online manifest” means the separate committed trusted online configuration in
 §7. A usage error is deterministic exit 2 before network or user-state
 mutation. Installation retains its current lifecycle: install/verify first,
 then the normal runtime launch; it is not an install-and-exit command.
+
+**`--dict-path` precedence over `--manifest` (existing behaviour, unchanged).**
+When `--dict-path` is supplied and `--install-dictionary` is not, the launcher
+never loads a manifest at all: no manifest parse/IO error is possible, no
+canonical identity verification runs, `expected_dictionary_sha256` is `None`,
+and the explicitly selected asset is validated only by `DictionaryRuntime` at
+activation. A `--manifest` value passed alongside `--dict-path` without
+`--install-dictionary` is therefore **inert**, not a usage error; Slice-10 must
+not silently change that precedence. When `--dict-path` is supplied *together
+with* `--install-dictionary`, the manifest is loaded and drives the installation
+into the canonical directory, and the subsequent activation of the explicit path
+additionally enforces that asset against the same manifest SHA-256 and version —
+a mismatch fails activation with exit 2 instead of launching.
 
 | Mode flag | `--manifest` | `--dict-path` | `--install-dictionary` | Result, manifest/trust domain, and exit |
 |---|---|---|---|---|
@@ -711,17 +745,17 @@ then the normal runtime launch; it is not an install-and-exit command.
 | none | none | none | yes | Install canonical offline asset from production manifest through Product domain; then normal §8.2 launch. If no preference exists, persist `offline`; never overwrite an explicit preference. |
 | none | none | PATH | no | Normal Offline launch against explicit path; no canonical manifest check or install; normal launch, error if path is absent/invalid. |
 | none | none | PATH | yes | Install canonical offline asset from production manifest through Product domain, then normal Offline launch against the explicit path; normal launch. This preserves the existing independent override/install behavior. |
-| none | PATH | none | no | **Usage error.** A custom manifest has no runtime-startup role. |
+| none | PATH | none | no | **Offline, Developer/Recovery canonical-identity verification (§9.3.1).** Load the custom manifest, require the canonical asset `<data-dir>/dictionary/<manifest filename>` to be exactly the launcher-resolved canonical path, and verify its exact byte count and SHA-256 before any user-state write; then apply §8.2 and launch Offline normally. Manifest role: identity only, never a source and never persisted. No dictionary network in either trust domain. Failures keep their existing integrity semantics (exit 2 manifest/filename/size/SHA, exit 1 absent asset, exit 2 replacement caught at activation). |
 | none | PATH | none | yes | Install canonical offline asset using the explicit developer/recovery manifest and its declared source; then normal §8.2 launch. This is Developer/Recovery domain. |
-| none | PATH | PATH | no | **Usage error.** A custom manifest has no runtime-startup role. |
+| none | PATH | PATH | no | **Offline against the explicit path; the custom manifest is inert.** `--dict-path` suppresses manifest loading entirely, so no manifest error and no canonical identity check occur; the asset is validated only by `DictionaryRuntime` at activation. Normal launch; nothing persisted; no dictionary network. Exit 1 when the explicit path is absent, exit 2 on activation failure. |
 | none | PATH | PATH | yes | Install canonical offline asset through Developer/Recovery domain, then normal Offline launch against explicit path; normal launch. |
 | `offline` | none | none | no | Session-only Offline; requires a valid canonical asset; normal launch or actionable nonzero absence/validation error. Preference unchanged; no dictionary network. |
 | `offline` | none | none | yes | Install canonical offline asset through Product domain, then session-only Offline normal launch; preference unchanged. |
 | `offline` | none | PATH | no | Session-only Offline against explicit path; normal launch or actionable nonzero path error; preference unchanged. |
 | `offline` | none | PATH | yes | Install canonical asset through Product domain, then session-only Offline launch against explicit path; preference unchanged. |
-| `offline` | PATH | none | no | **Usage error.** Custom manifests apply only to explicit install. |
+| `offline` | PATH | none | no | **Session-only Offline with Developer/Recovery canonical-identity verification (§9.3.1).** Exactly the no-mode/custom-manifest/no-path/no-install behaviour above, and the persisted preference is neither read as authority for this launch nor written. No dictionary network; manifest not persisted; same integrity exits. |
 | `offline` | PATH | none | yes | Install canonical asset through Developer/Recovery domain, then session-only Offline normal launch; preference unchanged. |
-| `offline` | PATH | PATH | no | **Usage error.** Custom manifests apply only to explicit install. |
+| `offline` | PATH | PATH | no | **Session-only Offline against the explicit path; the custom manifest is inert.** Exactly the no-mode/custom-manifest/explicit-path/no-install behaviour above; preference unchanged; no dictionary network; nothing persisted. |
 | `offline` | PATH | PATH | yes | Install canonical asset through Developer/Recovery domain, then session-only Offline launch against explicit path; preference unchanged. |
 | `online` | none | none | no | Session-only Online using only the committed trusted online manifest and Product domain; normal launch. Preference unchanged; uncached shards may use Product network. |
 | `online` | none | none | yes | **Usage error.** Offline installation and Online session selection are contradictory; neither install nor network begins. |
@@ -733,9 +767,95 @@ then the normal runtime launch; it is not an install-and-exit command.
 | `online` | PATH | PATH | yes | **Usage error.** All contradictions apply; no mutation/network. |
 
 Thus `--dictionary-mode` is session-only in every valid row and never mutates
-`preferences.json`; a custom manifest never affects Online; and `--data-dir`
-scopes every default per-user path, including cache and PART-B state, in every
-row.
+`preferences.json`; a custom manifest is Offline-only, is never persisted, and
+never affects Online in any row; and `--data-dir` scopes every default per-user
+path, including cache and PART-B state, in every row. In every row that both
+installs and supplies `--dict-path`, the loaded manifest additionally
+constrains activation of the explicit path as described in the precedence
+paragraph above.
+
+### 9.3.1 Developer/Recovery canonical-identity-verification startup
+
+This subsection is normative for the four matrix rows with a custom
+`--manifest`, no `--install-dictionary`, and mode `none` or `offline`. It
+records the **existing shipped launcher contract**; ADR-0008 preserves it and
+introduces no change to it.
+
+Flow, with no `--dict-path` present:
+
+```
+explicit custom --manifest PATH
+    ↓
+load manifest (strict existing dict_install validation)
+    ↓
+verify the canonical offline dictionary under the selected data root
+against that manifest (exact filename, exact byte count, exact SHA-256)
+    ↓
+verification passes → continue the ordinary Offline launch
+verification fails  → exit with the existing integrity error
+    ↓
+the custom manifest is never written into preferences.json
+```
+
+Per-aspect contract:
+
+- **Effective provider:** `LocalDictionaryProvider` (Offline). Never
+  `OnlineDictionaryProvider`, whatever the persisted preference says for the
+  `offline` mode rows; for the `none` mode rows §8.2 selects Offline because a
+  valid canonical asset is what this path verifies.
+- **Manifest role:** canonical *identity* only. It is not a download source in
+  this path, and nothing is fetched from its `download_url`.
+- **Network permission / trust domain:** Developer/Recovery domain, and this
+  path performs **no** network access at all. It never enters the Product
+  domain and never widens R14.
+- **Canonical dictionary verification:** the canonical path is
+  `<data-root>/dictionary/dictionary.sqlite`; the manifest's declared filename
+  must resolve to exactly that path. Identity is the lightweight release
+  precheck (exact byte count + streaming SHA-256), performed **before**
+  `ensure_user_db` and before any user-state write. `DictionaryRuntime` then
+  performs its own full validation at activation against the same manifest
+  SHA-256 and version, so a file replaced after the precheck is still rejected.
+- **Persistence behaviour:** nothing about the custom manifest is persisted —
+  not as a preference, not as an Online source, not as a dictionary mode. The
+  `offline` mode rows additionally leave `preferences.json` untouched.
+- **Data-dir behaviour:** an explicit `--data-dir PATH` selects the data root
+  for that invocation, and the canonical dictionary verified is the one under
+  **that** root (`PATH/dictionary/dictionary.sqlite`), with `PATH/preferences.json`,
+  `PATH/cache/dictionary-online/`, `PATH/flashcards.sqlite` and `PATH/media/`
+  scoped identically to every other row.
+- **Launch/exit behaviour:** on success, the ordinary Offline launch continues
+  (loopback bind, browser open unless `--no-browser`) and the process exits 0
+  only when the server stops.
+- **Failure semantics (preserved exactly, not collapsed into a usage error):**
+  malformed/absent manifest → exit 2 `manifest error:`; manifest filename that
+  does not resolve to the canonical path → exit 2 `dictionary manifest filename
+  does not match the canonical path`; canonical asset absent → exit 1 with the
+  actionable install hint; byte-count mismatch → exit 2 `size mismatch`;
+  SHA-256 mismatch → exit 2 `SHA-256 mismatch`; asset replaced after the
+  precheck → exit 2 at activation. In every failure case no PART-B database is
+  created or written.
+
+`tests/test_launcher.py` already encodes this contract
+(`test_canonical_dictionary_wrong_bytes_fails_before_user_db`,
+`test_canonical_dictionary_wrong_sha_fails_before_user_db`,
+`test_canonical_dictionary_manifest_filename_mismatch_fails`,
+`test_ordinary_canonical_startup_uses_identity_not_full_installer_verification`,
+`test_runtime_validation_reached_after_valid_canonical_identity`,
+`test_canonical_runtime_rejects_replacement_after_identity_precheck`, and
+`test_explicit_dict_path_skips_manifest_but_still_runtime_validated`). Those
+tests remain authoritative and must continue to pass unchanged; Slice-10 must
+not rewrite them to fit a new CLI contract.
+
+### 9.3.2 Online plus a custom manifest is always invalid
+
+Every combination equivalent to `--dictionary-mode online --manifest CUSTOM` is
+a deterministic usage error (exit 2), regardless of `--dict-path` or
+`--install-dictionary`. Rejection happens **before** any network access,
+provider activation, preference mutation or PART-B mutation. A custom manifest
+cannot influence `OnlineDictionaryProvider` under any circumstances: it cannot
+supply shard URLs, routing or filter parameters, dataset identity, or host
+policy. This is the O2 security boundary and §9.3.1 does not weaken it — the
+Developer/Recovery role is Offline-only by construction.
 
 ---
 
@@ -771,14 +891,25 @@ SQLite/logical validation. This deliberately allows the observable GitHub
 release host families, not a temporary signed CDN hostname or a generic
 `*.githubusercontent.com` wildcard.
 
-### 10.2 Explicit developer/recovery offline-install path
+### 10.2 Explicit developer/recovery offline path
 
-The operator-only `--manifest PATH --install-dictionary` route is outside R14's
-automatic Product allowlist. It preserves existing `dict_install` compatibility
-for a local custom manifest whose explicit `download_url` is `file://` or
-`http(s)://`; credentials remain rejected/redacted. It may only install an
-offline asset, is never persisted as a preference or online source, and cannot
-be reached from UI/browser/API input. It is not a generic runtime fetch proxy.
+The operator-only explicit `--manifest PATH` route is outside R14's automatic
+Product allowlist. It has the two Offline-only roles defined in §9.3:
+
+- **`--manifest PATH --install-dictionary` (install role).** Preserves existing
+  `dict_install` compatibility for a local custom manifest whose explicit
+  `download_url` is `file://` or `http(s)://`; credentials remain
+  rejected/redacted. It may only install an offline asset.
+- **`--manifest PATH` without `--install-dictionary` (canonical-identity
+  verification role, §9.3.1).** Performs **no** network access whatsoever: the
+  manifest is read locally and used only to verify the identity of the canonical
+  offline dictionary already present under the selected data root. Its
+  `download_url` is not dereferenced in this role.
+
+Neither role is persisted as a preference or an online source, neither can be
+reached from UI/browser/API input, and neither may configure
+`OnlineDictionaryProvider`. This is not a generic runtime fetch proxy, and it
+does not weaken the Product/UI R14 boundary in §10.1.
 
 ### 10.3 Unchanged local browser boundary
 
@@ -1000,7 +1131,22 @@ identical `None`/absence, identical dedup behaviour, and identical
 7. **Mode persistence.** All four §8.2 startup branches, including the corrupt
    preference file failing safe without enabling network access.
 8. **Offline regression.** The full existing suite passes unchanged with the
-   local provider, proving D82's "offline behaviour is unchanged" claim.
+   local provider, proving D82's "offline behaviour is unchanged" claim. This
+   explicitly includes the pre-existing `tests/test_launcher.py` custom-manifest
+   startup cases named in §9.3.1: size mismatch, SHA-256 mismatch,
+   filename/canonical-path mismatch, identity-not-full-installer verification,
+   runtime validation reached after a valid precheck, replacement after
+   precheck, and `--dict-path` bypassing manifest identity. Those cases must
+   keep exercising the real integrity path and must not be rewritten.
+9. **CLI matrix.** Every §9.3 row is enumerated under both the default and an
+   explicit `--data-dir` root. For the four custom-manifest, no-install rows:
+   a valid manifest verifies the canonical asset under the selected data root
+   and launches Offline; an invalid one produces the exact §9.3.1 integrity exit
+   without creating or writing PART B; no `OnlineDictionaryProvider` is
+   constructed; and no custom source or mode is persisted. For the four
+   `--dictionary-mode online` rows carrying a custom manifest, rejection is
+   deterministic exit 2 before any network access, provider activation,
+   preference mutation or PART-B mutation (§9.3.2).
 
 ### 14.3 Production-v2 validation
 
@@ -1025,8 +1171,13 @@ the slice report.
 - `./wortlaut`, `./flashcard`, `--dict-path`, `--data-dir`, `--user-db`,
   `--port`, and `--no-browser` keep their current behaviour. `--manifest` and
   `--install-dictionary` retain the existing offline developer/recovery and
-  install lifecycle, with the §9.3 restriction that a custom manifest cannot
-  become a runtime/Online source.
+  install lifecycle **in full**, including `--manifest PATH` *without*
+  `--install-dictionary`, which continues to verify the canonical offline
+  dictionary's identity and then launch normally, with its existing integrity
+  exit codes and messages (§9.3.1). The only §9.3 restriction is that a custom
+  manifest can never become a runtime/Online source or be persisted (§9.3.2).
+  The pre-existing `tests/test_launcher.py` cases covering this behaviour must
+  pass unchanged.
 - PART-B schema is unchanged; no migration is introduced by this ADR.
 - `asset_token` for v2 is unchanged in both modes, so existing picker tokens,
   bindings, and review state are unaffected by adopting online mode.
@@ -1069,9 +1220,10 @@ exactly these governance changes, and no others:
    through committed Wortlaut manifests and §10's HTTPS initial/redirect host
    policy; no generic Product fetch helper and no browser-supplied URL may reach
    a server-side fetch. The explicit operator-only developer/recovery
-   `--manifest PATH --install-dictionary` offline-install path is segregated
-   from R14's automatic Product domain, remains credential-redacted, and cannot
-   persist/configure Online mode. Gate check: scan product network entry points
+   `--manifest PATH` path — both its `--install-dictionary` install role and its
+   network-free canonical-identity-verification startup role (§9.3.1) — is
+   segregated from R14's automatic Product domain, remains credential-redacted,
+   and cannot persist or configure Online mode. Gate check: scan product network entry points
    and assert they are reached only through the validated committed-manifest
    policy; test the explicit CLI segregation separately.
 2. **AGENTS R9 clarification.** The online shard cache is dictionary material,
@@ -1155,12 +1307,16 @@ bytes are needed, not their sum.
 
 ## 20. Cold review
 
-Cold review #1 — broad architecture challenge — is complete. Its blockers are
-preserved below. This ADR remains **NEEDS COLD REVIEW** until a fresh cold
-review #2 approves it; this revision does not approve itself.
+Cold review #1 — broad architecture challenge — is complete; its blockers O1–O5
+are preserved below with their resolution records. Cold review #2 — focused
+remedy verification — is also complete: it verified O1–O5 as **CLOSED** and
+raised exactly one qualifying direct knock-on blocker, O6, recorded below. This
+ADR remains **NEEDS COLD REVIEW** until cold review #3 approves it; this
+revision does not approve itself and does not reopen O1–O5.
 
-Cold-review lineage count: **1 completed / #2 next — focused remedy
-verification.**
+Cold-review lineage count: **2 completed / #3 next — FINAL CONVERGENCE REVIEW.**
+Under WORKFLOW §7 / AGENTS G7 review #3 is the last ordinary cold review for
+this lineage; there is no review #4.
 
 ### O1 — Sense-reference point reads are not bucket-closed.
 
@@ -1307,3 +1463,93 @@ returns `online_dictionary_budget_exceeded`, and makes no PART-B mutation; it
 is never `needs_gloss` or not-found. Slice-10 acceptance mechanically tests
 zero false negatives, permitted false positives, family maximum, budget
 enforcement and fail-closed error. The ~12 result is explicitly non-normative.
+
+### O6 — §9.3 makes `--manifest` without `--install-dictionary` a usage error, contradicting the launcher's existing startup contract, §15, D82 and Slice-10 acceptance 2.
+
+**Defect:** the revised CLI matrix declared `--manifest PATH` valid only
+together with `--install-dictionary`, exiting 2 otherwise. The shipped launcher
+already uses an explicitly supplied `--manifest` during ordinary canonical
+startup *without* `--install-dictionary`: that manifest supplies the canonical
+dictionary identity against which the existing dictionary is verified before
+runtime, and `tests/test_launcher.py` intentionally exercises that behaviour.
+
+**Why it blocks:** the ADR simultaneously required rejecting the combination,
+preserving the existing developer/recovery lifecycle (§15, D94), and keeping
+pre-existing Offline behaviour and tests unchanged (D82, §14.2 test 8, Slice-10
+acceptance 2). Those requirements cannot all be satisfied, so the specified CLI
+contract is not executable against the shipped code and tests.
+
+**Affected:** §9.3, §10.2, D82, D94, D96, D103, §14.2, §15, §16.2, Slice-10
+acceptance 2 and 12.
+
+**Required remedy:** preserve the existing developer/recovery
+canonical-identity-verification role of `--manifest` without
+`--install-dictionary`, while keeping custom manifests forbidden from
+configuring Online mode.
+
+#### Resolution — O6
+
+The preservation remedy is applied.
+
+- **Existing custom-manifest Offline startup role preserved.** New normative
+  §9.3.1 records the shipped contract: load the custom manifest, verify the
+  canonical offline dictionary under the selected data root by exact filename,
+  byte count and SHA-256 before any user-state write, then continue the ordinary
+  Offline launch; the custom manifest is never persisted as application
+  configuration.
+- **Trust-domain distinction maintained.** O2's two domains stand unchanged.
+  The Product/UI domain still covers `OnlineDictionaryProvider`, first-run and
+  Settings Online mode, UI offline installation and the default production
+  install, and is still restricted to trusted committed Wortlaut assets and
+  manifests with no browser/API URL input. The Developer/Recovery domain now
+  explicitly carries the two Offline-only `--manifest` roles — install, and
+  network-free canonical-identity verification — and neither may configure the
+  Online provider, be persisted as an Online source, be reached from browser/API
+  input, silently change the persisted mode, or weaken credential redaction. The
+  Product/UI R14 boundary in §10.1 is not weakened.
+- **Online plus a custom manifest is still prohibited.** New §9.3.2 restates the
+  O2 security boundary: all four such rows remain deterministic exit-2 usage
+  errors, rejected before network access, provider activation, preference
+  mutation and PART-B mutation.
+- **§9.3 matrix corrected.** The four rows with mode `none`/`offline`, a custom
+  manifest and no install now state the real contract instead of a usage error.
+  The matrix remains exhaustive at 24 rows; only the content of those rows
+  changed. Each affected row states effective provider, manifest role, network
+  permission/trust domain, canonical verification, persistence, data-dir scope,
+  launch/exit behaviour and failure semantics, with §9.3.1 carrying the
+  per-aspect detail.
+- **`--dict-path` interaction verified against the shipped launcher, not
+  invented.** With `--dict-path` and no `--install-dictionary` the launcher
+  never loads a manifest at all, so a custom manifest is inert rather than a
+  usage error and no canonical identity check runs; with `--dict-path` *and*
+  `--install-dictionary` the loaded manifest drives the install and additionally
+  constrains activation of the explicit path by SHA-256 and version. Both facts
+  are now stated explicitly in §9.3.
+- **`--data-dir` semantics unchanged.** An explicit `--data-dir PATH` scopes the
+  canonical dictionary and every per-user path for the invocation, and the
+  custom manifest verifies the canonical dictionary under **that** root without
+  being persisted into preferences.
+- **§10.2, D94, D96, D103, §15 and §16.2 reconciled** with the preserved role;
+  the false claim that a custom manifest "has no runtime-startup role" is
+  removed. The accurate statement is that custom manifests have no Online
+  runtime/provider role but retain an explicit Offline developer/recovery
+  canonical-identity-verification startup role.
+- **Existing launcher integrity tests remain authoritative.** §14.2 test 8 now
+  names the pre-existing `tests/test_launcher.py` cases — size mismatch, SHA-256
+  mismatch, filename/canonical-path mismatch, identity-not-full-installer
+  verification, runtime validation after a valid precheck, replacement after
+  precheck, and `--dict-path` manifest bypass — and requires them to keep
+  exercising the real integrity path unchanged. New §14.2 test 9 requires
+  exhaustive CLI-matrix coverage. Slice-10 acceptance 2 and 12 are corrected to
+  match, so backward compatibility and matrix coverage are no longer in
+  conflict.
+- **O1–O5 are unaffected and remain CLOSED.** O6's remedy changes the content of
+  four CLI matrix rows and the wording of the developer/recovery trust domain.
+  It does not touch `sense_ref` bucket closure (O1), Product/UI network source
+  restrictions (O2 — the Product domain and R14 scope are unchanged and the
+  Online prohibition is restated), matrix exhaustiveness (O3 — still 24
+  exhaustive rows), the shard cache/lease lifecycle (O4), or Bloom/network
+  budget semantics (O5).
+- **No production code was changed in this ADR session.** The remedy documents
+  and preserves the shipped launcher behaviour; `wortlaut`, `app/**` and
+  `tests/**` are untouched.
