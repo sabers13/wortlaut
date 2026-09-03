@@ -118,7 +118,7 @@ def test_valid_real_modules_toml(capsys: pytest.CaptureFixture[str]) -> None:
     assert code == 0
     out = capsys.readouterr().out
     assert "MODULES validation passed:" in out
-    assert "18 modules" in out
+    assert "22 modules" in out
 
 
 # ---------------------------------------------------------------------------

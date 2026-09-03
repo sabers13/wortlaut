@@ -11,13 +11,14 @@ manually placed) at install time.
 | `ATTRIBUTION.md` | Historical Stage-02 attribution. |
 | `dictionary-manifest-v2.json` | Active technical-candidate manifest for the recovered Stage-04 asset. |
 | `ATTRIBUTION-v2.md` | Attribution and rights status for the v2 candidate. |
+| `dictionary-online-manifest-v2.json` | Schema-shaped fixture for the Slice 11 Online corpus manifest (NOT a production asset manifest). |
 | `LICENSE/`                | (Empty placeholder; CC BY-SA / CC BY 2.0 FR licence texts are bundled with the published dictionary artefact, not with the manifest.) |
 
 The manifest's `filename` field is `dictionary.sqlite`. The standalone
 launcher installs the dictionary to exactly that name under
-`$XDG_DATA_HOME/flashcard/dictionary/dictionary.sqlite` (default), so
-the next normal launch finds it without needing `--dict-path`. The
-same filename is used for every manifest version (`v1`, `v2`, …); the
+`$XDG_DATA_HOME/flashcard/dictionary/dictionary.sqlite` (default), so the
+next normal launch finds it without needing `--dict-path`. The same
+filename is used for every manifest version (`v1`, `v2`, …); the
 manifest's `sha256` is the durable identity, not the filename.
 
 ## Release identities and publication status
@@ -42,3 +43,26 @@ confirmed redistribution rights for the contributed rows documented in
 `ATTRIBUTION-v2.md`; that rights prerequisite is satisfied. The remote asset is
 named `dictionary-v2.sqlite`, while the installer atomically activates it under
 the canonical local name `dictionary.sqlite`.
+
+## Online corpus (Slice 11)
+
+`dictionary-online-manifest-v2.json` is a **schema-shaped fixture only**. It
+proves the contract the Slice 11 acceptance suite parses: 256 lookup shards,
+256 entry shards, 64 example shards, and one membership filter (577 assets
+total, all with `byte_size: 0` and `sha256: 0…0` placeholders). It is **not**
+a production Online asset manifest and is not referenced by any Online
+retrieval path. Slice 13 is publication-only and may produce the real
+manifest at a separate release.
+
+The lookup shards additionally carry a `sense_route(sense_ref, lemma_ref)`
+table bucket-closed on `bucket256_v1(sense_ref)` for the
+`sense_ref -> lemma_ref` lookup the runtime performs before opening any
+entry shard. Entry shards do not carry the authoritative `example`
+payload; example rows live in the 64-shard example family keyed by
+`example.id % 64`. The membership filter is sized dynamically from the
+actual closure-key set and uses a self-describing serialization
+(`WFBL` magic + version + size_bits + hash_count + bit payload); the
+producer never assumes a 512-bit production size. The Product HTTP
+transport (`app/online_transport.py`) is the trusted GitHub Release
+boundary and is the only path that downloads Online shards in product
+use.
