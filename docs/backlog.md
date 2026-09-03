@@ -54,20 +54,20 @@ them. REJECTED items are listed so they do not resurface.
   preference semantics conflicted with explicit Offline Developer/Recovery
   custom-manifest startup. ADR-0008 and `tasks/slice-10.md` are immutable
   historical evidence and must never receive review #4 or implementation.
-- **ADR-0009 session-scoped online dictionary — BLOCKED pending cold review #2.**
-  It is the materially simpler successor: no persisted dictionary-mode state;
-  deterministic session selection from CLI/current Offline asset/user action;
-  and separate Slice-11 infrastructure, Slice-12 startup/UI, and Slice-13
-  production-publication work. Cold review #1 raised five objections (O1
-  example-shard routing identity, O2 lookup routing/normalization closure, O3
-  `active_dictionary_metadata`/Offline-removal compatibility, O4 E2E
-  no-dictionary harness coverage, O5 `app/api.py` provider bypass) which are
-  now resolved in the ADR body, `## Cold review` section, and
-  `tasks/slice-11.md` / `tasks/slice-12.md` / `tasks/slice-13.md`. All three
-  briefs remain blocked until ADR-0009 is approved and frozen after cold
-  review #2; Slice-12 additionally depends on Slice-11 acceptance, and
-  Slice-13 on both. ADR-0009 preserves the Online/Offline product goal but
-  does not resurrect ADR-0008's preference subsystem.
+- **ADR-0009 session-scoped online dictionary — ACCEPTED / FROZEN.** Approved at
+  cold review #2 — FOCUSED REMEDY VERIFICATION (2026-09-03) at review-start/state
+  HEAD `f8a85f0be818450961f291cf5f47854233ea87a6`, against the substantive O1–O5
+  revision `4f563c8b64f0bfcb9b93ec3be4a3ff79ad28ff50`. O1 example-shard routing
+  identity, O2 lookup routing/normalization closure, O3
+  `active_dictionary_metadata` / Offline-removal compatibility, O4 E2E
+  no-dictionary harness coverage, and O5 `app/api.py` provider bypass are all
+  CLOSED. The ADR is frozen; `NEEDS COLD REVIEW` is removed; no ADR-0009 cold
+  review #3 is required. Slice 11 is ready for mechanical ADR branch closure
+  into `main` and then implementation; Slice 12 remains blocked on accepted
+  Slice 11; Slice 13 remains blocked on accepted Slices 11 and 12. No
+  production Online-dictionary code, shards, or release has been created by
+  this work. ADR-0009 preserves the Online/Offline product goal but does not
+  resurrect ADR-0008's preference subsystem.
 
 ### Filed by ADR-0008, not resolved in it
 

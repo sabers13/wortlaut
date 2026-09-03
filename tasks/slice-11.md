@@ -1,6 +1,8 @@
 # Slice 11 — Core online dictionary infrastructure
 
-**BLOCKED until ADR-0009 passes cold review #1 and is frozen.**
+**Ready for dispatch after the accepted ADR-0009 branch is mechanically
+closed into `main` per WORKFLOW §11. ADR-0009 was accepted/frozen at cold
+review #2 (2026-09-03); no further ADR review is required.**
 
 Task: Build and prove the provider-level Online dictionary infrastructure from
 the ADR-0009 contract, with no startup chooser or Settings product work.

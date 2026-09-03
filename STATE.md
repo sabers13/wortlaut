@@ -13,16 +13,19 @@ Updated only at session CLOSE from repository/gate evidence.
   `tasks/slice-10.md` remain immutable historical evidence; no review #4 or
   implementation dispatch is permitted.
 
-* **ADR-0009 successor lineage is open, pending focused cold review #2.**
-  Cold review #1 broadly challenged the session-scoped successor and filed
-  O1-O5. The bounded revision at
-  `4f563c8b64f0bfcb9b93ec3be4a3ff79ad28ff50` resolves example routing,
-  exact lookup-bucket closure/normalization parity, Offline-removal
+* **ADR-0009 successor lineage is ACCEPTED / FROZEN.** Cold review #2 —
+  FOCUSED REMEDY VERIFICATION (2026-09-03) at review-start/state HEAD
+  `f8a85f0be818450961f291cf5f47854233ea87a6` verified the bounded O1–O5
+  revision at `4f563c8b64f0bfcb9b93ec3be4a3ff79ad28ff50` against example
+  routing, exact lookup-bucket closure/normalization parity, Offline-removal
   metadata semantics, the Slice-12 E2E harness scope, and complete
-  provider-read migration sequencing. ADR-0009 remains `NEEDS COLD REVIEW`;
-  no production Online-dictionary code, shards, or release has been
-  created. `tasks/slice-11.md`, `tasks/slice-12.md`, and
-  `tasks/slice-13.md` remain blocked under their existing dependencies.
+  provider-read migration sequencing, and found no qualifying material
+  blocker. ADR-0009 is approved and frozen; `NEEDS COLD REVIEW` is removed.
+  No ADR-0009 cold review #3 is required. No production Online-dictionary
+  code, shards, or release has been created. Slice 11 is ready for
+  mechanical ADR branch closure into `main` and then implementation; Slice
+  12 remains blocked on accepted Slice 11; Slice 13 remains blocked on
+  accepted Slices 11 and 12.
 
 * **slice-0 through slice-6 are accepted, merged and closed.**
   slice-0 governance/gate; slice-1 resolver/dictionary boundary; slice-2 Gate 1;
@@ -180,11 +183,12 @@ Updated only at session CLOSE from repository/gate evidence.
 
 ## Blocked
 
-* ADR-0009 focused cold review #2 must verify the O1-O5 remedies and
-  approve/freeze the successor before any Slice-11, Slice-12, or Slice-13
-  implementation dispatch. Review #3 is not dispatched merely because the
-  cap permits it; it exists only if review #2 returns a qualifying blocker.
-  ADR-0008/Slice-10 remain terminal historical evidence.
+* ADR-0009 is accepted and frozen at cold review #2 (2026-09-03); no
+  review #3 is required. The implementation sequence is mechanical ADR
+  branch closure into `main` first, then Slice 11 dispatch. Slice 12
+  remains blocked on accepted Slice 11; Slice 13 remains blocked on
+  accepted Slices 11 and 12. ADR-0008/Slice-10 remain terminal historical
+  evidence.
 
 * Compose integration blocked by lecture-app Phase-4 decomposition (slice-9)
   and the missing donor-evidence file `tasks/adr-0002-donor-notes.md`.
@@ -193,16 +197,15 @@ Updated only at session CLOSE from repository/gate evidence.
 
 ## Next three actions
 
-1. Dispatch a fresh T3 cold reviewer for ADR-0009 review #2 against the
-   current ADR branch HEAD. Scope is focused O1-O5 remedy verification and
-   direct knock-on contradictions under WORKFLOW §7 / AGENTS G7, not
-   another broad architecture redesign.
-2. If review #2 approves, freeze ADR-0009, administratively unblock
-   Slice-11 only, and complete the accepted ADR branch closure into `main`
-   before Slice-11 implementation dispatch. Keep Slice-12 blocked on
-   accepted Slice-11 and Slice-13 blocked on accepted Slices 11 and 12.
-   If review #2 finds a qualifying blocker, use one bounded revision and
-   final cold review #3 under the existing convergence rule.
+1. Mechanically close the accepted ADR-0009 branch into `main` per
+   WORKFLOW §11 (final authoritative gate on `main` after the closure
+   commit, `handoff/` packaging, and `git push origin main` and slice
+   branch), then dispatch Slice 11 against the merged `main`. Slice 12
+   remains blocked on accepted Slice 11; Slice 13 remains blocked on
+   accepted Slices 11 and 12.
+2. After Slice 11 closure, dispatch Slice 12; after Slice 12 closure,
+   dispatch Slice 13 — Slice 13 is publication-only and must STOP rather
+   than repair product code if it finds a provider bypass.
 3. Independently, before any Slice-9 implementation/review dispatch, amend
    `tasks/slice-9.md` with `Required reading:`, complete its donor/lecture-app
    blockers, then use normal fresh-startup and required risk-review workflow.

@@ -1,6 +1,11 @@
 # ADR-0009 — Session-scoped online dictionary
 
-**Status:** NEEDS COLD REVIEW.
+**Status:** ACCEPTED / FROZEN. Approved at cold review #2 — FOCUSED REMEDY
+VERIFICATION (2026-09-03). `NEEDS COLD REVIEW` is removed. O1–O5 and their
+resolution records remain preserved. This ADR lineage is closed to further
+ordinary cold review: there is no ADR-0009 review #3. Subsequent work may
+implement this accepted architecture but must not substantively revise it
+without a genuinely new architectural decision/lineage.
 
 **Lineage:** ADR-0008 is terminally **NON-CONVERGENT / BLOCKED** after its
 third cold review. ADR-0009 is a materially simpler successor that supersedes
@@ -395,3 +400,131 @@ the updated Slice 11/12/13 briefs.
 
 Cold review #2 — focused remedy verification — is the next required review
 before this ADR may be approved and frozen.
+
+### Cold review #2 — FOCUSED REMEDY VERIFICATION — APPROVED
+
+**APPROVED — remove `NEEDS COLD REVIEW`.**
+
+The focused remedy verification found no qualifying material blocker under
+WORKFLOW.md §7 / AGENTS G7. The verdict follows the verbatim schema required
+by the review prompt.
+
+- Reviewer: fresh cold-review orchestrator session, 2026-09-03, repo-only
+  context per WORKFLOW §7 / AGENTS G7.
+- Reviewed substantive revision SHA:
+  `4f563c8b64f0bfcb9b93ec3be4a3ff79ad28ff50`.
+- Review-start/state HEAD:
+  `f8a85f0be818450961f291cf5f47854233ea87a6`.
+- O1 CLOSED — example shard routing is exactly
+  `example_bucket(example_id) = example_id % 64` against the
+  authoritative `example.id`; the builder preserves authoritative example
+  IDs exactly; `example.id` is documented as an active-dictionary-internal
+  routing/index identity only; no PART-B table stores example IDs; stable
+  lemma/sense semantic refs remain the durable identity boundary so AGENTS
+  R13 is not weakened; `tasks/slice-11.md` requires deterministic fixture
+  proof, builder validation that every example lands in its exact expected
+  bucket, and the 64-shard / ~92.6 MB family bound as an operational
+  transparency note, not a per-query correctness budget.
+- O2 CLOSED — `bucket256_v1(text) = SHA256(UTF-8 bytes of text).digest()[0]`
+  is the only routing function; no `hash()`, `casefold()`, NFC/NFKC, or
+  locale-dependent hashing is involved. The preserved lookup predicate is
+  exactly `X == Q OR sqlite_ascii_lower(X) == python_lower(Q)`, matching the
+  current behaviour of `Dictionary.lookup_exact`, `Dictionary.lookup_surface_form`,
+  and `_ConnectionLookupOracle` in `app/api.py`. The bucket-closure proof
+  holds for both clauses because `bucket` is a pure function of its input;
+  routing may over-approximate but never under-approximate. The Bloom
+  membership set is built compatibly with zero false negatives. The
+  required differential fixture in `tasks/slice-11.md` covers all of
+  ASCII case, umlauts, ß, NFC, deliberately non-NFC input, surface forms,
+  exact lemmas, and unknown values, asserting parity with
+  `LocalDictionaryProvider` rather than a preconceived linguistic answer.
+- O3 CLOSED — `active_dictionary_metadata` retains its existing narrow
+  meaning (the metadata of the last successfully activated full Offline
+  dictionary); it is explicitly NOT dictionary-mode state; no new
+  preference/state table is introduced. Removal is rejected with a
+  structured `offline_dictionary_in_use` conflict while Offline is the
+  active session provider; removal while Online is active is allowed and
+  verifies-and-removes only the managed canonical Offline asset, leaves
+  `active_dictionary_metadata` and all user data untouched, and triggers
+  no D47 relink. Provider/startup selection checks the canonical-asset
+  existence/validity before constructing `LocalDictionaryProvider` /
+  `DictionaryRuntime`, so a stale `active_dictionary_metadata` row can no
+  longer by itself trigger the missing-file recovery error when no Local
+  provider is being activated — that combination is the unconfigured
+  chooser. Reinstalling the identical v2 asset reuses the normal
+  metadata-match path with no artificial D47 relink. `tasks/slice-12.md`
+  contains all required test groups.
+- O4 CLOSED — `tasks/slice-12.md`'s allowlist is expanded to
+  `frontend/tests/e2e/serve.py`, `frontend/tests/e2e/run-server.sh`,
+  `frontend/playwright.config.ts`, `frontend/src/api/client.test.ts`,
+  `frontend/src/api/index.ts`, and `frontend/src/styles/tokens.css`,
+  modified only as necessary for the dictionary-mode feature. The Slice
+  12 acceptance requires at least two deterministic served-product
+  states (a normal installed-Offline fixture and a
+  no-full-dictionary/fixture-Online environment with a local
+  deterministic static online-shard fixture reachable through the
+  Product trust/test seam under backend/harness control — never an
+  arbitrary browser-supplied endpoint), and lists the full E2E scenario
+  coverage required: chooser, Use Online, Download for Offline use,
+  Online → Offline, Offline → Online, progress, Clear Online cache,
+  Remove Offline dictionary, removal rejection while Offline is active,
+  restart after removal, and unavailable/integrity errors.
+- O5 CLOSED — `tasks/slice-11.md` requires a contract-coverage map from
+  every current dictionary read in `app/api.py`, `app/deck.py`, and
+  `app/resolve.py` to a provider operation, naming at minimum
+  `_ConnectionLookupOracle.lookup_exact`, `.lookup_surface_form`,
+  `.lookup_senses`, and `_materialize_candidate_from_ref` (used by
+  `POST /vocab/highlight` and `POST /vocab/import/csv`), plus
+  `DictionaryRuntime`'s reader-connection consumers
+  (`materialize_lookup`, `materialize_card_render_payload`,
+  `materialize_compound_components`, and the
+  `_materialize_lemma_under_gen` / `_materialize_components_under_gen`
+  helpers used by the card-render and export-payload paths). No generic
+  raw SQLite connection is exposed as the provider abstraction; if any
+  current read cannot be covered without a new shard route/family, that
+  is a Stop-and-ask architecture boundary. `tasks/slice-12.md` owns
+  `app/api.py` and explicitly requires removing/bypassing the direct
+  `runtime._current_generation.asset.connection` reads in
+  `POST /vocab/highlight` and `POST /vocab/import/csv`, and the raw
+  dictionary SQL in `_materialize_candidate_from_ref`; the mechanical
+  no-bypass grep check is executable and recorded in the Slice 12
+  report. Provider transport/integrity/budget failure is a structured
+  provider failure, never a valid `needs_gloss` / `not-found`, and
+  causes zero PART-B mutation. `tasks/slice-13.md` is publication-only
+  and must STOP publication rather than repair product code if a
+  provider bypass is discovered.
+
+No qualifying direct knock-on contradiction was found:
+
+1. routing duplication still fits the fixed shard families (256 lookup /
+   256 entry / 64 example / 1 membership filter);
+2. the runtime's two lookup buckets per query are compatible with the
+   32-new-lookup-download budget;
+3. budget exhaustion still produces `online_dictionary_budget_exceeded`
+   and never incomplete-success semantics;
+4. the conservative free-space preflight for the ~945 MB full Offline
+   download is compatible with the installer's temp + atomic rename and
+   the existing activation/private-snapshot behavior;
+5. the intentional `missing dictionary → chooser` startup behavior
+   intentionally supersedes the prior launcher missing-dictionary exit
+   paths and Slice 12 explicitly allows the `tests/test_launcher.py`
+   cases that assert that exit behavior to be updated to the new
+   behavior, while valid-Offline and custom-manifest startup contracts
+   remain binding;
+6. Offline removal rules do not conflict with any other binding API or
+   Settings contract — `active_dictionary_metadata` keeps its existing
+   meaning and no new preference/state table is introduced;
+7. the Slice 11 → Slice 12 → Slice 13 dependencies remain executable
+   within their respective allowlists;
+8. `MODULES.toml` ownership does not require any undeclared task scope
+   — Slice 11 may register newly introduced owned modules (e.g.
+   `provider`, `provider_online`) only if required, and Slice 12 may
+   re-register changed modules, both without expanding scope outside
+   the brief.
+
+ADR-0009 is accepted and frozen. Administrative approval/removal of
+`NEEDS COLD REVIEW` does not create another cold-review requirement.
+No cold review #3 is required for this approved lineage. Slice 11 is
+ready for mechanical ADR branch closure and then implementation; Slice
+12 remains blocked on accepted Slice 11; Slice 13 remains blocked on
+accepted Slices 11 and 12.
