@@ -49,14 +49,18 @@ them. REJECTED items are listed so they do not resurface.
   change**, or the repaired file silently escapes the gate that is supposed to
   verify it.
 
-- **Online/offline dictionary modes (ADR-0008) — BLOCKED on cold review #1.**
+- **Online/offline dictionary modes (ADR-0008) — BLOCKED on focused cold review #2.**
   `docs/adr/0008-online-offline-dictionary.md` carries `NEEDS COLD REVIEW`;
-  `tasks/slice-10.md` is written, dependency-closed and dispatch-ready but must
-  not be dispatched until a fresh cold orchestrator session passes review #1
-  under WORKFLOW §7 / AGENTS G7. Unblocked by that review passing. Independent
-  of slice-9: the two slices touch disjoint scopes and may be ordered freely.
-  The ADR-0008 §13.3 production shard build and the `dictionary-online-v2`
-  release are a separate authorized operation and are outside slice-10.
+  cold review #1 raised O1–O5 and the ADR revision now specifies sense-ref
+  routing inside the existing 256 lookup shards, Product versus explicit
+  developer/recovery network domains, the exhaustive CLI matrix, verified shard
+  leases/clear-cache concurrency, and a hard 32-download budget distinct from
+  Bloom FPR. `tasks/slice-10.md` is dependency-closed and dispatch-ready but
+  must not be dispatched until a fresh focused review #2 verifies those remedies
+  under WORKFLOW §7 / AGENTS G7. Independent of slice-9: the two slices touch
+  disjoint scopes and may be ordered freely. The ADR-0008 §13.3 production shard
+  build and the `dictionary-online-v2` release are a separate authorized
+  operation and are outside slice-10.
 
 ### Filed by ADR-0008, not resolved in it
 

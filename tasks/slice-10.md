@@ -1,10 +1,10 @@
 # Slice 10 — Online and offline dictionary modes (ADR-0008)
 
-**BLOCKED until ADR-0008 passes cold review #1.** This brief is dependency-closed
+**BLOCKED until ADR-0008 passes cold review #2.** This brief is dependency-closed
 and dispatch-ready, but ADR-0008 currently carries `NEEDS COLD REVIEW`. Do not
 dispatch implementation while that marker stands (WORKFLOW §7 / AGENTS G7).
 
-Depends: ADR-0008 accepted (cold review #1 PASS). **Not** dependent on slice-9,
+Depends: ADR-0008 accepted (cold review #2 PASS). **Not** dependent on slice-9,
 which remains blocked on lecture-app Phase-4 decomposition and
 `tasks/adr-0002-donor-notes.md`; the two slices touch disjoint scopes and may be
 ordered freely.
@@ -53,10 +53,12 @@ Allowlist:   app/provider.py                       (new — DictionaryProvider s
              tests/test_standalone.py              (startup state machine)
              tests/test_launcher.py                (CLI table)
              tests/test_dict_install.py            (progress seam)
+             tests/test_check_agents.py            (R14 Product/developer boundary gate coverage)
              tests/conftest.py                     (fixture shard set)
              release/dictionary-online-manifest-v2.json   (fixture/schema-shaped placeholder ONLY until the production build; see Stop-and-ask)
              release/README.md                     (document the online manifest + release identity)
              AGENTS.md                             (add R14; clarify R9 per ADR-0008 §16.2 — those two edits only)
+             tools/check_agents.py                 (R14 executable Product-path check)
              MODULES.toml                          (new modules per ADR-0008 §16.2)
              README.md                             (scope the privacy claim per ADR-0008 §11)
              .gitignore                            (block production shard output, D101)
@@ -104,34 +106,59 @@ Acceptance:  1. `make gate` passes on the exact final candidate: ruff clean;
                 proves observable equality between LocalDictionaryProvider and
                 OnlineDictionaryProvider over the fixture shard set, across the
                 full ADR-0008 §14.1 sample list. Equality = identical ordered
-                rows, field values, absence, dedup, and asset_token.
+                rows, field values, absence, dedup, and asset_token, including
+                arbitrary `sense_ids[sense_ref]` point reads and D47 relinking.
              4. Routing equivalence (§14.2 test 1) holds for the 2,716
                 ASCII/Unicode-lower divergence population, NFD inputs,
                 `STRASSE`, and `äpfel`.
-             5. Membership filter has zero false negatives over its build set and
-                a measured FPR within the manifest-declared bound.
-             6. Unknown-long-word resolution touches at most
-                (filter hits + measured FPR allowance) shards — not the 87 of
-                256 buckets the unfiltered probe produces (§14.2 test 4).
-             7. Integrity failures (truncated / byte-flipped / wrong SHA /
+             5. The 256 lookup shards contain both bucket-closed lookup-key and
+                `sense_ref → parent lemma_ref` indexes. The builder emits every
+                authoritative sense ref exactly once; a sense point read routes
+                lookup shard then parent entry shard with no entry-shard scan.
+                The build report reconciles revised §5.6 sizing (417.6 MB lookup
+                family projection, ≤1.61 MB median, ≤3.72 MB max), retains 577
+                assets, and proves each actual shard remains ≤4 MB.
+             6. Membership filter has zero false negatives over its build set;
+                false positives are permitted and measured FPR is reported
+                against the manifest-declared statistical target.
+             7. The harness proves the absolute 256 distinct lookup-family
+                maximum and enforces the 32-new-remote-lookup-shard logical
+                operation budget. A forced 33rd acquisition cancels cleanly,
+                returns `online_dictionary_budget_exceeded` (not not-found or
+                `needs_gloss`), releases leases, preserves cache, and performs
+                zero PART-B writes. The approximate 12-shard production probe is
+                performance evidence only, not a correctness bound.
+             8. Integrity failures (truncated / byte-flipped / wrong SHA /
                 non-SQLite / wrong dataset version) are rejected, never become an
                 active cache entry, surface `online_dictionary_unavailable`, and
                 perform zero PART-B writes.
-             8. Concurrent fetches of the same uncached shard yield one active
-                cache entry with no corruption; a mode switch under concurrent
-                load never mixes providers within one logical operation.
-             9. All four §8.2 startup branches behave as specified, including the
+             9. A later byte-corrupted canonical cached shard is revalidated,
+                never opened, safely evicted/quarantined and refetched or fails
+                closed. Concurrent same-shard misses yield one verified install;
+                clear-cache during an immutable active lease blocks new canonical
+                acquisition, defers cleanup until release, never invalidates that
+                reader, and proves no PART-B/media/offline-dictionary path was
+                touched. Provider switching with leases never mixes providers
+                inside one logical operation.
+            10. All four §8.2 startup branches behave as specified, including the
                 corrupt-preference branch failing safe with no network access.
-            10. A pre-existing valid dictionary.sqlite with no preference file
+            11. A pre-existing valid dictionary.sqlite with no preference file
                 boots straight into Offline with no chooser (D105).
-            11. The §9.3 CLI table holds exactly, including the two usage-error
-                combinations.
-            12. Playwright coverage against the real FastAPI-served compiled
+            12. Every §9.3 matrix row is enumerated under both default and
+                `--data-dir PATH` roots: selected provider, session-only mode
+                persistence, preferences/cache/canonical dictionary/PART-B-media
+                locations, manifest/trust domain, network permission, install
+                then launch/exit behaviour, and all usage errors. Product fetches
+                allow only the exact GitHub initial path and closed redirect-host
+                policy; `--manifest PATH --install-dictionary` is tested as a
+                segregated developer/recovery offline-only path and cannot affect
+                Online or browser/API input.
+            13. Playwright coverage against the real FastAPI-served compiled
                 product: first-run chooser, both modes, both switch directions,
                 cache size display, clear-cache, UI-initiated offline install
                 with progress, and the dictionary_unavailable surface.
-            13. `git diff --check` clean; only Allowlist paths changed.
-            14. Frontend: `npm ci`, `tsc --noEmit`, unit tests, `vite build`,
+            14. `git diff --check` clean; only Allowlist paths changed.
+            15. Frontend: `npm ci`, `tsc --noEmit`, unit tests, `vite build`,
                 and `npm run test:e2e` all clean.
 
 Stop-and-ask:

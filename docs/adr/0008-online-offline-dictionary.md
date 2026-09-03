@@ -193,19 +193,19 @@ These are recorded as given. They are not alternatives this ADR may reopen.
 | **D83** | **Reject HTTP-Range SQLite over the published asset.** No HTTP-backed SQLite VFS is implemented. | §12.1. |
 | **D84** | **Reject a Wortlaut-hosted query API.** Online mode reads static release artifacts only. | §12.2. |
 | **D85** | **`DictionaryProvider` seam.** All dictionary reads pass through one provider abstraction with exactly two implementations: `LocalDictionaryProvider` (wrapping the existing trusted local runtime) and `OnlineDictionaryProvider`. No `if mode == "online"` branching outside the provider construction site. | Without a seam the mode flag metastasizes into `api.py`, `deck.py` and `render.py` and every future change has to be made twice. |
-| **D86** | **Static sharded dataset with three shard families plus one membership filter**, each family bucket-**closed** for the queries it serves (§5). Families and counts: `lookup` × 256, `entry` × 256, `example` × 64, `filter` × 1 — **577 assets**, 57.7% of GitHub's 1000-asset limit. | Measured (§5.6) to keep the common lookup at ~1.3 MB + ~1.5 MB while leaving 423 assets of headroom. |
+| **D86** | **Static sharded dataset with three shard families plus one membership filter**, each family bucket-**closed** for the queries it serves (§5). The 256 physical `lookup` shards contain two independent logical indexes: lookup-key rows and `sense_ref → parent lemma_ref` routes. Families and counts: `lookup` × 256, `entry` × 256, `example` × 64, `filter` × 1 — **577 assets**, 57.7% of GitHub's 1000-asset limit. | The measured routing-index projection (§5.6) keeps the enlarged lookup family under the 4 MB per-shard ceiling and leaves 423 assets of headroom. |
 | **D87** | **Routing keys over-approximate; matching stays exact.** The routing function is `bucket(k) = int.from_bytes(sha256(python_lower(k))[:4]) % N`. It is used **only** to select a shard. Every match/order/dedup decision is made by executing the *current* predicate against the fetched rows. Python `casefold()`, Unicode normalization changes, and stripping are forbidden as behaviour changes. | §6. The current predicate mixes SQLite's ASCII-only `lower()` with Python's Unicode `lower()`; 2,716 lemma texts depend on that asymmetry. |
-| **D88** | **Negative-membership accelerator.** A single verified Bloom filter over the lemma lookup key set (exact texts ∪ ASCII-lowered texts) is downloaded once when Online mode is activated. No false negatives; target false-positive rate ≤ 1%; deterministic build parameters; implemented in-repo over `hashlib`, with no third-party runtime dependency. | Turns the 96-key / 87-bucket unknown-compound probe into ~12 fetches. Measured size: 1,477,819 keys → **1.69 MB** at 1% FPR (k=7). |
+| **D88** | **Negative-membership accelerator and bounded remote expansion.** A single verified Bloom filter over the lemma lookup key set (exact texts ∪ ASCII-lowered texts) is downloaded once when Online mode is activated. It has no false negatives; target false-positive rate ≤ 1%; deterministic build parameters; and is implemented in-repo over `hashlib`, with no third-party runtime dependency. A top-level logical operation may acquire at most **32 new remote lookup-shard identities**; on a 33rd it cancels remaining expansion and returns `online_dictionary_budget_exceeded` without PART-B mutation. | The Bloom FPR is statistical, not a correctness bound. The 256-family maximum remains the hard identity bound (§5.8); 32 is a separate network-safety budget justified by the measured 12-shard probe and the revised 3.72 MB worst-case lookup projection. |
 | **D89** | **`release/dictionary-online-manifest-v2.json`** is committed as normal text metadata, is the *only* source of shard URLs, and is validated strictly and fail-closed before any request. It pins the canonical full-dataset SHA, the routing parameters, the filter parameters, and the exact filename, byte count and SHA-256 of every shard. | An unpinned or partially validated manifest is an arbitrary-fetch primitive with extra steps. |
 | **D90** | **Logical dataset identity is mode-independent.** For v2, `asset_token` is `1698b997…67d4c` in both modes. Per-shard SHA-256 values prove transport and cache integrity only; they never become the dataset identity. Switching Online ↔ Offline within one version performs **no** D47 relink and does not change any stable semantic ref. | Prevents a mode switch from masquerading as a dictionary version change, invalidating picker tokens, or forking review state. |
 | **D91** | **Mode is a local application preference** persisted in a small validated, atomically written `preferences.json` under the existing data directory. States: `unconfigured` \| `online` \| `offline`. No PART-B schema migration is added for it. | Mode is machine-local configuration, not dictionary data and not user study data (AGENTS R9). |
 | **D92** | **Startup never contacts the network before an explicit user choice.** The startup state machine is §8.2. In `unconfigured` state the app starts with no active provider and every dictionary-dependent operation fails with a structured `dictionary_unavailable` state, never a crash. | Requirement I; also keeps `./wortlaut` honest for a user who never opts into online mode. |
 | **D93** | **Settings/Dictionary UI contract** (§9.2) exposes mode, online cache size and shard count with an explicit "Clear online cache", and offline install state with explicit "Download for offline use" / "Remove offline copy". Destructive actions are separate explicit user actions and never touch user data. | Requirement J. |
-| **D94** | **UI-initiated offline install reuses `app/dict_install.py` unchanged in substance**; a progress-reporting seam is added, not a second downloader/verifier. `./wortlaut --install-dictionary` remains supported. | Two download/verify implementations means two integrity contracts and one of them will rot. |
-| **D95** | **Online shard cache** lives at `<data-dir>/cache/dictionary-online/<version>/<family>/`, is disposable, contains no user data, verifies exact manifest bytes + SHA-256 before a shard becomes active, is written temp-then-fsync-then-atomic-rename, opens read-only/immutable, is single-flight per shard key, and never mixes versions. Automatic LRU eviction is out of scope for v1; explicit "Clear online cache" is required. | Requirement L. Matches the existing atomic-install discipline in `dict_install.py`. |
-| **D96** | **Outbound HTTPS only to manifest-pinned dictionary distribution assets.** No generic fetch API, no browser-supplied URL reaching a server-side fetch. Scheme, host, path/filename, byte count and SHA are all validated. Loopback bind, Host/Origin checks, CORS exactness and `X-Flashcards-Request` are untouched. | Requirement M; AGENTS R8/R12 unweakened. |
+| **D94** | **UI-initiated offline install reuses `app/dict_install.py` unchanged in substance**; a progress-reporting seam is added, not a second downloader/verifier. The default `./wortlaut --install-dictionary` uses the committed production manifest. An explicit local `--manifest PATH` retains the present developer/recovery override only for offline installation; its declared source may be `file://` or `http(s)://`, but it never configures Online mode or browser/UI fetches. | Two download/verify implementations means two integrity contracts and one of them will rot; retaining an explicit operator override does not make it a product network source. |
+| **D95** | **Online shard cache with verified immutable leases** lives at `<data-dir>/cache/dictionary-online/<version>/<family>/`, is disposable, contains no user data, and never mixes versions. A shard is usable only through a verified immutable lease: a miss is single-flight, temp-written, exact-byte/SHA/schema-validated, fsynced and atomically installed before a private immutable snapshot is leased; a new cache-hit lease revalidates canonical bytes before snapshot creation. Clear-cache serializes mutation, bars new canonical acquisitions, and defers files held by active leases. | Requirement L. This matches and extends the full-dictionary anti-TOCTOU discipline without relying on platform-specific unlinking of an open SQLite pathname. |
+| **D96** | **Two outbound trust domains.** Product/runtime/UI distribution (Online provider, first-run/Settings Online selection, UI offline download, and default `--install-dictionary`) uses only the committed Wortlaut production manifests and pinned GitHub Release asset paths over HTTPS. The fetcher validates every redirect against the closed GitHub distribution host policy in §10. An explicit CLI `--manifest PATH` remains a segregated developer/recovery offline-install override, with credential redaction, but cannot configure Online mode or any browser/API fetch. | R14 can be enforced honestly for automatic product traffic while preserving the existing explicit operator recovery path. |
 | **D97** | **Honest privacy contract** (§11). Offline: no dictionary network access after installation. Online: GitHub sees the user's IP and an opaque shard access pattern; the searched word never appears in a URL; no telemetry, analytics, account, or upload of user data. Shard access is **not** claimed to be cryptographically private. | A public routing algorithm permits inference. Saying otherwise would be false. |
-| **D98** | **Online failure is explicit and never fabricated.** Unavailable / timeout / wrong size / wrong SHA / invalid SQLite / malformed / wrong dataset version ⇒ the shard is never used, no stub or partial dictionary result is synthesized, an actionable `online_dictionary_unavailable` error is returned, user data is untouched, and the persisted mode is not silently changed. A clearly surfaced temporary local fallback is permitted only when a complete verified offline dictionary exists; it is optional and it is never silent. | Requirement O. A "successful" lookup produced by a failed fetch would write wrong bindings into PART B. |
+| **D98** | **Online failure is explicit and never fabricated.** Unavailable / timeout / wrong size / wrong SHA / invalid SQLite / malformed / wrong dataset version / corrupt cache recovery failure ⇒ the shard is never used, no stub or partial dictionary result is synthesized, an actionable `online_dictionary_unavailable` error is returned, user data is untouched, and the persisted mode is not silently changed. Exceeding D88's remote-download budget instead returns `online_dictionary_budget_exceeded`; it is neither `needs_gloss` nor a dictionary miss and likewise performs no PART-B mutation. A clearly surfaced temporary local fallback is permitted only when a complete verified offline dictionary exists; it is optional and it is never silent. | A "successful" lookup produced by a failed or incomplete fetch would write wrong bindings into PART B. |
 | **D99** | **Provider activation is serialized and atomic.** At any request boundary exactly one coherent provider/dataset identity is active. In-flight requests complete against the provider they pinned; no single logical operation joins data from both providers. | Requirement P; mirrors the existing `DictionaryRuntime` generation/pin discipline. |
 | **D100** | **`ReadingSnapshot`'s eager reference maps become lazy, bounded resolvers.** `lemma_ids` / `sense_ids` keep their `Mapping`-shaped `in` / `[]` contract but resolve refs on demand through the provider with per-snapshot memoization. D47 relink resolves only the refs actually persisted in `note_dictionary_binding`. | Online mode cannot hold 1.1M lemma refs and 480k sense refs eagerly. All current call sites (`app/api.py` lines 1053–1134, 1642–1737 and `_relink_part_b`) are point lookups and are unchanged by this. |
 | **D101** | **Deterministic builder `tools/build_online_dictionary.py`**, input one verified full `dictionary.sqlite`, output outside Git (§13). Verifies the input SHA before any production build, streams/partitions rather than loading the asset into memory, emits rows in deterministic order, preserves exact values including `source`/`license`/`semantic_ref`, never mutates the source, and reports row counts, total bytes, per-family size distribution and a re-verified digest for every emitted asset. | Requirement Q. A non-deterministic builder makes every future rebuild an unreviewable diff. |
@@ -282,18 +282,32 @@ never under-approximate.
 
 ### 5.3 Family `lookup` — 256 shards, routed by `bucket(python_lower(key))`
 
-Contents for bucket *b*:
+Each physical lookup file has two independently routed SQLite tables. Contents
+for bucket *b* are:
 
-- the resolver-facing `lemma` projection (`id`, `semantic_ref`, `lemma`, `pos`,
-  `gender`, `freq_rank`) for every lemma with `bucket(python_lower(lemma)) == b`;
-- every `surface_form` row whose `bucket(python_lower(form)) == b`, carrying the
-  target lemma's `id` and its `entry` bucket;
-- inline deduplicated lemma projections for the lemmas referenced by
-  high-fan-out forms in this bucket (§5.7).
+- **Lookup-key index.** The resolver-facing `lemma` projection (`id`,
+  `semantic_ref`, `lemma`, `pos`, `gender`, `freq_rank`) for every lemma with
+  `bucket(python_lower(lemma)) == b`; every `surface_form` row whose
+  `bucket(python_lower(form)) == b`, carrying the target lemma's `id` and its
+  `entry` bucket; and inline deduplicated lemma projections for the lemmas
+  referenced by high-fan-out forms in this bucket (§5.7).
+- **Sense-route index.** Exactly one `sense_route(sense_ref PRIMARY KEY,
+  lemma_ref NOT NULL)` row for every authoritative `sense.semantic_ref` where
+  `bucket(sense_ref, 256) == b`. `sense_ref` here is routed as its literal,
+  canonical semantic reference: `bucket()` applies its normal `python_lower`
+  step, which leaves `sense:v1:<lower-hex>` unchanged. The builder rejects a
+  duplicate, missing, or mismatched mapping.
 
 `resolve_word` probes `lookup_exact(cleaned)` and then
 `lookup_surface_form(cleaned)` with **the same key**, so ladder steps 1 and 2
 are served by **one** shard fetch.
+
+`ReadingSnapshot.sense_ids[sense_ref]` and D47 relinking first fetch only the
+lookup shard `bucket(sense_ref, 256)`, read its exact `sense_route` row, then
+fetch only `entry[bucket(lemma_ref, 256)]` and resolve the exact sense row
+there. Neither path may scan entry shards or infer absence from a lookup-key
+table. Thus a sense point read is bucket-closed while retaining the current
+`Mapping` contract (`sense_ref → (sense_id, lemma_id)`).
 
 ### 5.4 Family `entry` — 256 shards, routed by `int(lemma_ref_digest[:8], 16) % 256`
 
@@ -314,22 +328,36 @@ bound on all example traffic for a user, ever** — including the 230,795-link
 
 ### 5.6 Measured sizing
 
-Content bytes plus a fixed per-row overhead allowance, computed over the real
-v2 asset. These are **budget targets**, not built artifacts; D101 requires the
-builder to report measured file sizes and the implementation slice to reconcile
-them against these budgets.
+The original lookup/entry projection was content bytes plus a fixed per-row
+overhead allowance over the real v2 asset. O1 changes lookup contents, so this
+revision separately measured the exact added index shape against the verified
+source: 480,221 ordered `(sense_ref, lemma_ref)` rows were routed across 256
+temporary SQLite files, each `sense_route(sense_ref TEXT PRIMARY KEY, lemma_ref
+TEXT NOT NULL) WITHOUT ROWID`, page size 4096, then committed and vacuumed.
+The probe output was deleted after measurement; it did not build a production
+corpus. The added family total is **78,663,680 bytes** (min 290,816; median
+307,200; p95 319,488; max 331,776). Both refs are exact 73-byte canonical
+texts, so the probe includes the real key/value payload rather than an
+estimated row count.
+
+Revised values below are conservative projections: total is the old projection
+plus the measured index total; median and max add the respective measured
+index percentiles/maximum to the prior budgets. D101 must replace these with
+the final builder's actual file measurements before publication.
 
 | Family | Shards | min | median | p95 | max | family total |
 |---|---|---|---|---|---|---|
-| `lookup` | 256 | 1.26 MB | **1.30 MB** | 1.36 MB | 3.39 MB | 338.9 MB |
+| `lookup` (lookup-key + sense-route indexes) | 256 | 1.55 MB | **≤ 1.61 MB** | ≤ 1.68 MB | **≤ 3.72 MB** | **417.6 MB** |
 | `entry` | 256 | 1.38 MB | **1.47 MB** | 1.75 MB | 2.36 MB | 383.9 MB |
 | `example` | 64 | — | — | — | — | 92.6 MB (mean 1.45 MB) |
 | `filter` | 1 | — | 1.69 MB | — | — | 1.7 MB |
-| **total** | **577** | | | | | **≈ 817 MB** |
+| **total** | **577** | | | | | **≈ 895.7 MB** |
 
 Budget: **no shard may exceed 4 MB**; the median lookup and entry shard must
-stay at or below 2 MB. Asset count 577 of 1000 leaves 423 assets (42.3%) of
-headroom for a future family or a higher shard count.
+stay at or below 2 MB. The 3.72 MB conservative lookup maximum remains below
+that ceiling; the 1.61 MB conservative median remains below 2 MB. Asset count
+577 of 1000 leaves 423 assets (42.3%) of headroom for a future family or a
+higher shard count.
 
 Cold-cache cost of a first lookup of a known word: one `lookup` shard + one
 `entry` shard ≈ **2.8 MB**, plus at most one `example` shard per distinct
@@ -347,7 +375,7 @@ more than 1,024 — dominated by leaked Wiktionary template tags. Rule:
   shard, so the lookup costs exactly one fetch. Measured cost of inlining: 753
   forms, +2.2 MB across the whole family;
 - fan-out > 1024 (11 forms): normalized path. Worst case is `'de-ndecl'`, whose
-  65,310 lemmas span the whole family, i.e. up to 338.9 MB of `lookup` shards.
+  65,310 lemmas span the whole family, i.e. up to 417.6 MB of `lookup` shards.
 
 That worst case is accepted, deliberately and with its numbers stated. All 11
 strings are corpus artifacts (`de-ndecl`, `no-table-tags`, `strong`, `de-adecl`,
@@ -372,9 +400,74 @@ nor `python_lower(Q)` is present in the filter. This has no false negatives
 because the build set contains both key families, and it is exactly the
 predicate `lookup_exact` evaluates.
 
+The configured FPR is a build/statistical characteristic, **not** a
+deterministic per-query download bound. False positives may occur in any
+pattern. The tested unknown 16-character word's approximately 12 fetched
+lookup shards is therefore a non-normative performance observation only.
+
+There are exactly **N = 256** lookup bucket identities for one dataset version,
+so 256 is the absolute finite distinct-family maximum for a logical lookup;
+probing a bucket already acquired by that operation does not create another
+identity. Separately, D88 sets a network-safety budget of **32 new remote
+lookup-shard downloads** per top-level logical operation. Count only a shard
+whose verified lease was acquired by a network fetch during that operation;
+already-cached validated leases, the filter, entry shards and example shards do
+not consume this lookup budget. A 33rd required remote lookup identity cancels
+the remaining expansion, releases all request leases, preserves verified cache
+entries, and returns `online_dictionary_budget_exceeded` with no partial
+dictionary result or PART-B mutation. With the revised 3.72 MB maximum lookup
+projection, the budget caps new lookup transfer at **≤ 119.1 MB** (decimal),
+while allowing 2.7× the measured ~12-shard case. It is intentionally below the
+256-identity family maximum.
+
 Surface-form lookups are deliberately **not** filtered: `resolve_word` performs
 at most one surface probe per word, so a filter would save at most one fetch
 while costing roughly 10 MB of first-run download for ~8.5M keys.
+
+### 5.9 Verified shard lease lifecycle (D95, D98–D99)
+
+Each `(dataset version, family, shard index)` has a cache-mutation lock and a
+conceptual lifecycle:
+
+```
+ABSENT → DOWNLOADING → VERIFIED → LEASED immutable snapshot
+```
+
+For a miss, one single-flight owner downloads to a cache-local temporary file,
+streams and counts bytes, verifies exact manifest byte count and SHA-256,
+validates the required SQLite schema and family logical closure, fsyncs the
+file and parent directory, atomically installs the canonical cache file, then
+copies/opens only validated bytes as a private immutable snapshot lease. Waiters
+join that flight and acquire their own lease only after its verification
+succeeds. No partial canonical file or pathname-based SQLite handle becomes
+active.
+
+For a cache hit, a filename alone conveys no trust. Before a **new** lease after
+process start, or when no already-validated in-process lease represents that
+canonical file, the provider rechecks exact bytes and SHA-256 and derives the
+SQLite handle from the validated immutable snapshot, not from a pathname that
+could change after hashing. Repeated reads through an existing immutable lease
+do not rehash it. Failed cache validation never opens the bytes: it serializes
+safe eviction/quarantine, then redownloads through the same single-flight path
+if Product network is permitted; recovery failure is
+`online_dictionary_unavailable`, never a dictionary miss.
+
+“Clear online cache” takes the same cache-mutation lock before provider-switch
+state is considered, so the order is cache lock then provider-generation lock
+everywhere. It applies only to
+`<data-dir>/cache/dictionary-online/<version>/`: it immediately blocks new
+canonical acquisitions in that version, removes unleased canonical files, and
+marks leased ones deferred. Existing private immutable snapshot leases and
+their logical requests may finish. Deferred canonical files/state are removed
+only after the final relevant lease releases; implementation must not depend on
+unlinking an SQLite pathname that another platform keeps open. Clear never
+touches `flashcards.sqlite`, `media/`, the canonical offline dictionary, or
+preferences except optional cache metadata. Switching providers acquires a
+generation pin before releasing any shard lease, so an in-flight request stays
+on one coherent provider while cache cleanup remains independent. A mode switch
+that needs to coordinate with online cache state takes the cache-mutation lock
+first and the provider-generation lock second, the same order as clear-cache;
+it never holds the generation lock while waiting for a cache lock.
 
 ---
 
@@ -458,6 +551,7 @@ asset_base_url        immutable https:// base sufficient to derive exact asset U
 routing               { hash: "sha256", key_normalization: "python_lower",
                         lookup_shards: 256, entry_shards: 256, example_shards: 64,
                         entry_route: "lemma_semantic_ref_digest",
+                        sense_route: "sense_ref_to_parent_lemma_ref_in_lookup",
                         surface_inline_min: 8, surface_inline_max: 1024 }
 membership_filter     { kind: "bloom", m_bits, k, key_count, hash_construction,
                         filename, bytes, sha256 }
@@ -472,15 +566,20 @@ Validation rules, all fail-closed before any request is made:
    adopted.
 2. Filenames are single-segment, `[A-Za-z0-9._-]+`, no separators, no `..` —
    the same rule `dict_install.parse_manifest_payload` already enforces.
-3. `asset_base_url` must be `https://`, must be on the expected release host,
-   and must not embed credentials (`@`, `token=`, `api_key=`, `apikey=`) — the
-   existing `dict_install` predicate, reused rather than reimplemented.
+3. The committed production `asset_base_url` must be the exact HTTPS GitHub
+   release prefix
+   `https://github.com/sabers13/wortlaut/releases/download/dictionary-online-v2/`.
+   It must not embed credentials (`@`, `token=`, `api_key=`, `apikey=`). It is
+   not a general URL field.
 4. Every shard entry must carry a positive byte count within a per-family
    ceiling and a 64-character lowercase hex SHA-256.
 5. Shard counts must match the `routing` block exactly; a missing or duplicate
    shard index is a rejection.
 6. URLs are **derived** from `asset_base_url` + `filename`. No URL is ever
    accepted from the browser, from a shard, or from an HTTP response body.
+7. The builder validates logical closure of the lookup-key index **and** that
+   every authoritative sense ref appears exactly once in its routed
+   `sense_route` index and names the parent lemma's exact semantic ref.
 
 ---
 
@@ -585,31 +684,104 @@ the implementation adds `setup` and `settings` views to that shell.
 
 ### 9.3 CLI
 
-| Invocation | Behaviour |
-|---|---|
-| `./wortlaut` | Unchanged for existing users (D105). Applies §8.2. |
-| `./flashcard …` | Unchanged compatibility alias; execs `./wortlaut`. |
-| `./wortlaut --install-dictionary` | Unchanged: installs and verifies the full asset via `dict_install`. On success, persists mode `offline` if no preference exists; never downgrades an existing explicit `online` preference. |
-| `./wortlaut --dictionary-mode online` | **Session-only.** Runs this launch in Online mode. Does not write `preferences.json`. |
-| `./wortlaut --dictionary-mode offline` | **Session-only.** Requires an already-valid local asset; does not trigger a download. Exits non-zero with an actionable message if absent. |
-| `--dictionary-mode` + `--dict-path` | `--dict-path` implies an explicit local asset, so it is compatible with `offline` only. Combining it with `online` is a usage error (exit 2). |
-| `--dictionary-mode online` + `--install-dictionary` | Permitted and unambiguous: the install runs first and completes, then the session runs in Online mode; the persisted preference is untouched. |
+`./flashcard …` remains a compatibility alias that execs `./wortlaut`. Every
+row below has the same data-root rule: omitted `--data-dir` uses the existing
+XDG `flashcard` root; `--data-dir PATH` changes, for that invocation, the
+preferences file to `PATH/preferences.json`, online cache to
+`PATH/cache/dictionary-online/`, canonical offline dictionary to
+`PATH/dictionary/dictionary.sqlite`, and default PART-B/media paths to
+`PATH/flashcards.sqlite` and `PATH/media/`. `--dict-path PATH` changes only the
+offline dictionary selected for the launch; it does not move those other
+per-user paths. `--user-db` retains its established independent override.
 
-`--dictionary-mode` being session-only is the whole point: headless and
-scripted invocations must not silently reconfigure a human's installation.
+`--manifest PATH` remains an explicit local developer/recovery manifest file
+(not a browser/API value). Its existing `download_url` may be `file://` or
+explicit `http(s)://`, subject to existing credential redaction. It is accepted
+only together with `--install-dictionary`, is never persisted, and never
+configures `OnlineDictionaryProvider`. “Production manifest” below means the
+committed `release/dictionary-manifest-v2.json` for offline installation;
+“online manifest” means the separate committed trusted online configuration in
+§7. A usage error is deterministic exit 2 before network or user-state
+mutation. Installation retains its current lifecycle: install/verify first,
+then the normal runtime launch; it is not an install-and-exit command.
+
+| Mode flag | `--manifest` | `--dict-path` | `--install-dictionary` | Result, manifest/trust domain, and exit |
+|---|---|---|---|---|
+| none | none | none | no | Apply §8.2 persisted preference/startup state; normal launch. No network unless persisted Online later needs an uncached shard. |
+| none | none | none | yes | Install canonical offline asset from production manifest through Product domain; then normal §8.2 launch. If no preference exists, persist `offline`; never overwrite an explicit preference. |
+| none | none | PATH | no | Normal Offline launch against explicit path; no canonical manifest check or install; normal launch, error if path is absent/invalid. |
+| none | none | PATH | yes | Install canonical offline asset from production manifest through Product domain, then normal Offline launch against the explicit path; normal launch. This preserves the existing independent override/install behavior. |
+| none | PATH | none | no | **Usage error.** A custom manifest has no runtime-startup role. |
+| none | PATH | none | yes | Install canonical offline asset using the explicit developer/recovery manifest and its declared source; then normal §8.2 launch. This is Developer/Recovery domain. |
+| none | PATH | PATH | no | **Usage error.** A custom manifest has no runtime-startup role. |
+| none | PATH | PATH | yes | Install canonical offline asset through Developer/Recovery domain, then normal Offline launch against explicit path; normal launch. |
+| `offline` | none | none | no | Session-only Offline; requires a valid canonical asset; normal launch or actionable nonzero absence/validation error. Preference unchanged; no dictionary network. |
+| `offline` | none | none | yes | Install canonical offline asset through Product domain, then session-only Offline normal launch; preference unchanged. |
+| `offline` | none | PATH | no | Session-only Offline against explicit path; normal launch or actionable nonzero path error; preference unchanged. |
+| `offline` | none | PATH | yes | Install canonical asset through Product domain, then session-only Offline launch against explicit path; preference unchanged. |
+| `offline` | PATH | none | no | **Usage error.** Custom manifests apply only to explicit install. |
+| `offline` | PATH | none | yes | Install canonical asset through Developer/Recovery domain, then session-only Offline normal launch; preference unchanged. |
+| `offline` | PATH | PATH | no | **Usage error.** Custom manifests apply only to explicit install. |
+| `offline` | PATH | PATH | yes | Install canonical asset through Developer/Recovery domain, then session-only Offline launch against explicit path; preference unchanged. |
+| `online` | none | none | no | Session-only Online using only the committed trusted online manifest and Product domain; normal launch. Preference unchanged; uncached shards may use Product network. |
+| `online` | none | none | yes | **Usage error.** Offline installation and Online session selection are contradictory; neither install nor network begins. |
+| `online` | none | PATH | no | **Usage error.** Explicit offline dictionary paths cannot select Online; no mutation/network. |
+| `online` | none | PATH | yes | **Usage error.** Both contradictions apply; no mutation/network. |
+| `online` | PATH | none | no | **Usage error.** A custom manifest cannot redirect Online; no mutation/network. |
+| `online` | PATH | none | yes | **Usage error.** A custom manifest cannot redirect Online and install is contradictory; no mutation/network. |
+| `online` | PATH | PATH | no | **Usage error.** A custom manifest and explicit offline path cannot select Online; no mutation/network. |
+| `online` | PATH | PATH | yes | **Usage error.** All contradictions apply; no mutation/network. |
+
+Thus `--dictionary-mode` is session-only in every valid row and never mutates
+`preferences.json`; a custom manifest never affects Online; and `--data-dir`
+scopes every default per-user path, including cache and PART-B state, in every
+row.
 
 ---
 
 ## 10. Network security boundary
 
-- Online mode performs outbound HTTPS **only** to manifest-derived shard URLs
-  (D96). There is no generic fetch endpoint, and no browser input selects a
-  server-side fetch URL.
-- Validated per request: scheme, host (and any redirect host), derived path /
-  single-segment filename, declared byte count, and SHA-256 of the received
-  bytes before the shard becomes readable.
-- Credential redaction and the fail-closed URL predicates from
-  `app/dict_install.py` are reused, not reimplemented.
+### 10.1 Product/runtime/UI distribution path (R14 scope)
+
+OnlineDictionaryProvider, first-run Online selection, Settings Online mode, UI
+“Download for offline use”, and default `./wortlaut --install-dictionary` are
+the **Product** path. They use only committed Wortlaut manifests/configuration;
+the UI and browser never submit a URL. Each initial product asset request must
+be HTTPS to exactly:
+
+```
+github.com/sabers13/wortlaut/releases/download/dictionary-online-v2/<validated filename>
+```
+
+for online shards, or exactly
+`github.com/sabers13/wortlaut/releases/download/dictionary-v2/dictionary-v2.sqlite`
+for the default offline installer. No credentials, userinfo,
+non-default port, arbitrary host, `file://`, or plain HTTP is permitted.
+
+GitHub documents release-asset URLs on `github.com` and currently redirects
+their downloads to signed asset hosts. The fetcher follows at most three HTTPS
+redirects and validates **every** hop: initial host `github.com`, then only
+`release-assets.githubusercontent.com` or `objects.githubusercontent.com`.
+The initial path must be the exact owner/repository/release/validated-filename
+path above; a redirect URL may carry GitHub's signed query parameters but must
+have no userinfo or non-default port. Any redirect to another scheme, host, or
+an invalid initial path fails closed before bytes are read. The response is
+still accepted only after exact manifest byte count, SHA-256, and required
+SQLite/logical validation. This deliberately allows the observable GitHub
+release host families, not a temporary signed CDN hostname or a generic
+`*.githubusercontent.com` wildcard.
+
+### 10.2 Explicit developer/recovery offline-install path
+
+The operator-only `--manifest PATH --install-dictionary` route is outside R14's
+automatic Product allowlist. It preserves existing `dict_install` compatibility
+for a local custom manifest whose explicit `download_url` is `file://` or
+`http(s)://`; credentials remain rejected/redacted. It may only install an
+offline asset, is never persisted as a preference or online source, and cannot
+be reached from UI/browser/API input. It is not a generic runtime fetch proxy.
+
+### 10.3 Unchanged local browser boundary
+
 - Unchanged and not weakened: loopback-only bind (AGENTS R8), loopback `Host`
   validation and exact-origin CORS (AGENTS R12), `X-Flashcards-Request: 1` on
   every non-GET browser-callable route, dictionary/user database separation
@@ -752,8 +924,9 @@ ADR-only mission creates and publishes nothing.**
 ### 13.4 Storage and operational cost (D106)
 
 - Source asset: 0.95 GB (already present).
-- Full shard corpus: ≈ 0.82 GB.
-- Peak temporary disk with incremental emission and upload: **≈ 1.0 GB** beyond
+- Full shard corpus: **≈ 0.90 GB** (the §5.6 895.7 MB projection, including
+  sense-route indexes).
+- Peak temporary disk with incremental emission and upload: **≈ 1.1 GB** beyond
   the source, if shards are uploaded and released per family rather than staged
   as one complete tree.
 - Absolute worst case if a full staging copy is also kept: ≈ 1.9 GB beyond the
@@ -763,7 +936,7 @@ ADR-only mission creates and publishes nothing.**
   current machine reports ~13 GB free, which is sufficient for the incremental
   path with margin.
 - Per-user online cache: bounded in practice by usage; the theoretical maximum
-  is the 0.82 GB corpus, versus 0.95 GB for the offline asset. Users are not
+  is the ≈0.90 GB corpus, versus 0.95 GB for the offline asset. Users are not
   worse off, and "Clear online cache" is always available.
 
 ---
@@ -798,18 +971,32 @@ identical `None`/absence, identical dedup behaviour, and identical
    predicate. Must include the 2,716 ASCII/Unicode-lower divergence population,
    NFD inputs, `STRASSE`, and `äpfel`.
 2. **Closure.** For every family, assert that the rows routed into bucket *b*
-   are exactly the rows the corresponding full-asset query could match.
-3. **Membership filter has no false negatives.** Every key in the build set is
-   reported present; measured FPR is within the manifest-declared bound.
-4. **Compound bound.** Resolving an unknown long word touches at most
-   (filter hits + measured FPR allowance) shards, not the 87 buckets the raw
-   probe produces.
-5. **Integrity failure.** Truncated, byte-flipped, wrong-SHA, non-SQLite, and
+   are exactly the rows the corresponding full-asset query could match. For
+   lookup shards, additionally prove every authoritative `sense_ref` appears
+   exactly once in `sense_route`, routes to its parent `lemma_ref`, and a
+   `sense_ids[sense_ref]` read plus D47 relink fetches only that lookup bucket
+   then that parent entry bucket—never an entry-shard scan.
+3. **Membership filter semantics.** Every key in the build set is reported
+   present (zero false negatives); false positives are permitted and measured
+   FPR is reported against the manifest-declared statistical target.
+4. **Family maximum and remote budget.** A harness proves the absolute maximum
+   distinct lookup identities is N=256, then enforces D88's 32-new-remote-shard
+   budget. A forced 33rd new remote lookup acquisition cancels cleanly, releases
+   request leases, preserves verified cache integrity, returns
+   `online_dictionary_budget_exceeded`, and performs zero PART-B writes. The
+   approximate 12-shard production probe remains a non-normative observation,
+   not this test's correctness bound.
+5. **Integrity and cache lifecycle.** Truncated, byte-flipped, wrong-SHA, non-SQLite, and
    wrong-dataset-version shards are rejected, never cached as active, and
-   surface `online_dictionary_unavailable` with zero PART-B writes.
-6. **Atomicity.** Concurrent requests for the same uncached shard produce one
-   active cache entry and no corruption; a mode switch under concurrent load
-   never mixes providers within one logical operation.
+   surface `online_dictionary_unavailable` with zero PART-B writes. A later
+   byte-corrupted canonical cache entry is revalidated, never opened, safely
+   evicted/quarantined and refetched or fails closed. Concurrent same-shard
+   misses produce one verified installation; clear during an active lease keeps
+   its reader valid, defers its canonical cleanup, blocks new acquisition, and
+   touches no PART-B/offline asset/media file.
+6. **Atomicity.** Concurrent same-shard misses produce one verified installation
+   and a provider switch under active leases never mixes providers within one
+   logical operation.
 7. **Mode persistence.** All four §8.2 startup branches, including the corrupt
    preference file failing safe without enabling network access.
 8. **Offline regression.** The full existing suite passes unchanged with the
@@ -836,8 +1023,10 @@ the slice report.
 - `release/dictionary-manifest-v2.json`, `ATTRIBUTION-v2.md`, and the
   `dictionary-v2` release are unchanged.
 - `./wortlaut`, `./flashcard`, `--dict-path`, `--data-dir`, `--user-db`,
-  `--port`, `--no-browser`, `--manifest`, `--install-dictionary` all keep their
-  current behaviour.
+  `--port`, and `--no-browser` keep their current behaviour. `--manifest` and
+  `--install-dictionary` retain the existing offline developer/recovery and
+  install lifecycle, with the §9.3 restriction that a custom manifest cannot
+  become a runtime/Online source.
 - PART-B schema is unchanged; no migration is introduced by this ADR.
 - `asset_token` for v2 is unchanged in both modes, so existing picker tokens,
   bindings, and review state are unaffected by adopting online mode.
@@ -875,11 +1064,16 @@ This ADR intentionally changes **no** executable AGENTS rule, because the code
 those rules would govern does not exist yet. The implementation slice must carry
 exactly these governance changes, and no others:
 
-1. **AGENTS R14 (new, `[executable]`) — pinned-asset-only outbound network.**
-   Outbound HTTPS from `app/` is permitted only to manifest-derived dictionary
-   distribution assets; no generic fetch helper; no browser-supplied URL may
-   reach a server-side fetch. Gate check: scan `app/` for network entry points
-   and assert each one is reached only through the validated manifest path.
+1. **AGENTS R14 (new, `[executable]`) — Product-path pinned distribution
+   network.** Product/runtime/UI outbound traffic from `app/` is permitted only
+   through committed Wortlaut manifests and §10's HTTPS initial/redirect host
+   policy; no generic Product fetch helper and no browser-supplied URL may reach
+   a server-side fetch. The explicit operator-only developer/recovery
+   `--manifest PATH --install-dictionary` offline-install path is segregated
+   from R14's automatic Product domain, remains credential-redacted, and cannot
+   persist/configure Online mode. Gate check: scan product network entry points
+   and assert they are reached only through the validated committed-manifest
+   policy; test the explicit CLI segregation separately.
 2. **AGENTS R9 clarification.** The online shard cache is dictionary material,
    is disposable, and lives under the cache area — never in the user database or
    its volume. R9's separation invariant is restated, not weakened.
@@ -948,12 +1142,12 @@ honestly instead of aspirationally.
 
 **Negative.** A second read path exists and must be proven equivalent forever —
 hence D102's gate. Online mode introduces a real network failure surface into a
-product whose identity is offline-first. The online corpus (~0.82 GB, 577
+product whose identity is offline-first. The online corpus (~0.90 GB, 577
 assets) is a second artifact set to build, publish, and keep consistent with the
 full asset. Eleven pathological surface forms retain a large worst-case fetch
 (§5.7).
 
-**Neutral.** Total bytes a heavy online user eventually downloads (~0.82 GB) is
+**Neutral.** Total bytes a heavy online user eventually downloads (~0.90 GB) is
 comparable to the offline asset (0.95 GB); the win is *when* and *whether* those
 bytes are needed, not their sum.
 
@@ -961,9 +1155,155 @@ bytes are needed, not their sum.
 
 ## 20. Cold review
 
-No cold review is performed in this drafting session. A fresh cold orchestrator
-session must review this ADR under WORKFLOW §7 / AGENTS G7. This is a new
-lineage; its first review is **cold review #1 — the broad architecture
-challenge**.
+Cold review #1 — broad architecture challenge — is complete. Its blockers are
+preserved below. This ADR remains **NEEDS COLD REVIEW** until a fresh cold
+review #2 approves it; this revision does not approve itself.
 
-Cold-review lineage count: **0 completed / #1 next.**
+Cold-review lineage count: **1 completed / #2 next — focused remedy
+verification.**
+
+### O1 — Sense-reference point reads are not bucket-closed.
+
+**Defect:** entry shards route only from a lemma semantic-ref digest, but D100
+retains `sense_ids[sense_ref]` point reads and D47 relinking receives sense
+refs. A `sense:v1:<digest>` does not reveal its parent lemma's entry bucket; no
+sense-ref index family is defined.
+
+**Why it blocks:** Online mode must otherwise scan entry shards or return an
+incorrect absence, violating D86/D100, R13, and equivalent semantics.
+
+**Affected:** §§4–5, D86, D100, §14.
+
+**Required remedy:** add a bucket-closed sense-ref index/routing path and
+account for its assets/bytes, or redesign every caller to supply a parent lemma
+ref.
+
+#### Resolution — O1
+
+D86, §5.3, §5.6, §7 and §14.2 now place a logically independent
+`sense_route(sense_ref → lemma_ref)` index in the existing 256 physical lookup
+shards. A sense point read/D47 relink routes sense ref → lookup shard → parent
+lemma ref → entry shard, with no entry scan. The builder must emit every
+authoritative sense ref exactly once and the revised differential/closure tests
+exercise arbitrary `sense_ids` reads and D47 relinking. The verified-v2 probe
+measured 480,221 mappings and 78,663,680 added lookup-family bytes; §5.6
+revises the projection to 417.6 MB, ≤1.61 MB median and ≤3.72 MB max while
+retaining 577 assets. Slice-10 acceptance now requires this routing and
+no-scan proof. The missing bucket-closed path is therefore specified and sized.
+
+### O2 — The outbound-network contract contradicts retained installer behavior.
+
+**Defect:** D96/R14 permit only pinned HTTPS distribution assets, but the
+existing `dict_install` accepts arbitrary `http(s)` and `file://` manifest
+URLs; `wortlaut --manifest` preserves that path. D94 says to retain it unchanged
+in substance.
+
+**Why it blocks:** R14 cannot be truthfully enforced, and the proposed network
+boundary is not executable.
+
+**Affected:** D94, D96, D103, §15, §16.2.
+
+**Required remedy:** define a strict production/UI installer source and
+redirect-host policy, then either constrain or explicitly segregate the generic
+developer manifest path outside the runtime network contract.
+
+#### Resolution — O2
+
+D94/D96, §§9.3 and 10, §15 and §16.2 now define Product and
+Developer/Recovery trust domains. Product/runtime/UI traffic uses only committed
+Wortlaut manifests, exact HTTPS GitHub Release initial paths, and a closed
+redirect policy (`github.com` initial, then only
+`release-assets.githubusercontent.com` or `objects.githubusercontent.com`, at
+most three HTTPS redirects, no userinfo/non-default port). The explicit
+operator-only `--manifest PATH --install-dictionary` offline-install override
+retains current local-manifest `file://`/`http(s)` source compatibility with
+credential redaction, but cannot persist, configure Online, or be reached from
+browser/API input. R14 is explicitly scoped to Product traffic and Slice-10
+now allowlists its gate/test work and tests this segregation. The network
+contract is consequently enforceable without falsely denying the explicit
+developer path.
+
+### O3 — The CLI matrix is not exhaustive as claimed.
+
+**Defect:** §9.3 omits `--dictionary-mode` interactions with `--manifest` and
+does not fully specify precedence/network behavior for `--data-dir`,
+`--dict-path`, and `--install-dictionary` combinations.
+
+**Why it blocks:** acceptance cannot mechanically prove D103's “specified
+exhaustively” claim; online mode could ambiguously use a custom offline manifest
+or the committed online manifest.
+
+**Affected:** D103, §9.3, §15, Slice-10 acceptance 11.
+
+**Required remedy:** add a complete combination table with preference/cache
+locations, manifest applicability, network permission, and exit behavior.
+
+#### Resolution — O3
+
+D103, §9.3 and §15 now supply the 24-row Cartesian CLI matrix over mode,
+custom-manifest, explicit-dictionary-path and install, plus the data-root/path
+rules that apply to every row. It specifies provider, session-only persistence,
+preferences/cache/canonical-offline/PART-B-media paths, Product versus
+Developer/Recovery network permission, custom-manifest exclusion from Online,
+installation-before-normal-launch behaviour, precedence and every usage error.
+In particular Online plus `--dict-path`, `--install-dictionary`, or custom
+`--manifest` rejects before mutation. Slice-10 acceptance now requires exact
+enumeration of the table. The former ambiguity is removed.
+
+### O4 — Cache corruption and clear-cache concurrency lack an executable lifecycle contract.
+
+**Defect:** D95 verifies newly downloaded shards, but does not require
+validation/recovery on later cache reads or define lease behavior when “Clear
+online cache” races an in-flight/pinned shard.
+
+**Why it blocks:** a later-corrupted cached shard can be read without
+re-verification, and deletion behavior is platform-dependent while SQLite
+handles remain active.
+
+**Affected:** D95, D98–D99, §14.2(5–6), §18.
+
+**Required remedy:** specify per-shard leases, cache-hit integrity
+validation/eviction/refetch, and clear-cache behavior that never invalidates an
+active reader or touches user data.
+
+#### Resolution — O4
+
+D95/D98–D99 and §5.9 define `ABSENT → DOWNLOADING → VERIFIED → LEASED`
+immutable snapshots, per-shard single flight, exact cache-hit byte/SHA
+revalidation before a new lease, safe corrupt-entry quarantine/eviction and
+refetch/fail-closed recovery. Clear-cache uses compatible cache-then-generation
+lock order, blocks new canonical leases, removes unleased files, defers leased
+canonical cleanup until final release, and never relies on unlinking an open
+SQLite path. It names the only allowed cache subtree and expressly excludes
+PART-B, media and offline dictionary files. §14.2 and Slice-10 acceptance now
+cover corrupt cache, clear during a lease, same-shard single flight,
+provider-switch leases and no-user-data-touch proof. The lifecycle is now
+executable.
+
+### O5 — The Bloom-filter download bound is stated as a guarantee that Bloom filters cannot provide.
+
+**Defect:** “at most filter hits + measured FPR allowance” is not a
+deterministic bound; an adversarial query can encounter arbitrarily many false
+positives up to the finite shard-family maximum.
+
+**Why it blocks:** §14.2(4) is not a universally executable acceptance test,
+and §5.8 overstates the guarantee.
+
+**Affected:** D88, §5.8, §14.2(4).
+
+**Required remedy:** state and test the hard family-based maximum with
+cancellation/error semantics; retain the ~12-shard result as an empirical
+expectation, not a correctness bound.
+
+#### Resolution — O5
+
+D88, §5.8 and §14.2 distinguish the zero-false-negative/statistical-FPR Bloom
+property from two deterministic limits: the absolute 256 distinct lookup-family
+identity maximum, and a 32-new-remote-lookup-shard per-operation safety budget.
+The latter is measured against the revised ≤3.72 MB shard projection (≤119.1
+MB transfer) and permits 2.7× the observed approximately 12-shard probe. A
+33rd new remote identity cancels, releases request leases, preserves cache,
+returns `online_dictionary_budget_exceeded`, and makes no PART-B mutation; it
+is never `needs_gloss` or not-found. Slice-10 acceptance mechanically tests
+zero false negatives, permitted false positives, family maximum, budget
+enforcement and fail-closed error. The ~12 result is explicitly non-normative.
