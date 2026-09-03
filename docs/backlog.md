@@ -54,13 +54,19 @@ them. REJECTED items are listed so they do not resurface.
   preference semantics conflicted with explicit Offline Developer/Recovery
   custom-manifest startup. ADR-0008 and `tasks/slice-10.md` are immutable
   historical evidence and must never receive review #4 or implementation.
-- **ADR-0009 session-scoped online dictionary — BLOCKED pending cold review #1.**
+- **ADR-0009 session-scoped online dictionary — BLOCKED pending cold review #2.**
   It is the materially simpler successor: no persisted dictionary-mode state;
   deterministic session selection from CLI/current Offline asset/user action;
   and separate Slice-11 infrastructure, Slice-12 startup/UI, and Slice-13
-  production-publication work. All three briefs remain blocked until ADR-0009
-  is approved and frozen; Slice-12 additionally depends on Slice-11 acceptance,
-  and Slice-13 on both. ADR-0009 preserves the Online/Offline product goal but
+  production-publication work. Cold review #1 raised five objections (O1
+  example-shard routing identity, O2 lookup routing/normalization closure, O3
+  `active_dictionary_metadata`/Offline-removal compatibility, O4 E2E
+  no-dictionary harness coverage, O5 `app/api.py` provider bypass) which are
+  now resolved in the ADR body, `## Cold review` section, and
+  `tasks/slice-11.md` / `tasks/slice-12.md` / `tasks/slice-13.md`. All three
+  briefs remain blocked until ADR-0009 is approved and frozen after cold
+  review #2; Slice-12 additionally depends on Slice-11 acceptance, and
+  Slice-13 on both. ADR-0009 preserves the Online/Offline product goal but
   does not resurrect ADR-0008's preference subsystem.
 
 ### Filed by ADR-0008, not resolved in it

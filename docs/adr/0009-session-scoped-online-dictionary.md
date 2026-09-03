@@ -42,7 +42,13 @@ or PART-B mutation:
    invocation explicitly installs it; it never falls back to Online.
 4. `--dictionary-mode online` selects the trusted `OnlineDictionaryProvider`
    for this process. It accepts no custom online manifest and writes no
-   preference.
+   preference. Combining `--dictionary-mode online` with
+   `--install-dictionary` is a deterministic exit-2 usage error, rejected
+   before network access, provider activation, dictionary install, or
+   PART-B mutation: downloading the full Offline dictionary while
+   explicitly requesting Online for the session is contradictory in this
+   version. A user can instead run normal installation or use the UI's
+   explicit **Download for Offline use** action.
 5. With no explicit selection, a valid canonical full Offline dictionary
    selects Offline automatically. Existing users therefore keep their fully
    local experience, with no chooser and no dictionary network request.
@@ -64,6 +70,13 @@ At the next launch, a valid full Offline asset again selects Offline; otherwise
 the chooser appears again. The UI must say that Online applies to the current
 session.
 
+This unconfigured chooser intentionally **supersedes** the prior fully-local
+product's `missing dictionary -> launcher exits` behavior; that old behavior
+is replaced, not preserved, by this ADR, and the existing launcher tests that
+assert it must be updated to the new behavior rather than kept unchanged.
+Installed/valid-Offline startup and custom-manifest integrity remain
+backward-compatible and unaffected.
+
 ### Settings and user data
 
 Settings offers **Use Online for this session**, **Use Offline**, **Download
@@ -71,7 +84,38 @@ for Offline use**, **Remove Offline dictionary**, and **Clear Online cache**.
 Offline → Online retains the Offline asset. Online → Offline activates only a
 verified full asset or offers download; incomplete data is never activated.
 Removal and cache clearing are independent explicit actions and never affect
-cards, reviews, meanings, or audio.
+cards, reviews, meanings, or audio. Downloading the ~945 MB full Offline
+asset performs a conservative free-space preflight, accounting for the
+installer's temporary file and the existing activation/private-snapshot
+behavior, so a download that is predictably unable to complete never begins;
+an insufficient-space failure is actionable, replaces no valid Offline
+asset, and mutates no user data.
+
+`active_dictionary_metadata` (PART-B) keeps its existing, narrower meaning:
+the metadata of the last successfully activated **full Offline** dictionary.
+It is **not** dictionary-mode state and is never deleted merely because the
+disposable canonical Offline asset is removed; this ADR introduces no new
+preference/state table. **Remove Offline dictionary** while
+`LocalDictionaryProvider` is the active session provider is rejected with a
+structured, actionable conflict (conceptually `offline_dictionary_in_use`)
+telling the user to switch to Online for this session first; no file is
+deleted and no PART-B row is modified. While `OnlineDictionaryProvider` is
+active and the canonical full Offline asset exists, removal verifies the
+target is exactly the managed canonical asset, removes only that asset,
+leaves `active_dictionary_metadata` unchanged, touches no cards, reviews,
+meanings, audio, media, online cache, or semantic refs, and triggers no D47
+relink — the Online provider continues using its own immutable shard leases
+throughout. At the next launch, provider/startup selection checks whether
+the canonical full Offline asset actually exists and validates **before**
+constructing `LocalDictionaryProvider` or invoking its recovery path; a
+stale historical `active_dictionary_metadata` row must never by itself
+trigger `DictionaryRuntime`'s missing-file recovery error when no Local
+provider is being activated — that combination (no explicit mode, canonical
+asset absent) is simply the unconfigured chooser. Reinstalling the exact
+same v2 canonical dictionary later reuses the normal metadata-match
+activation path with no artificial D47 relink merely because the file was
+once removed; activating a genuinely different dictionary identity still
+follows the normal D47 activation/relink rules.
 
 ### Provider and online-data contract
 
@@ -86,13 +130,53 @@ Release distribution, not remote SQLite VFS or a query API. Its committed,
 trusted manifest describes 256 lookup shards, 256 entry shards, 64 example
 shards, and one membership filter (577 assets total):
 
-* lookup shards route lookup keys and `sense_ref → lemma_ref`;
-* entry shards route by stable lemma semantic ref; example shards route by
-  stable example identity;
-* the verified Bloom filter has zero false negatives for the authoritative
-  lookup-key set. Its false-positive rate is statistical only; it makes no
-  deterministic FPR promise;
-* a lookup family has at most 256 identities. One top-level operation may
+* Lookup and entry shards route by `bucket256_v1`, a deterministic,
+  locale-independent function: `bucket256_v1(text) = SHA256(UTF-8 bytes of
+  text).digest()[0]`, an integer in `0..255`. No Python `hash()`, no
+  locale-dependent hashing, and no casefolding or Unicode normalization
+  inside the hash function itself. Entry bucket =
+  `bucket256_v1(lemma_semantic_ref)`; `sense_ref → lemma_ref` routing uses
+  sense route bucket = `bucket256_v1(sense_ref)`.
+* Example shards route by `example_bucket(example_id) = example_id % 64`
+  across the fixed 64-shard family. `example.id` is deliberately an
+  **active-dictionary-internal routing/index identity only** — it may be
+  used to locate rows inside one immutable logical dictionary dataset; it
+  must never be persisted into PART-B as durable identity; no existing
+  PART-B table stores example IDs; and stable lemma/sense semantic refs
+  remain the durable identity boundary, so this does not weaken AGENTS R13.
+  The builder preserves authoritative example IDs exactly, and entry shards
+  may carry those active-asset example IDs for subsequent example-shard
+  retrieval. This 64-shard example family measures approximately 92.6 MB
+  total in the prior verified-v2 probe — an operational transparency note,
+  not a per-query correctness budget, and no lookup downloads that amount.
+* ADR-0009 preserves the exact current observable lookup predicate —
+  `X == Q OR sqlite_ascii_lower(X) == python_lower(Q)`, where
+  `sqlite_ascii_lower` is SQLite's built-in ASCII-oriented `lower()` and
+  `python_lower` is Python `str.lower()` — and does not replace it with
+  `casefold()`, Unicode-wide SQLite lowering, or NFC/NFKC normalization.
+  For each authoritative lookup-index row with text `X` (applied
+  independently to the lemma and surface-form lookup indexes), the builder
+  places/indexes that row in the union of `bucket256_v1(X)` and
+  `bucket256_v1(sqlite_ascii_lower(X))` (deduplicated when equal). For a
+  runtime query `Q`, the Online provider fetches the union of
+  `bucket256_v1(Q)` and `bucket256_v1(python_lower(Q))` (deduplicated when
+  equal), then applies the exact predicate above to the fetched candidates.
+  This proves closure: the exact-match clause is covered because `X == Q`
+  implies `bucket(X) == bucket(Q)`, and the folded clause is covered because
+  `sqlite_ascii_lower(X) == python_lower(Q)` implies
+  `bucket(sqlite_ascii_lower(X)) == bucket(python_lower(Q))`. Routing may
+  over-approximate (fetching extra candidates the predicate then filters)
+  but must never under-approximate. No query string is assumed to be NFC:
+  the Online provider must match whatever the Local provider does for the
+  exact input, including returning no result for a decomposed/non-NFC query
+  if that is what Local returns.
+* The Bloom membership set used for lemma-oracle pruning is built compatibly
+  with the same predicate: for each authoritative lemma text `X` it includes
+  keys covering both `X` and `sqlite_ascii_lower(X)` with zero false
+  negatives for the runtime checks, queried with both `Q` and
+  `python_lower(Q)` (deduplicated as appropriate). Its false-positive rate
+  remains statistical only; it makes no deterministic FPR promise.
+* A lookup family has at most 256 identities. One top-level operation may
   download at most 32 **new** remote lookup-shard identities. Exceeding this
   limit returns `online_dictionary_budget_exceeded`, never `needs_gloss` or
   `not-found`, and causes no PART-B mutation.
@@ -104,7 +188,10 @@ rejected/refetched; clear-cache is safe with in-flight leases. Product network
 access accepts only committed Wortlaut manifests, HTTPS, the pinned GitHub
 Release distribution contract, and validated redirects. Browser/API input
 cannot supply a URL or manifest. Custom Developer/Recovery manifests remain a
-separate Offline-only CLI trust domain.
+separate Offline-only CLI trust domain. Product network trust is proven by
+automated tests: arbitrary hosts rejected, plain HTTP rejected, userinfo
+rejected, invalid redirects rejected, the approved release redirect
+accepted, and no browser/API caller able to configure a source.
 
 The deterministic builder consumes a verified full asset, preserves exact
 semantic and attribution fields, and emits a manifest plus deterministic shard
@@ -128,14 +215,42 @@ ADR-0008 F1. The accepted work is deliberately split:
 
 1. **Slice 11:** provider seam, deterministic shards/manifest, trusted online
    retrieval, verified cache leases, and provider differential evidence. No
-   first-run or Settings UI.
+   first-run or Settings UI. Its provider contract must be designed and
+   tested against a complete inventory of every dictionary read that
+   `app/api.py`, `app/deck.py`, and `app/resolve.py` currently perform —
+   resolver exact/surface-form lookup, sense lookup, `sense_ref → lemma_ref`
+   routing, lemma/candidate materialization by stable semantic ref, and the
+   meanings/examples needed for candidate/card materialization — proven with
+   an explicit contract-coverage map from call site to provider operation.
+   No generic raw SQLite connection is exposed as the provider abstraction.
+   If the contract cannot cover a current product read without a new shard
+   route/family, that is a Stop-and-ask architecture boundary. Slice 11
+   still does not touch `app/api.py`.
 2. **Slice 12:** session-only launcher selection, chooser, Settings switching,
    offline installation progress, cache/offline removal, CLI matrix, and E2E.
-   It must prove that no backend mode-preference file exists.
+   It must prove that no backend mode-preference file exists. Slice 12 owns
+   `app/api.py` and migrates every served-product dictionary read onto the
+   accepted Slice 11 provider contract, explicitly naming and removing/
+   bypassing the current direct `runtime._current_generation.asset.connection`
+   reads used by `POST /vocab/highlight` and `POST /vocab/import/csv`, and
+   the raw dictionary SQL in `_materialize_candidate_from_ref`. Low-level
+   SQLite access remains allowed only inside `LocalDictionaryProvider`/
+   dictionary implementation, never reintroduced as a bypass elsewhere in
+   `app/api.py`. Against the deterministic fixture Online provider, Slice 12
+   proves `POST /vocab/highlight`, `POST /vocab/import/csv`, candidate
+   materialization, and a representative card-creation path all work
+   without a full local dictionary, with transport/integrity/budget errors
+   remaining structured provider failures rather than dictionary misses or
+   PART-B writes.
 3. **Slice 13:** only after Slices 11 and 12 are accepted, build and validate
    the production corpus, check storage, create the separate
    `dictionary-online-v2` release, upload and anonymously verify assets, and
-   perform end-user testing. It never changes `dictionary-v2`.
+   perform end-user testing. It never changes `dictionary-v2`. By the time
+   Slice 13 begins, every served product read path already works through
+   `OnlineDictionaryProvider`; Slice 13 must not discover basic API/provider
+   migration work, and if its end-user test exposes a code/provider bypass
+   it must stop publication rather than repair product code inside the
+   publication slice.
 
 Each slice must preserve AGENTS R1–R13, including no runtime LLM, one resolver,
 separate dictionary/user data, D47 stable semantic identity, and guarded
@@ -152,8 +267,131 @@ API, and any runtime LLM are out of scope.
 
 ## Cold review
 
-Pending cold review #1. The reviewer must test whether this is genuinely
-materially simpler, verify no persisted mode remains, exercise startup and
-custom-manifest precedence, confirm zero network before an explicit first-run
-choice, existing-user Offline startup, provider/cache integrity, and the
-three-phase execution split.
+**Cold review #1 (complete).** The reviewer confirmed ADR-0009 is genuinely
+materially simpler than blocked ADR-0008; that no persisted dictionary-mode
+state remains; that ADR-0008 F1 has exactly one answer under this ADR; that
+the logical v2 dataset token is coherent; that `sense_ref → lemma_ref`
+routing is bucket-closed; that the 577-asset corpus remains within GitHub
+Release limits; and that Slice 11 may establish the provider seam without
+`app/api.py` itself. Those points are not re-litigated below. It raised five
+objections, O1–O5, recorded here with their resolutions.
+
+### O1 — Example shard routing lacked a defined stable identity
+
+The ADR said examples route by a "stable example identity", but the
+authoritative `example` table (`reference/schema.sql`) has no
+`semantic_ref`, and `source`/`source_ref` are nullable — so no such identity
+exists to route on as originally worded.
+
+**Resolution — O1.** Example shard routing is
+`example_bucket(example_id) = example_id % 64` against the table's numeric
+primary key, an active-dictionary-internal routing/index identity only —
+never persisted into PART-B, never a durable user identity, and not a
+weakening of AGENTS R13 since stable lemma/sense semantic refs remain the
+durable identity boundary. See "Provider and online-data contract" above and
+the updated `tasks/slice-11.md` for the machine-checkable route, fixture
+proof, and production builder validation that every emitted example lands
+in its exact expected bucket, plus the finite family bound (64 shards,
+~92.6 MB measured) recorded as an operational transparency note.
+
+### O2 — Lookup routing, normalization, and closure were undefined
+
+The ADR said providers "route lookup keys" without defining the routing
+function or preserving the current asymmetric SQLite/Python lower-casing
+lookup semantics (`X == Q OR sqlite_ascii_lower(X) == python_lower(Q)`,
+confirmed in `app/dictionary.py` and `app/api.py`'s `_ConnectionLookupOracle`),
+risking silent Local/Online divergence for capitalization, umlauts, ß, and
+NFC/non-NFC input.
+
+**Resolution — O2.** The ADR now defines `bucket256_v1(text) = SHA256(UTF-8
+bytes).digest()[0]` and a bucket-closure rule: the builder indexes each
+authoritative row in the union of `bucket256_v1(X)` and
+`bucket256_v1(sqlite_ascii_lower(X))`; the runtime fetches the union of
+`bucket256_v1(Q)` and `bucket256_v1(python_lower(Q))`; the exact existing
+predicate is applied afterward, unchanged. This proves closure for both the
+exact-match and folded-match clauses; routing may over-approximate but never
+under-approximate; no query is assumed to be NFC. The Bloom membership set
+is built compatibly. See "Provider and online-data contract" above and the
+updated `tasks/slice-11.md` for the required Local-vs-Online differential
+fixture (ASCII case, umlauts, ß, NFC, deliberately non-NFC input, surface
+forms, exact lemmas, unknown values — asserted as parity with
+`LocalDictionaryProvider`, not a preconceived answer) and the builder
+closure test.
+
+### O3 — Offline removal was incompatible with `active_dictionary_metadata` recovery
+
+`active_dictionary_metadata` records the last active local dictionary, and
+the existing `DictionaryRuntime._init_active_generation` (`app/deck.py`)
+hard-fails recovery if that recorded file is gone. ADR-0009's Offline
+removal was not defined in a way compatible with "next startup → chooser"
+without weakening D47 recovery/relink protections.
+
+**Resolution — O3.** `active_dictionary_metadata` keeps its existing
+meaning, is not dictionary-mode state, and is never deleted merely because
+the disposable canonical asset is removed; no new preference/state table is
+introduced. Removal is rejected with a structured conflict while Offline is
+the active session provider; removal is allowed while Online is active,
+deletes only the verified canonical asset, leaves the metadata row and all
+user data untouched, and triggers no D47 relink. Provider/startup selection
+checks canonical-asset existence *before* constructing `DictionaryRuntime`
+or invoking local recovery, so a stale metadata row alone can never trigger
+the missing-file recovery error when no Local provider is being activated —
+that case is simply the unconfigured chooser. Reinstalling the identical v2
+asset reuses the normal metadata-match path with no artificial relink. See
+"Settings and user data" above and the updated `tasks/slice-12.md`
+acceptance/Stop-and-ask for the required test groups (Offline-active
+rejection, Online-active removal, restart-after-removal, reinstall, and
+cleanup-cannot-touch-user-data).
+
+### O4 — The E2E harness could not exercise a true no-dictionary state
+
+The Playwright harness (`frontend/tests/e2e/serve.py`,
+`frontend/playwright.config.ts`) always seeds and activates a dictionary
+before the app starts, so Slice 12 could not create a real
+unconfigured-chooser environment inside its original allowlist, and normal
+tests must not depend on public GitHub network availability.
+
+**Resolution — O4.** `tasks/slice-12.md`'s allowlist is expanded to include
+`frontend/tests/e2e/serve.py`, `frontend/tests/e2e/run-server.sh`,
+`frontend/playwright.config.ts`, `frontend/src/api/client.test.ts`,
+`frontend/src/api/index.ts`, and `frontend/src/styles/tokens.css`, modified
+only as necessary for the dictionary-mode feature. The E2E harness must
+support at least two deterministic served-product states — an
+Offline-installed fixture, and a no-full-dictionary/fixture-Online
+environment with the chooser visible and a local deterministic static
+online-shard fixture reachable through the Product trust/test seam under
+backend/harness control, never an arbitrary browser-supplied endpoint. See
+the updated Slice 12 acceptance for the full scenario list and the frontend
+focused-test requirement including the co-owned `client.test.ts`.
+
+### O5 — `app/api.py` bypasses the provider on real product paths
+
+`POST /vocab/highlight` and `POST /vocab/import/csv` read
+`runtime._current_generation.asset.connection` directly (`app/api.py`,
+`_ConnectionLookupOracle` construction sites), and
+`_materialize_candidate_from_ref` issues raw dictionary SQL against that
+same connection — none of which can work against
+`OnlineDictionaryProvider`. Without an explicit inventory and migration
+commitment, the three-slice split risked leaving basic product/provider
+migration work undiscovered until publication.
+
+**Resolution — O5.** Slice 11's provider contract must be designed and
+tested to cover every real dictionary read used by the current product —
+inventoried from `app/api.py`, `app/deck.py`, and `app/resolve.py` — with an
+explicit contract-coverage map from call site to provider operation, and no
+generic raw SQLite connection exposed as the provider abstraction; Slice 11
+still does not touch `app/api.py`. Slice 12 owns `app/api.py` and must
+migrate every product dictionary read onto that contract, explicitly naming
+and removing/bypassing the current direct-connection reads in
+`/vocab/highlight` and `/vocab/import/csv` and the raw SQL in
+`_materialize_candidate_from_ref`, proving those two endpoints plus a
+representative candidate/card-materialization path work against the
+deterministic fixture Online provider. Slice 13 is publication-only: by the
+time it begins, every product read path already works with
+`OnlineDictionaryProvider`, and if its end-user test finds a code/provider
+bypass it must stop publication rather than repair product code inside the
+publication slice. See "Consequences and implementation order" above and
+the updated Slice 11/12/13 briefs.
+
+Cold review #2 — focused remedy verification — is the next required review
+before this ADR may be approved and frozen.
