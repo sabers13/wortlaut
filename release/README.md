@@ -27,8 +27,8 @@ manifest's `sha256` is the durable identity, not the filename.
 asset is no longer locally recovered; its manifest and attribution are immutable
 historical provenance.
 
-**V2 is the active technical candidate.** It represents the exact recovered
-Stage-04 asset:
+**V2 is the active public release.** It represents the exact recovered Stage-04
+asset:
 
 | Field | Value |
 | --- | --- |
@@ -37,8 +37,8 @@ Stage-04 asset:
 | Classification | `source-backed-stage02-plus-stage04-canary` |
 | Canonical local filename | `dictionary.sqlite` |
 
-The v2 `download_url` remains `null` until the public release is exposed. The
-owner has confirmed redistribution rights for the contributed rows documented in
-`ATTRIBUTION-v2.md`; that rights prerequisite is satisfied. On publication, the
-remote asset is named `dictionary-v2.sqlite`, while the installer atomically
-activates it under the canonical local name `dictionary.sqlite`.
+The v2 `download_url` identifies the public release asset. The owner has
+confirmed redistribution rights for the contributed rows documented in
+`ATTRIBUTION-v2.md`; that rights prerequisite is satisfied. The remote asset is
+named `dictionary-v2.sqlite`, while the installer atomically activates it under
+the canonical local name `dictionary.sqlite`.

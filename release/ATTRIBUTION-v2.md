@@ -2,6 +2,7 @@
 
 This document covers the exact recovered Stage-04 dictionary identified by
 SHA-256 `1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c`.
+It is the publicly released Wortlaut dictionary v2 asset.
 
 ## Upstream sources
 

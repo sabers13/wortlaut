@@ -202,7 +202,10 @@ def test_default_v2_manifest_and_historical_v1_manifest_load() -> None:
     assert v2.filename == "dictionary.sqlite"
     assert v2.sha256 == "1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c"
     assert v2.bytes == 945418240
-    assert v2.download_url is None
+    assert (
+        v2.download_url
+        == "https://github.com/sabers13/wortlaut/releases/download/dictionary-v2/dictionary-v2.sqlite"
+    )
     assert v1.version == "v1"
     assert v1.sha256 == "75658966655bd68729b105dbae1b62f500b30e8e2d08b9689b207f72c4997f97"
 

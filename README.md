@@ -54,14 +54,8 @@ python3 -m venv .venv
 # 3. Install the spaCy German model the resolver depends on
 .venv/bin/python -m spacy download de_core_news_md
 
-# 4. Obtain the verified v2 dictionary. Until the production artefact is
-#    published (see "Dictionary publication status" below),
-#    `--install-dictionary` will fail closed. Place a verified
-#    `dictionary.sqlite` at the default slot:
-#       $XDG_DATA_HOME/flashcard/dictionary/dictionary.sqlite
-#    using the SHA-256 / size in `release/dictionary-manifest-v2.json`.
-#    Once the dictionary is published, `./wortlaut --install-dictionary`
-#    will fetch and verify it automatically.
+# 4. Download and verify the public v2 dictionary.
+./wortlaut --install-dictionary
 
 # 5. Launch
 ./wortlaut
@@ -172,20 +166,19 @@ against any host (GitHub Release, public artifact mirror, local
 
 ## Dictionary publication status
 
-The recovered v2 dictionary asset is **not yet publicly published**:
-`download_url` is `null` in `release/dictionary-manifest-v2.json` and
-`--install-dictionary` will fail closed. Until publication is authorized,
-place a verified `dictionary.sqlite` (matching the v2 manifest's pinned
-SHA-256 / size) at the default slot manually:
+The Wortlaut repository and the v2 dictionary are public. Install the
+dictionary with:
 
-```
-$XDG_DATA_HOME/flashcard/dictionary/dictionary.sqlite
+```bash
+./wortlaut --install-dictionary
 ```
 
-`dictionary.sqlite` is the canonical installed filename; it does not change
-between manifest versions — the manifest's `sha256` is the durable identity.
-`--dict-path` is an advanced developer/recovery override; it still undergoes
-PART-A validation, but deliberately does not assert the active release identity.
+The installer downloads the release asset and verifies its pinned SHA-256 and
+byte count before installing it as `dictionary.sqlite`. The canonical installed
+filename does not change between manifest versions — the manifest's `sha256` is
+the durable identity. `--dict-path` is an advanced developer/recovery override;
+it still undergoes PART-A validation, but deliberately does not assert the
+active release identity.
 
 ## Updating the dictionary
 
@@ -263,9 +256,9 @@ a literal newline inside an Anki field).
 | Symptom                                  | Likely cause / fix                                          |
 | ---------------------------------------- | ----------------------------------------------------------- |
 | "repository virtualenv is missing"       | Run `python3 -m venv .venv && .venv/bin/pip install -e .` once. |
-| "dictionary asset is missing"            | Place a verified `dictionary.sqlite` at the default slot, or run `./wortlaut --install-dictionary` (once the production artefact is published). |
+| "dictionary asset is missing"            | Run `./wortlaut --install-dictionary`, or place a verified `dictionary.sqlite` at the default slot. |
 | "dictionary verification failed"        | The canonical file under `dictionary/` does not match the active v2 manifest. Remove the file and re-install it. |
-| "no verified dictionary and the manifest has no download_url" | The v2 production artefact is not yet published. Place `dictionary.sqlite` manually at the default slot. |
+| "no verified dictionary and the manifest has no download_url" | The selected manifest has no public download URL. Use the v2 manifest or place a verified `dictionary.sqlite` manually at the default slot. |
 | Browser does not open                    | Use `--no-browser` and visit <http://127.0.0.1:8000> yourself. |
 | Port 8000 already in use                 | Pass `--port 8001` (and update your browser bookmark). The same-origin Origin header is accepted at the new port automatically. |
 | `spacy` model not installed              | Run `.venv/bin/python -m spacy download de_core_news_md`.   |
