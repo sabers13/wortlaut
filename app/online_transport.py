@@ -39,21 +39,22 @@ from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 from app.online_manifest import TrustedDistribution
-from app.provider import ProviderNetworkError
+from app.provider import ProviderIntegrityError, ProviderNetworkError
 
 DEFAULT_GITHUB_REPO: str = "sabers13/wortlaut"
 DEFAULT_MAX_REDIRECTS: int = 3
 DEFAULT_TIMEOUT_SECONDS: float = 30.0
 
-# Hosts whose redirects are accepted by the GitHub Release redirect policy.
-# GitHub Release downloads redirect to ``objects.githubusercontent.com``;
-# allowing that and the bare ``github.com`` host keeps the trust chain
-# pinned to the approved distribution contract.
+# Narrow explicit GitHub Release redirect host set. GitHub Release
+# downloads resolve from ``github.com`` to GitHub-controlled CDN hosts;
+# only these exact hosts are accepted. No wildcard rule: an arbitrary
+# ``*.githubusercontent.com`` name is rejected unless it is one of the
+# exact approved hosts below.
 _APPROVED_REDIRECT_HOSTS: frozenset[str] = frozenset(
     {
         "github.com",
+        "release-assets.githubusercontent.com",
         "objects.githubusercontent.com",
-        "githubusercontent.com",
     }
 )
 
@@ -120,13 +121,13 @@ def _validate_url(url: str) -> _ApprovedUrl:
 def _initial_distribution_url(
     distribution: TrustedDistribution,
     asset_name: str,
-    github_repo: str,
 ) -> str:
     """Build the trusted GitHub Release download URL for one asset.
 
-    The URL is derived solely from the committed manifest and the
-    Wortlaut repository identity. The asset name comes from the
-    manifest entry; the caller cannot supply a URL or host.
+    The URL is derived solely from the committed manifest and the fixed
+    Wortlaut repository identity (``sabers13/wortlaut``). The asset name
+    comes from the manifest entry; the caller cannot supply a URL, host,
+    or repository.
     """
     if not isinstance(asset_name, str) or not asset_name:
         raise ProviderNetworkError("asset name must be a non-empty string")
@@ -140,24 +141,20 @@ def _initial_distribution_url(
     tag = distribution.release_tag
     if not tag or "/" in tag or ".." in tag:
         raise ProviderNetworkError(f"invalid release_tag: {tag!r}")
-    if not github_repo or ".." in github_repo or "\\" in github_repo:
-        raise ProviderNetworkError(f"invalid github_repo: {github_repo!r}")
-    # ``github_repo`` is ``owner/name`` — the slash is part of the
-    # canonical org/repo path and is allowed.
-    if github_repo.count("/") != 1:
-        raise ProviderNetworkError(
-            f"github_repo must be 'owner/name', got: {github_repo!r}"
-        )
-    url = f"https://github.com/{github_repo}/releases/download/{tag}/{asset_name}"
+    url = f"https://github.com/{DEFAULT_GITHUB_REPO}/releases/download/{tag}/{asset_name}"
     return url
 
 
 @dataclass(frozen=True, slots=True)
 class GitHubReleaseProductTransport:
-    """Trusted Product HTTP transport for the Wortlaut GitHub Release."""
+    """Trusted Product HTTP transport for the Wortlaut GitHub Release.
+
+    The repository identity is fixed to ``sabers13/wortlaut`` internally;
+    it is not a configurable field, so no caller/browser/API can
+    substitute another repository.
+    """
 
     distribution: TrustedDistribution
-    github_repo: str = DEFAULT_GITHUB_REPO
     max_redirects: int = DEFAULT_MAX_REDIRECTS
     timeout: float = DEFAULT_TIMEOUT_SECONDS
     opener: Any | None = None
@@ -171,9 +168,7 @@ class GitHubReleaseProductTransport:
         if asset is None or not hasattr(asset, "name"):
             raise ProviderNetworkError("shard request missing asset name")
         asset_name = str(asset.name)
-        url = _initial_distribution_url(
-            self.distribution, asset_name, self.github_repo
-        )
+        url = _initial_distribution_url(self.distribution, asset_name)
         try:
             return self._fetch_with_redirects(url)
         except ProviderNetworkError:
@@ -274,22 +269,47 @@ class NoHTTPHandler(urllib.request.HTTPHandler):
 
 
 class _ApprovedRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Validate every redirect target before delegating to the opener."""
+    """Disable automatic redirect following in the production opener.
+
+    The handler re-raises the 3xx response as :class:`urllib.error.HTTPError`
+    so that :meth:`GitHubReleaseProductTransport._fetch_recursive` receives
+    it and runs the SAME manual redirect-validation state machine as the
+    injected test path: extract ``Location``, validate the target against
+    the approved distribution contract, and follow it manually within the
+    explicit redirect limit. Automatic arbitrary following is disabled;
+    validation is never bypassed.
+    """
+
+    def _reraise_as_http_error(
+        self, req: Any, fp: Any, code: Any, msg: Any, headers: Any
+    ) -> Any:
+        try:
+            url = req.get_full_url()
+        except Exception:
+            url = ""
+        if fp is not None:
+            close = getattr(fp, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+        raise urllib.error.HTTPError(url, code, msg, headers, None)
 
     def http_error_301(self, req: Any, fp: Any, code: Any, msg: Any, headers: Any) -> Any:  # noqa: ARG002
-        raise ProviderNetworkError("Product transport disables automatic 301 redirect")
+        return self._reraise_as_http_error(req, fp, code, msg, headers)
 
     def http_error_302(self, req: Any, fp: Any, code: Any, msg: Any, headers: Any) -> Any:  # noqa: ARG002
-        raise ProviderNetworkError("Product transport disables automatic 302 redirect")
+        return self._reraise_as_http_error(req, fp, code, msg, headers)
 
     def http_error_303(self, req: Any, fp: Any, code: Any, msg: Any, headers: Any) -> Any:  # noqa: ARG002
-        raise ProviderNetworkError("Product transport disables automatic 303 redirect")
+        return self._reraise_as_http_error(req, fp, code, msg, headers)
 
     def http_error_307(self, req: Any, fp: Any, code: Any, msg: Any, headers: Any) -> Any:  # noqa: ARG002
-        raise ProviderNetworkError("Product transport disables automatic 307 redirect")
+        return self._reraise_as_http_error(req, fp, code, msg, headers)
 
     def http_error_308(self, req: Any, fp: Any, code: Any, msg: Any, headers: Any) -> Any:  # noqa: ARG002
-        raise ProviderNetworkError("Product transport disables automatic 308 redirect")
+        return self._reraise_as_http_error(req, fp, code, msg, headers)
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,7 +348,6 @@ class _SeamResponse:
 def build_seam_transport(
     distribution: TrustedDistribution,
     *,
-    github_repo: str = DEFAULT_GITHUB_REPO,
     max_redirects: int = DEFAULT_MAX_REDIRECTS,
     opener: Any | None = None,
 ) -> GitHubReleaseProductTransport:
@@ -337,11 +356,12 @@ def build_seam_transport(
     The ``opener`` parameter is the Slice-12-ready seam described in
     Defect R5F: tests can inject a fake opener to exercise redirect
     policy and network failure paths. The production caller never
-    passes an opener — the default stdlib HTTPS opener is used.
+    passes an opener — the default stdlib HTTPS opener is used. The
+    repository identity is always the fixed Product constant; it cannot
+    be configured here.
     """
     return GitHubReleaseProductTransport(
         distribution=distribution,
-        github_repo=github_repo,
         max_redirects=max_redirects,
         opener=opener,
     )
@@ -353,19 +373,18 @@ def create_product_shard_cache(
     *,
     opener: Any | None = None,
     max_redirects: int = DEFAULT_MAX_REDIRECTS,
-    github_repo: str = DEFAULT_GITHUB_REPO,
 ) -> "Any":
     """Construct a :class:`ShardCache` wired to the trusted Product transport.
 
     The Slice 11 / Slice 12 entry point. The browser/API caller never
-    sees a URL, a manifest URL, or a redirect target — every shard
-    download flows through the Product trust boundary.
+    sees a URL, a manifest URL, a redirect target, or a repository
+    identity — every shard download flows through the Product trust
+    boundary fixed to ``sabers13/wortlaut``.
     """
     from app.online_cache import ShardCache
 
     transport = build_seam_transport(
         manifest.distribution,
-        github_repo=github_repo,
         max_redirects=max_redirects,
         opener=opener,
     )
@@ -378,15 +397,19 @@ def create_product_online_provider(
     *,
     opener: Any | None = None,
     max_redirects: int = DEFAULT_MAX_REDIRECTS,
-    github_repo: str = DEFAULT_GITHUB_REPO,
 ) -> "Any":
     """Construct an :class:`OnlineDictionaryProvider` against the Product trust path.
 
-    Downloads the membership filter through the trusted transport, then
-    returns the provider wired against the same :class:`ShardCache`.
-    Slice 12 does not need to know about redirect policy or the trust
-    contract.
+    Downloads the membership filter through the trusted transport,
+    verifies its exact manifest byte count and SHA-256 **before** the
+    provider can consume it, then returns the provider wired against the
+    same :class:`ShardCache`. Slice 12 does not need to know about
+    redirect policy or the trust contract. The repository identity is
+    fixed to ``sabers13/wortlaut`` and cannot be configured.
     """
+    from hashlib import sha256 as _sha256
+
+    from app.online_filter import BloomFilter
     from app.provider_online import OnlineDictionaryProvider
 
     cache = create_product_shard_cache(
@@ -394,12 +417,31 @@ def create_product_online_provider(
         cache_dir,
         opener=opener,
         max_redirects=max_redirects,
-        github_repo=github_repo,
     )
-    filter_asset = next(iter(manifest.filter_assets))
+    filter_assets = list(manifest.filter_assets)
+    if not filter_assets:
+        raise ProviderIntegrityError("manifest declares no membership filter asset")
+    filter_asset = filter_assets[0]
     filter_request = _filter_shard_request(manifest, filter_asset)
     transport = cache._transport
     filter_payload = transport(filter_request)
+    # Verify the membership filter against the committed manifest BEFORE
+    # the provider parses or uses it. Wrong size or digest is an
+    # integrity failure, never a dictionary miss; malformed Bloom bytes
+    # with a matching digest are still rejected by ``BloomFilter``.
+    if len(filter_payload) != filter_asset.byte_size:
+        raise ProviderIntegrityError(
+            "membership filter byte size mismatch: expected "
+            f"{filter_asset.byte_size} got {len(filter_payload)}"
+        )
+    if _sha256(filter_payload).hexdigest() != filter_asset.sha256:
+        raise ProviderIntegrityError("membership filter SHA-256 mismatch")
+    try:
+        BloomFilter.from_bytes(filter_payload)
+    except ValueError as exc:
+        raise ProviderIntegrityError(
+            f"membership filter payload is not a valid Bloom filter: {exc}"
+        ) from exc
     return OnlineDictionaryProvider(
         manifest=manifest,
         cache=cache,

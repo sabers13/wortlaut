@@ -121,6 +121,25 @@ class _PrivateSnapshot:
     sha256: str
 
 
+@dataclass(slots=True)
+class _InflightState:
+    """Single-flight state for one in-progress shard download.
+
+    The leader downloads, records either ``payload`` (success) or
+    ``error`` (failure, including pre-download budget rejection), then
+    signals ``event``. Waiters always wake: on success they receive a
+    lease with ``was_downloaded=False``; on failure they receive the
+    same structured failure the leader observed. ``waiters`` counts the
+    parties (leader plus waiters) still holding a reference; the last
+    party to leave removes the bookkeeping.
+    """
+
+    event: threading.Event
+    waiters: int = 0
+    payload: bytes | None = None
+    error: BaseException | None = None
+
+
 @dataclass
 class _StatsCounter:
     hits: int = 0
@@ -173,11 +192,29 @@ class ShardCache:
     bytes remain untouched on disk and the private snapshot is what the
     consumer reads.
 
-    Cache-miss downloads are single-flight per identity: a second
-    concurrent call against the same identity waits on the same future.
-    The first call sets ``was_downloaded=True``; waiters receive a
-    lease with ``was_downloaded=False``. Corruption quarantines and
-    refetches set ``was_downloaded=True`` for the recovery lease.
+    Cache-miss downloads are single-flight per identity: the first call
+    (the leader) performs the remote transfer while concurrent calls
+    against the same identity wait on the same event. The leader's lease
+    reports ``was_downloaded=True``; waiters receive leases with
+    ``was_downloaded=False`` because only the leader performed the
+    transfer. A leader failure (transport error, validation error, or
+    pre-download budget rejection) always signals the event, so every
+    waiter wakes with the same structured failure instead of blocking
+    forever. Corruption quarantines and refetches set
+    ``was_downloaded=True`` for the recovery lease.
+
+    An optional ``before_download`` hook runs for the single-flight
+    leader immediately before the transport is invoked (and before a
+    corruption refetch). It may raise to reject the download before any
+    network transfer; the rejection is broadcast to waiters like any
+    other leader failure and the transport is never called.
+
+    :meth:`clear` serializes cache mutation against new acquisitions and
+    in-flight downloads: it blocks relevant new leases while active,
+    waits for in-flight downloads to finish, removes the canonical
+    verified files (so no pre-clear install can repopulate the cache
+    afterward), then wakes waiters. Active immutable private leases
+    remain usable throughout.
     """
 
     def __init__(
@@ -196,12 +233,12 @@ class ShardCache:
             MappingProxyType(dict(expected_sizes)) if expected_sizes else MappingProxyType({})
         )
         self._structure_validator = structure_validator or _default_structure_validator
-        self._inflight: dict[ShardIdentity, threading.Event] = {}
-        self._inflight_payload: dict[ShardIdentity, bytes] = {}
-        self._inflight_was_download: dict[ShardIdentity, bool] = {}
-        self._inflight_waiters: dict[ShardIdentity, int] = {}
+        self._inflight: dict[ShardIdentity, _InflightState] = {}
         self._lease_to_id: dict[ShardLease, int] = {}
         self._lock = threading.Lock()
+        self._clear_cond = threading.Condition(self._lock)
+        self._clearing = False
+        self._active_downloads = 0
         self._lock_serialise = threading.Lock()
         self._stats = _StatsCounter()
         self._leases: dict[int, _PrivateSnapshot] = {}
@@ -218,7 +255,12 @@ class ShardCache:
         """Return a snapshot of the cache counters."""
         return self._stats.snapshot()
 
-    def lease(self, request: ShardRequest) -> ShardLease:
+    def lease(
+        self,
+        request: ShardRequest,
+        *,
+        before_download: Callable[[ShardIdentity], None] | None = None,
+    ) -> ShardLease:
         """Return an immutable verified lease for ``request``.
 
         On miss the cache downloads through ``transport``, verifies, and
@@ -229,15 +271,28 @@ class ShardCache:
         The returned lease's ``was_downloaded`` field is ``True`` only
         when this call performed an actual remote download (miss,
         corruption refetch, or clear-cache rebuild). Verified cached
-        reads and single-flight waiters see ``False``. The Online
-        provider uses that signal to charge its per-operation budget
-        against new remote lookup-shard downloads only.
+        reads see ``False``, and single-flight waiters that piggy-backed
+        on a concurrent leader download also see ``False`` — only the
+        leader reports ``True``. The Online provider uses that signal to
+        charge its per-operation budget against new remote lookup-shard
+        downloads only.
+
+        ``before_download`` runs only for the single-flight leader,
+        immediately before the transport is invoked (including before a
+        corruption refetch). If it raises, the transport is never called
+        and waiters receive the same failure.
         """
         if not isinstance(request, ShardRequest):
             raise TypeError("request must be a ShardRequest")
 
         if self._closed:
             raise ProviderIntegrityError("shard cache is closed")
+
+        # Serialize against an active clear: new acquisitions wait while
+        # clear owns the cache mutation.
+        with self._clear_cond:
+            while self._clearing:
+                self._clear_cond.wait()
 
         canonical_path = self._canonical_path(request.identity)
         # Validate the existing verified artifact first; treat corruption
@@ -248,12 +303,12 @@ class ShardCache:
             except ProviderIntegrityError:
                 self._stats.record_corruption()
                 self._quarantine(canonical_path)
-                return self._download_path(request)
+                return self._download_path(request, before_download)
             lease = self._install_lease(request, payload, was_downloaded=False)
             self._stats.record_hit()
             return lease
 
-        return self._download_path(request)
+        return self._download_path(request, before_download)
 
     def release(self, lease: ShardLease) -> None:
         """Release one lease and delete its private snapshot."""
@@ -273,28 +328,41 @@ class ShardCache:
         """Remove all canonical verified files under the cache root.
 
         Active leases remain valid and continue to point to their private
-        snapshots; only the canonical verified files are removed. A
-        concurrent ``lease`` call may proceed and acquire a fresh
-        canonical install.
+        snapshots; only the canonical verified files are removed.
+
+        Mutation is serialized: new acquisitions block at the lease gate
+        while clear is active, and clear waits for in-flight downloads to
+        finish before removing files — so a pre-clear in-flight canonical
+        install cannot silently repopulate the verified cache after clear
+        has completed. Waiters on the single-flight event are unaffected
+        (they wait on a per-identity event, not the mutation gate), so no
+        deadlock with single-flight is possible.
         """
-        with self._lock_serialise:
+        with self._clear_cond:
             self._stats.record_clear()
-            verified_dir = self._cache_dir / "verified"
-            if verified_dir.exists():
-                # Move the verified dir aside atomically to avoid races
-                # against active acquisitions, then unlink.
-                tmp: Path | None = self._cache_dir / "verified.delete"
-                if tmp is not None and tmp.exists():
-                    shutil.rmtree(tmp, ignore_errors=True)
-                try:
-                    assert tmp is not None
-                    os.replace(verified_dir, tmp)
-                except OSError:
-                    shutil.rmtree(verified_dir, ignore_errors=True)
-                    tmp = None
-                if tmp is not None:
-                    shutil.rmtree(tmp, ignore_errors=True)
-                verified_dir.mkdir(parents=True, exist_ok=True)
+            self._clearing = True
+            try:
+                while self._active_downloads > 0:
+                    self._clear_cond.wait()
+                verified_dir = self._cache_dir / "verified"
+                if verified_dir.exists():
+                    # Move the verified dir aside atomically to avoid races
+                    # against active acquisitions, then unlink.
+                    tmp: Path | None = self._cache_dir / "verified.delete"
+                    if tmp is not None and tmp.exists():
+                        shutil.rmtree(tmp, ignore_errors=True)
+                    try:
+                        assert tmp is not None
+                        os.replace(verified_dir, tmp)
+                    except OSError:
+                        shutil.rmtree(verified_dir, ignore_errors=True)
+                        tmp = None
+                    if tmp is not None:
+                        shutil.rmtree(tmp, ignore_errors=True)
+                    verified_dir.mkdir(parents=True, exist_ok=True)
+            finally:
+                self._clearing = False
+                self._clear_cond.notify_all()
 
     def close(self) -> None:
         """Idempotently close the cache. Active leases are invalidated."""
@@ -325,57 +393,86 @@ class ShardCache:
         self._structure_validator(_identity_for_asset(asset), payload, path)
         return payload
 
-    def _download_path(self, request: ShardRequest) -> ShardLease:
-        """Acquire a verified lease via the single-flight download path."""
+    def _download_path(
+        self,
+        request: ShardRequest,
+        before_download: Callable[[ShardIdentity], None] | None,
+    ) -> ShardLease:
+        """Acquire a verified lease via the single-flight download path.
+
+        The first caller for an identity becomes the leader and performs
+        the remote transfer; concurrent callers wait on the leader's
+        event. The leader's lease reports ``was_downloaded=True`` while
+        every waiter reports ``was_downloaded=False``. A leader failure
+        — transport error, validation error, or a ``before_download``
+        rejection — always signals the event, so every waiter wakes with
+        the same structured failure and no deadlock is possible.
+        """
         # Single-flight per identity. The inflight bookkeeping is
         # keyed by the request identity; concurrent calls to OTHER
         # identities must not overwrite this identity's bookkeeping.
         with self._lock:
-            inflight = self._inflight.get(request.identity)
-            if inflight is None:
-                inflight = threading.Event()
-                self._inflight[request.identity] = inflight
-                self._inflight_payload[request.identity] = b""
-                self._inflight_was_download[request.identity] = False
-                self._inflight_waiters[request.identity] = 0
+            state = self._inflight.get(request.identity)
+            if state is None:
+                state = _InflightState(event=threading.Event())
+                self._inflight[request.identity] = state
                 should_download = True
             else:
                 should_download = False
-            self._inflight_waiters[request.identity] += 1
+            state.waiters += 1
 
         if should_download:
             self._stats.record_miss()
+            with self._lock:
+                self._active_downloads += 1
             try:
+                # Budget/reservation hook: runs only for the leader,
+                # immediately before the transport, and before a
+                # corruption refetch. A rejection means zero transport.
+                if before_download is not None:
+                    before_download(request.identity)
                 payload = self._download_and_validate(request)
-            except Exception:
+            except BaseException as exc:
                 with self._lock:
-                    self._inflight.pop(request.identity, None)
-                    self._inflight_payload.pop(request.identity, None)
-                    self._inflight_was_download.pop(request.identity, None)
-                    self._inflight_waiters.pop(request.identity, None)
+                    state.payload = None
+                    state.error = exc
+                    state.event.set()
+                    self._active_downloads -= 1
+                    self._clear_cond.notify_all()
+                with self._lock:
+                    state.waiters -= 1
+                    if state.waiters <= 0:
+                        self._inflight.pop(request.identity, None)
                 raise
             with self._lock:
-                self._inflight_payload[request.identity] = payload
-                self._inflight_was_download[request.identity] = True
-                inflight.set()
-        else:
-            self._stats.record_miss()
-            inflight.wait()
+                state.payload = payload
+                state.error = None
+                state.event.set()
+                self._active_downloads -= 1
+                self._clear_cond.notify_all()
+            try:
+                return self._install_lease(request, payload, was_downloaded=True)
+            finally:
+                with self._lock:
+                    state.waiters -= 1
+                    if state.waiters <= 0:
+                        self._inflight.pop(request.identity, None)
 
+        self._stats.record_miss()
+        state.event.wait()
         with self._lock:
-            payload = self._inflight_payload.get(request.identity, b"")
-            was_downloaded = self._inflight_was_download.get(request.identity, False)
-            self._inflight_waiters[request.identity] -= 1
-            if self._inflight_waiters[request.identity] <= 0:
+            waited_payload = state.payload
+            waited_error = state.error
+            state.waiters -= 1
+            if state.waiters <= 0:
                 self._inflight.pop(request.identity, None)
-                self._inflight_payload.pop(request.identity, None)
-                self._inflight_was_download.pop(request.identity, None)
-                self._inflight_waiters.pop(request.identity, None)
-        if not payload:
+        if waited_error is not None:
+            raise waited_error
+        if not waited_payload:
             raise ProviderIntegrityError("shard download produced no payload")
-        # Only the first waiter observes a fresh download; subsequent
-        # single-flight waiters and verified re-reads both see False.
-        return self._install_lease(request, payload, was_downloaded=was_downloaded)
+        # Waiters piggy-back on the leader's transfer; only the leader
+        # observes a fresh download.
+        return self._install_lease(request, waited_payload, was_downloaded=False)
 
     def _download_and_validate(self, request: ShardRequest) -> bytes:
         payload = self._transport(request)

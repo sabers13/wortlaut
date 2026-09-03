@@ -164,10 +164,16 @@ class OnlineDictionaryProvider(DictionaryProvider):
 
         All provider reads executed within the ``with`` block share one
         budget. Reads outside the block fall back to a throwaway budget,
-        preserving the existing per-call API. Nested blocks do not reset
-        the budget: the closest enclosing block wins, and any read
-        without a contextvar falls back to a fresh budget.
+        preserving the existing per-call API. A nested ``operation()``
+        block does not reset the budget: it yields the SAME budget object
+        as the enclosing block, so downloads before, inside, and after
+        the nested block accumulate into one counter. Only the outermost
+        block creates, binds, and resets the budget.
         """
+        existing = _active_operation_budget.get()
+        if existing is not None:
+            yield existing
+            return
         budget = _Budget()
         token = _active_operation_budget.set(budget)
         try:
@@ -241,6 +247,9 @@ class OnlineDictionaryProvider(DictionaryProvider):
                 ).fetchone()
                 if row is None:
                     return None
+                # Populate the numeric cache identity map: a later
+                # numeric downstream operation resolves without a scan.
+                self._lemma_id_to_ref.setdefault(int(row[0]), lemma_semantic_ref)
                 return _row_to_lemma_entry(row)
         finally:
             self._cache.release(lease)
@@ -477,8 +486,15 @@ class OnlineDictionaryProvider(DictionaryProvider):
         ``sense_route`` row. The runtime fetches exactly that lookup
         shard, queries ``sense_route(sense_ref) -> lemma_ref``, and
         returns ``None`` if the sense_ref is unknown. No entry-family
-        scan occurs.
+        scan occurs. The lookup-family download shares the active
+        operation budget exactly like any other new lookup shard.
         """
+        return self._sense_route_with_budget(sense_ref, self._current_budget())
+
+    def _sense_route_with_budget(
+        self, sense_ref: str, budget: _Budget
+    ) -> tuple[str, str] | None:
+        """Resolve ``sense_ref`` charging one lookup identity to ``budget``."""
         if not isinstance(sense_ref, str) or not sense_ref:
             return None
         bucket = bucket256_v1(sense_ref)
@@ -491,7 +507,7 @@ class OnlineDictionaryProvider(DictionaryProvider):
             identity=ShardIdentity(family=SHARD_FAMILY_LOOKUP, bucket=bucket),
             asset=asset,
         )
-        lease = self._cache.lease(request)
+        lease = self._lease_with_budget(request, budget)
         try:
             with self._open_readonly(lease) as conn:
                 row = conn.execute(
@@ -639,8 +655,12 @@ class OnlineDictionaryProvider(DictionaryProvider):
     ) -> Sequence[CandidateLookup]:
         if not isinstance(query, str) or not query:
             return ()
-        if not self.filter.contains_query(query):
-            return ()
+        # No lemma-Bloom guard around the whole ladder: the filter
+        # covers authoritative LEMMA closure keys, not arbitrary surface
+        # forms, so a valid inflected form absent from the lemma Bloom
+        # must still reach the surface fallback. Exact-lemma lookup keeps
+        # its own lemma Bloom pruning internally; the surface fallback
+        # bypasses it.
         token = self.asset_token
         exact = self._lookup_exact_with_budget(query, budget=budget)
         source = exact
@@ -770,26 +790,24 @@ class OnlineDictionaryProvider(DictionaryProvider):
     def _lease_with_budget(
         self, request: ShardRequest, budget: _Budget
     ) -> ShardLease:
-        """Acquire a shard; charge the budget iff the cache actually downloaded.
+        """Acquire a shard; charge the budget before any new download.
 
         Entry / example shards are not counted against the per-operation
         lookup budget because the budget is on remote lookup downloads
         (ADR-0009: at most 32 new remote lookup-shard identities). The
-        charge happens based on the ``ShardLease.was_downloaded`` signal
-        set by the cache, not on a stale path-existence predicate —
-        that is what makes a corrupt refetch correctly count as a new
-        remote download while verified cached reads remain free.
+        charge runs as the cache's ``before_download`` reservation hook:
+        only the single-flight leader is charged, immediately before the
+        transport is invoked (and before a corruption refetch), so the
+        33rd distinct identity is rejected BEFORE any network transfer.
+        Verified cache hits never reach the hook and stay free; duplicate
+        identities in one operation charge once via budget deduplication;
+        single-flight waiters perform no download and are not charged.
         """
         if request.identity.family != SHARD_FAMILY_LOOKUP:
             return self._cache.lease(request)
-        lease = self._cache.lease(request)
-        try:
-            if lease.was_downloaded:
-                budget.charge(request.identity)
-            return lease
-        except BaseException:
-            self._cache.release(lease)
-            raise
+        return self._cache.lease(
+            request, before_download=lambda identity: budget.charge(identity)
+        )
 
     @staticmethod
     def _open_readonly(lease: ShardLease) -> Any:

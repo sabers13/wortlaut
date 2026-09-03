@@ -352,3 +352,320 @@ broadening of `tests/test_check_modules.py` was made.
   (unchanged).
 - clean worktree: `git status --short --untracked-files=all` empty
   after the final commit.
+
+## Final orchestrator pre-review correction
+
+Starting SHA:
+
+- `ac8cd5abee0e64344806203963768b4f43aa78ce`
+
+The primary orchestrator independently inspected the repaired Slice-11
+candidate and found fourteen bounded production defects that fixture
+tests did not expose. This correction repairs all of C1–C14 together.
+ADR-0009 is **ACCEPTED / FROZEN** and was not reopened.
+No production corpus, no production shards, and no GitHub Release
+action occurred (synthetic/tiny fixtures only).
+
+Orchestrator authorizations recorded here:
+
+- `app/online_transport.py` + `tests/test_online_transport.py` are now
+  explicitly orchestrator-authorized (independent Product network trust
+  boundary under the existing online-cache ownership unit; not a new
+  architectural module or dependency). They are retained, not inlined.
+- The prior `tests/test_check_modules.py` mechanical `18 -> 22`
+  module-count correction remains authorized; this correction makes no
+  further change to that file (module count is still 22).
+
+Stale-claim corrections to the previous repair section: the R5
+allowlist named a generic `githubusercontent.com` host (narrowed by
+C2); the redirect-json path was exercised only through the injected
+seam opener (production opener now shares the state machine per C1);
+R6 charged the budget after download via `was_downloaded` (replaced by
+the pre-download reservation hook per C5); the R7 text implied nested
+budgets were shared while `operation()` actually allocated a fresh
+budget per block (fixed per C8).
+
+### C1 — production redirect handling
+
+- Defect: the injected-opener tests raised `HTTPError` for redirects,
+  but the REAL default opener's `_ApprovedRedirectHandler` raised
+  `ProviderNetworkError` directly, so an ordinary GitHub Release 302
+  was rejected before the manual redirect validator saw the Location
+  target.
+- Implementation: `_ApprovedRedirectHandler` now re-raises each
+  301/302/303/307/308 as `urllib.error.HTTPError`, so the production
+  opener and the injected test path exercise the SAME manual
+  redirect-validation state machine in `_fetch_recursive`
+  (extract Location, validate, follow manually within the limit).
+  Automatic arbitrary following stays disabled.
+- Regression: `test_production_redirect_handler_surfaces_http_error`
+  (parametrized 301/302/303/307/308),
+  `test_default_opener_uses_approved_handlers`,
+  `test_production_opener_redirect_traverses_manual_validation`
+  (`github.com -> 302 -> release-assets.githubusercontent.com -> 200`
+  through the real `_build_default_opener()` stack with only the HTTPS
+  protocol handler scripted),
+  `test_production_opener_rejects_attacker_redirect_without_follow`.
+- Result: pass; no public network calls.
+
+### C2 — approved GitHub Release CDN host set
+
+- Defect: the allowlist permitted a generic `githubusercontent.com`
+  and omitted the current Release CDN host
+  `release-assets.githubusercontent.com`.
+- Implementation: narrow explicit set —
+  `github.com`, `release-assets.githubusercontent.com`,
+  `objects.githubusercontent.com`. No wildcard rule.
+- Regression: `test_release_assets_cdn_host_is_accepted`,
+  `test_objects_cdn_host_is_accepted`,
+  `test_bare_githubusercontent_host_is_rejected`,
+  `test_arbitrary_githubusercontent_subdomain_is_rejected`
+  (plus the pre-existing arbitrary-external-host rejection).
+- Result: pass.
+
+### C3 — fixed Product repository identity
+
+- Defect: `GitHubReleaseProductTransport` stored a caller-supplied
+  `github_repo`, weakening the fixed Product trust boundary.
+- Implementation: the `github_repo` field and all `github_repo`
+  parameters (`GitHubReleaseProductTransport`,
+  `build_seam_transport`, `create_product_shard_cache`,
+  `create_product_online_provider`) are removed. The initial Release
+  URL always uses the internal constant `sabers13/wortlaut`. No
+  test-only substitution helper was needed, so none was added.
+- Regression: `test_product_repository_identity_is_fixed`
+  (dataclass fields + public signatures + exact initial URL),
+  `test_caller_cannot_configure_product_repository`
+  (`attacker/example` rejected with `TypeError` before any I/O).
+- Result: pass.
+
+### C4 — membership filter verified before use
+
+- Defect: `create_product_online_provider` passed downloaded filter
+  bytes to `BloomFilter.from_bytes()` without checking manifest
+  `byte_size` / SHA-256.
+- Implementation: exact byte-count match, then exact SHA-256 match
+  (`ProviderIntegrityError` otherwise), then Bloom serialization
+  validation — before the provider can consume the bytes.
+- Regression: `test_product_filter_wrong_sha_is_rejected`,
+  `test_product_filter_wrong_size_is_rejected`,
+  `test_product_filter_malformed_bloom_is_rejected`; the valid-payload
+  path stays covered by
+  `test_create_product_online_provider_uses_trusted_transport`
+  (updated to a size/SHA-matching manifest).
+- Result: pass. Network failures still propagate as structured errors,
+  never dictionary misses.
+
+### C5 — pre-download budget rejection
+
+- Defect: `_lease_with_budget` downloaded first and charged afterward,
+  so the 33rd lookup shard was fetched before
+  `online_dictionary_budget_exceeded`.
+- Implementation: `ShardCache.lease()` accepts a `before_download`
+  hook that runs only for the single-flight leader immediately before
+  the transport (including before corruption refetch) and may raise.
+  The provider passes `budget.charge` as the hook; verified hits never
+  reach it, duplicates dedupe, waiters are not charged.
+- Regression: `test_before_download_hook_rejects_before_transport`
+  and `test_before_download_hook_runs_only_for_leader` (cache level);
+  `test_33rd_lookup_download_rejected_before_transport` (counting
+  transport: 32 invoked, 33rd raises, count stays 32).
+- Result: pass.
+
+### C6 — single-flight failure / waiter semantics
+
+- Defect: a leader failure removed bookkeeping without signaling the
+  event (waiters could block forever), and all waiters shared the
+  leader's `was_downloaded=True`.
+- Implementation: `_InflightState` result model (event + payload /
+  error + waiter refcount). Leader success: leader `True`, waiters
+  `False`. Leader failure (including budget rejection): the event is
+  ALWAYS signaled, every waiter wakes with the same structured
+  failure, bookkeeping clears with the last party.
+- Regression:
+  `test_single_flight_leader_failure_wakes_all_waiters` (bounded
+  joins; same `ProviderIntegrityError` class for all 5 parties;
+  recovery lease afterwards), and the existing concurrency test now
+  asserts exactly one `was_downloaded=True` lease.
+- Result: pass.
+
+### C7 — sense_route shares the lookup budget
+
+- Defect: `sense_route()` leased lookup shards outside the
+  32-download budget.
+- Implementation: `_sense_route_with_budget(sense_ref, budget)`;
+  public `sense_route()` uses `_current_budget()`. Nested readers
+  (`meanings_for_sense`, `compound_components`,
+  `_select_component_text`) route through it and share the active
+  operation budget.
+- Regression:
+  `test_sense_route_shares_active_operation_budget` (uncached = one
+  identity + one transport call; cached = zero),
+  `test_sense_route_can_be_rejected_as_33rd_identity_before_transport`
+  (count stays 32).
+- Result: pass.
+
+### C8 — nested operation() does not reset the budget
+
+- Defect: `operation()` always allocated a fresh `_Budget`, so a
+  nested block reset the counter.
+- Implementation: a nested `operation()` yields the SAME active
+  budget object; only the outermost block creates/binds/resets it
+  (still a `ContextVar`, never process-global).
+- Regression: `test_nested_operation_yields_same_budget_object`
+  (`inner is outer`; spend monotonic across before/inside/after).
+- Result: pass.
+
+### C9 — surface-form lookup shards are partitioned, not duplicated
+
+- Defect: `_write_lookup_shard()` received the GLOBAL
+  `surface_by_lemma` map and wrote every surface form into every one
+  of the 256 lookup shards.
+- Implementation: `_partition_lookup_shards()` now returns
+  `(lemma_partitions, surface_partitions, sense_route_partitions)`;
+  each distinct `(form, lemma_id)` row lands ONLY in
+  `bucket256_v1(form)` ∪ `bucket256_v1(sqlite_ascii_lower(form))`.
+  Lemma placement already covers those buckets, and
+  `_validate_lookup_surface_closure()` proves the join is locally
+  closed per bucket. Only the current bucket's rows reach the writer.
+- Regression:
+  `test_lookup_surface_rows_partitioned_by_closure_not_duplicated`
+  (partition total == physical rows across all 256 written shards ==
+  expected closure sum, not `count * 256`); Local/Online
+  surface-form differential parity retained (42-test suite green).
+- Result: pass.
+
+### C10 — no production-scale quadratic builder scans
+
+- Defect: repeated `next(... for lemma_row in lemmas ...)` /
+  `next(... for sense ... in senses ...)` inside sense loops
+  (O(S·L) / O(S²)).
+- Implementation: precomputed `lemma_ref_by_id` and
+  `sense_owner_by_ref` maps with O(1) lookup; validation now also
+  explicitly proves `actual_bucket == bucket256_v1(sense_ref)` per
+  partitioned row instead of trusting the producer. Expected
+  pre-write partition complexity is approximately linear in the
+  authoritative rows. No nested full-list `next()` scans remain.
+- Regression:
+  `test_lookup_partition_and_validation_scale_to_thousands_of_rows`
+  (2000 lemmas/senses/surface rows through partition + both
+  validations; no wall-clock threshold).
+- Result: pass.
+
+### C11 — example_lemma closure validation
+
+- Defect: lemma ownership was verified but dangling
+  `example_lemma.example_id` references were not.
+- Implementation: `_partition_entry_shards()` takes the authoritative
+  `examples` rows, builds the example-id set, and rejects unknown
+  `example_id` values before writing. Routing stays `id % 64`.
+- Regression: `test_entry_partition_rejects_dangling_example_id`
+  (negative + valid-join positive).
+- Result: pass.
+
+### C12 — candidate_lookup does not Bloom-prune surface forms
+
+- Defect: `_candidate_lookup_with_budget()` returned `()` for any
+  Bloom-negative query before the surface fallback, but the Bloom
+  holds lemma closure keys — valid inflected forms were pruned.
+- Implementation: the global lemma-Bloom guard is removed. Exact
+  lookup keeps its own lemma pruning; the surface fallback bypasses
+  the filter.
+- Regression:
+  `test_candidate_lookup_resolves_surface_form_absent_from_lemma_bloom`
+  (`Häuser`: not a lemma, Bloom-negative, Local-resolvable,
+  Online==Local candidate).
+- Result: pass.
+
+### C13 — lemma_for_ref observes numeric identity
+
+- Defect: `lemma_for_ref()` materialized the row without populating
+  `lemma_id -> lemma_ref`, so a fresh numeric downstream read missed.
+- Implementation: populate the map before returning the entry.
+- Regression: `test_lemma_for_ref_populates_numeric_identity`
+  (cold miss premise, then numeric `senses_for_lemma` succeeds with
+  only entry-family acquisitions — no scan).
+- Result: pass.
+
+### C14 — clear-cache mutation serialization
+
+- Defect: `clear()` did not cover the canonical install path, so a
+  pre-clear in-flight install could repopulate the verified cache
+  after clear completed.
+- Implementation: mutation gate (`_clearing` + `_clear_cond` over the
+  inflight lock + `_active_downloads` counter). New acquisitions wait
+  while clear is active; clear waits for in-flight downloads to
+  finish, removes canonical files, then wakes waiters. Private leases
+  stay valid; single-flight waiters block on the per-identity event,
+  never on the gate, so no deadlock.
+- Regression:
+  `test_clear_waits_for_inflight_download_and_blocks_new_leases`
+  (clear waits; new lease blocks; bounded joins; pre-clear install
+  absent afterwards; post-clear download normal; repeat download
+  normal); pre-existing active-lease/clear tests retained.
+- Result: pass.
+
+### Final validation (this correction)
+
+- `git diff --check` -> clean.
+- `.venv/bin/ruff check .` -> All checks passed!
+- `.venv/bin/mypy --strict .` -> Success: no issues found in 60
+  source files.
+- `.venv/bin/python tools/check_agents.py` -> AGENTS checks passed
+  (R1, R3, R6, R7, R12, R13).
+- `.venv/bin/python tools/check_modules.py` -> MODULES validation
+  passed: 22 modules.
+- Focused suites:
+  - `tests/test_online_transport.py` -> 32 passed (15 pre-existing
+    incl. 1 updated for C4 manifest matching + 17 new C1–C4).
+  - `tests/test_online_cache.py` -> 15 passed (11 pre-existing incl.
+    1 extended waiter-flag assertion + 4 new C5/C6/C14).
+  - `tests/test_provider_differential.py` -> 42 passed (36
+    pre-existing + 6 new C5/C7/C8/C12/C13).
+  - `tests/test_build_online_dictionary.py` -> 9 passed (6
+    pre-existing + 3 new C9/C10/C11).
+  - `tests/test_online_manifest.py` -> 22 passed (unchanged).
+  - `tests/test_routing_equivalence.py` -> 30 passed (unchanged).
+- `make gate` final result: PASS — `971 passed, 120 warnings`
+  (540.26s), plus `check_agents` PASS and `check_modules` PASS
+  (22 modules).
+
+### Scope (this correction)
+
+Modified (all within the correction allowlist):
+
+- `app/online_transport.py` — production redirect handler re-raises
+  HTTPError into the manual state machine; narrow 3-host CDN set;
+  fixed `sabers13/wortlaut` identity (no `github_repo` seam);
+  manifest size/SHA/Bloom verification for the membership filter.
+- `app/online_cache.py` — `before_download` reservation hook;
+  `_InflightState` success/failure broadcast with leader-only
+  `was_downloaded`; clear mutation gate.
+- `app/provider_online.py` — budget hook in `_lease_with_budget`;
+  `_sense_route_with_budget`; nested `operation()` yields the same
+  object; no global Bloom guard on the candidate ladder;
+  `lemma_for_ref` populates the numeric map.
+- `tools/build_online_dictionary.py` — per-bucket surface
+  partitions + closure validation; linear-map sense partitioning and
+  bucket-explicit validation; `example_lemma` closure validation.
+- `tests/test_online_transport.py`, `tests/test_online_cache.py`,
+  `tests/test_provider_differential.py`,
+  `tests/test_build_online_dictionary.py` — regression coverage for
+  C1–C14 plus mechanical signature co-changes.
+- `tasks/slice-11.report.md` — this section.
+
+Not modified: `app/api.py`, startup/UI, Slice-12 files, ADRs,
+governance, `release/README.md` (contract wording still accurate),
+`release/dictionary-online-manifest-v2.json`,
+`MODULES.toml`, `tests/test_check_modules.py`, `app/routing.py`,
+`app/online_manifest.py`, `app/online_filter.py`,
+`tests/test_routing_equivalence.py`, `tests/test_online_manifest.py`.
+
+### Production state (this correction)
+
+```
+NO PRODUCTION ONLINE SHARDS WERE BUILT.
+NO GITHUB RELEASE WAS CREATED OR MODIFIED.
+NO BUILDER RUN AGAINST THE 945 MB PRODUCTION DICTIONARY OCCURRED.
+MAIN WAS NOT MODIFIED.
+```

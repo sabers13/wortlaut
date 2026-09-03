@@ -208,7 +208,9 @@ def test_lookup_partition_assigns_every_lemma_to_expected_buckets() -> None:
     ]
     surface_forms: list[tuple[str, int]] = []
     senses: list[tuple[int, int, str, str, str, int, str | None, str | None, str | None]] = []
-    partitions, _sense_route = _partition_lookup_shards(lemmas, surface_forms, senses)
+    partitions, _surface, _sense_route = _partition_lookup_shards(
+        lemmas, surface_forms, senses
+    )
     targets_haus = {bucket256_v1("Haus"), bucket256_v1(_sqlite_ascii_lower("Haus"))}
     targets_see = {bucket256_v1("See"), bucket256_v1(_sqlite_ascii_lower("See"))}
     covered_haus = {bucket for bucket, rows in partitions.items() for r in rows if r[0] == 1}
@@ -325,3 +327,137 @@ def test_manifest_hash_is_deterministic_across_writes(tmp_path: Path) -> None:
     assert manifest_hash(parse_manifest(one.read_text())) == manifest_hash(
         parse_manifest(two.read_text())
     )
+
+
+# ---------------------------------------------------------------------------
+# Final pre-review correction regressions (C9, C10, C11)
+# ---------------------------------------------------------------------------
+
+
+def test_lookup_surface_rows_partitioned_by_closure_not_duplicated() -> None:
+    """Each surface row lands ONLY in its own closure buckets (C9).
+
+    Total ``surface_form`` rows across all 256 lookup shards must equal
+    the sum of distinct closure buckets per authoritative form — not
+    ``authoritative_surface_count * 256``.
+    """
+    from tools.build_online_dictionary import (
+        _partition_lookup_shards,
+        _validate_lookup_surface_closure,
+        _write_lookup_shard,
+    )
+
+    lemmas = [
+        (1, "lemma:v1:haus", "Haus", "NOUN", "das", 1, "wiktionary", "CC BY-SA 4.0"),
+        (2, "lemma:v1:see_der", "See", "NOUN", "der", 2, "wiktionary", "CC BY-SA 4.0"),
+        (3, "lemma:v1:anrufen", "anrufen", "VERB", None, 4, "wiktionary", "CC BY-SA 4.0"),
+    ]
+    surface_forms = [("Häuser", 1), ("Seen", 2), ("rief an", 3), ("HAUSFORM", 1)]
+    senses: list[tuple[int, int, str, str, str, int, str | None, str | None, str | None]] = []
+    lemma_parts, surface_parts, _routes = _partition_lookup_shards(
+        lemmas, surface_forms, senses
+    )
+    distinct = sorted({(form, lemma_id) for form, lemma_id in surface_forms})
+    expected = sum(
+        len({bucket256_v1(form), bucket256_v1(_sqlite_ascii_lower(form))})
+        for form, _ in distinct
+    )
+    # Sanity: a 256x duplication would be two orders of magnitude larger.
+    assert expected < len(distinct) * 256
+    assert sum(len(rows) for rows in surface_parts.values()) == expected
+    # The surface_form -> lemma join is locally closed per bucket.
+    _validate_lookup_surface_closure(lemma_parts, surface_parts)
+    # Physically write all 256 shards and count the emitted rows.
+    total_rows = 0
+    for bucket in range(256):
+        conn = sqlite3.connect(":memory:")
+        try:
+            _write_lookup_shard(
+                conn,
+                bucket,
+                lemma_parts.get(bucket, []),
+                surface_parts.get(bucket, []),
+                (),
+            )
+            total_rows += int(
+                conn.execute("SELECT COUNT(*) FROM surface_form").fetchone()[0]
+            )
+        finally:
+            conn.close()
+    assert total_rows == expected
+
+
+def test_lookup_partition_and_validation_scale_to_thousands_of_rows() -> None:
+    """Partitioning/validation stay correct on thousands of rows (C10).
+
+    No wall-clock threshold is asserted: the precomputed maps keep the
+    pre-write partition approximately linear in the authoritative rows,
+    where nested full-list scans were quadratic.
+    """
+    from tools.build_online_dictionary import (
+        _partition_lookup_shards,
+        _validate_lookup_surface_closure,
+        _validate_sense_route_partitions,
+    )
+
+    count = 2000
+    lemmas = [
+        (
+            i,
+            f"lemma:v1:word_{i}",
+            f"Word{i}",
+            "NOUN",
+            "das",
+            i,
+            "wiktionary",
+            "CC BY-SA 4.0",
+        )
+        for i in range(1, count + 1)
+    ]
+    surface_forms = [(f"Word{i}-form", i) for i in range(1, count + 1)]
+    senses = [
+        (
+            i,
+            i,
+            f"sense:v1:word_{i}_0",
+            "ns",
+            f"ref:{i}",
+            0,
+            None,
+            "wiktionary",
+            "CC BY-SA 4.0",
+        )
+        for i in range(1, count + 1)
+    ]
+    lemma_parts, surface_parts, routes = _partition_lookup_shards(
+        lemmas, surface_forms, senses
+    )
+    lemma_refs = {int(row[0]): str(row[1]) for row in lemmas}
+    _validate_sense_route_partitions(
+        senses=senses,
+        sense_route_partitions=routes,
+        lemma_refs_by_id=lemma_refs,
+    )
+    _validate_lookup_surface_closure(lemma_parts, surface_parts)
+    assert sum(len(rows) for rows in routes.values()) == count
+    assert sum(len(rows) for rows in lemma_parts.values()) >= count
+    assert sum(len(rows) for rows in surface_parts.values()) >= count
+
+
+def test_entry_partition_rejects_dangling_example_id() -> None:
+    """``example_lemma`` rows with no authoritative example fail closed (C11)."""
+    from tools.build_online_dictionary import _partition_entry_shards
+
+    lemmas = [(1, "lemma:v1:haus", "Haus", "NOUN", "das", 1)]
+    senses = [(1, 1, "sense:v1:haus_0", "ns", "ref:1", 0, None, None, None)]
+    meanings = [(1, 1, "en", "translation", 0, "house", "wiktionary", "CC BY-SA 4.0")]
+    examples = [(1, "Das Haus ist groß.", "The house is big.", None, None, None, 5, 0)]
+    with pytest.raises(RuntimeError, match="unknown example_id"):
+        _partition_entry_shards(
+            lemmas, senses, meanings, [], [(1, 999)], examples
+        )
+    # The valid join still partitions cleanly.
+    partitions = _partition_entry_shards(
+        lemmas, senses, meanings, [], [(1, 1)], examples
+    )
+    assert sum(len(state["example_lemma"]) for state in partitions.values()) == 1

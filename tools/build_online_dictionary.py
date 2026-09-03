@@ -444,52 +444,55 @@ def _validate_sense_route_partitions(
     """Validate that every authoritative ``sense_ref`` is bucket-closed.
 
     Each authoritative sense must appear in exactly one sense_route
-    bucket, the bucket must equal ``bucket256_v1(sense_ref)``, and the
-    routed ``lemma_ref`` must equal the lemma's authoritative
-    ``semantic_ref``. Missing, extra, or misrouted sense_refs are fatal
-    builder errors so the runtime can rely on the index.
+    bucket, the bucket must equal ``bucket256_v1(sense_ref)`` (checked
+    explicitly against the actual partition bucket, not assumed from the
+    producer), and the routed ``lemma_ref`` must equal the lemma's
+    authoritative ``semantic_ref``. Missing, extra, misrouted, or
+    mis-bucketed sense_refs are fatal builder errors so the runtime can
+    rely on the index.
+
+    Runs in approximately linear time in the number of authoritative
+    rows: two precomputed maps (``sense_owner_by_ref`` and the routed
+    map) replace the previous nested full-list ``next()`` scans, which
+    were O(S*L) and O(S^2) on the real corpus.
     """
-    expected: dict[str, int] = {}
+    sense_owner_by_ref: dict[str, int] = {}
     for sense_id, lemma_id, sense_ref, _, _, _, _, _, _ in senses:
         if not isinstance(sense_ref, str) or not sense_ref:
             raise RuntimeError(f"sense_id={sense_id} has empty sense_ref")
-        if sense_ref in expected:
+        if sense_ref in sense_owner_by_ref:
             raise RuntimeError(f"duplicate sense_ref={sense_ref!r}")
-        expected[sense_ref] = bucket256_v1(sense_ref)
-    routed: dict[str, str] = {}
+        sense_owner_by_ref[sense_ref] = int(lemma_id)
+    routed: dict[str, tuple[str, int]] = {}
     for bucket, rows in sense_route_partitions.items():
         for sense_ref, lemma_ref in rows:
             if sense_ref in routed:
                 raise RuntimeError(
                     f"duplicate sense_route bucket={bucket} sense_ref={sense_ref!r}"
                 )
-            routed[sense_ref] = lemma_ref
-    missing = set(expected.keys()) - set(routed.keys())
+            actual_bucket = bucket256_v1(str(sense_ref))
+            if actual_bucket != int(bucket):
+                raise RuntimeError(
+                    f"sense_route sense_ref={sense_ref!r} partitioned into "
+                    f"bucket {bucket} but bucket256_v1 gives {actual_bucket}"
+                )
+            routed[sense_ref] = (lemma_ref, int(bucket))
+    missing = set(sense_owner_by_ref.keys()) - set(routed.keys())
     if missing:
         sample = sorted(missing)[:5]
         raise RuntimeError(
             f"sense_route missing for sense_refs: {sample} "
             f"(and {len(missing) - len(sample)} more)"
         )
-    extra = set(routed.keys()) - set(expected.keys())
+    extra = set(routed.keys()) - set(sense_owner_by_ref.keys())
     if extra:
         sample = sorted(extra)[:5]
         raise RuntimeError(
             f"sense_route has unexpected sense_refs: {sample} "
             f"(and {len(extra) - len(sample)} more)"
         )
-    for sense_ref, expected_bucket in expected.items():
-        lemma_ref = routed[sense_ref]
-        owner_lemma_id = next(
-            (
-                int(lemma_id)
-                for sense_id, lemma_id, ref, _, _, _, _, _, _ in senses
-                if ref == sense_ref
-            ),
-            None,
-        )
-        if owner_lemma_id is None:
-            raise RuntimeError(f"sense_ref={sense_ref!r} has no authoritative sense row")
+    for sense_ref, owner_lemma_id in sense_owner_by_ref.items():
+        lemma_ref, expected_bucket = routed[sense_ref]
         if lemma_refs_by_id.get(owner_lemma_id) != lemma_ref:
             raise RuntimeError(
                 f"sense_route bucket={expected_bucket} sense_ref={sense_ref!r} "
@@ -502,14 +505,25 @@ def _partition_lookup_shards(
     lemmas: Sequence[tuple[Any, ...]],
     surface_forms: Sequence[tuple[str, int]],
     senses: Sequence[tuple[int, int, str, str, str, int, str | None, str | None, str | None]],
-) -> tuple[dict[int, list[tuple[Any, ...]]], dict[int, list[tuple[str, str]]]]:
+) -> tuple[
+    dict[int, list[tuple[Any, ...]]],
+    dict[int, list[tuple[str, int]]],
+    dict[int, list[tuple[str, str]]],
+]:
     """Partition lookup-shard rows into 256 buckets using the closure rule.
 
     Returns:
 
     * ``lemma_partitions``: ``bucket -> lemma_rows`` placed for every
       authoritative lemma by ``bucket256_v1(X)`` union
-      ``bucket256_v1(sqlite_ascii_lower(X))``.
+      ``bucket256_v1(sqlite_ascii_lower(X))`` (plus the surface-form
+      closure buckets, so the surface_form -> lemma join stays locally
+      closed in every bucket).
+    * ``surface_partitions``: ``bucket -> (form, lemma_id)`` rows where
+      each authoritative surface row appears ONLY in the union of
+      ``bucket256_v1(form)`` and
+      ``bucket256_v1(sqlite_ascii_lower(form))`` (deduplicated) — never
+      duplicated into all 256 buckets.
     * ``sense_route_partitions``: ``bucket -> (sense_ref, lemma_ref)`` rows
       indexed by ``bucket256_v1(sense_ref)``. The sense_route is the
       single bucket-closed routing table that replaces the cross-family
@@ -517,6 +531,10 @@ def _partition_lookup_shards(
 
     The full lemma row tuple is preserved; the lookup-shard writer reads
     only the columns it needs.
+
+    Runs in approximately linear time in the number of authoritative
+    rows: ``lemma_ref_by_id`` is built once and sense ownership resolves
+    by O(1) map lookup instead of nested full-list ``next()`` scans.
     """
     surface_by_lemma: dict[int, list[tuple[int, str]]] = {}
     for form, lemma_id in surface_forms:
@@ -533,19 +551,34 @@ def _partition_lookup_shards(
         for bucket in targets:
             lemma_partitions.setdefault(bucket, []).append(row)
 
+    # Surface-form partitions: each distinct authoritative (form,
+    # lemma_id) row lands only in its own closure buckets.
+    surface_partitions: dict[int, list[tuple[str, int]]] = {}
+    seen_surface_pairs: set[tuple[str, int]] = set()
+    for form, lemma_id in surface_forms:
+        pair = (str(form), int(lemma_id))
+        if pair in seen_surface_pairs:
+            continue
+        seen_surface_pairs.add(pair)
+        closure_buckets = {
+            bucket256_v1(pair[0]),
+            bucket256_v1(_sqlite_ascii_lower(pair[0])),
+        }
+        for bucket in closure_buckets:
+            surface_partitions.setdefault(bucket, []).append(pair)
+
+    lemma_ref_by_id: dict[int, str] = {
+        int(row[0]): str(row[1]) for row in lemmas
+    }
     sense_route_partitions: dict[int, list[tuple[str, str]]] = {}
     seen_routes: set[str] = set()
     for sense_row in senses:
         sense_id, lemma_id, sense_ref, _, _, _, _, _, _ = sense_row
-        lemma_bucket_row: tuple[Any, ...] | None = next(
-            (lemma_row for lemma_row in lemmas if int(lemma_row[0]) == int(lemma_id)),
-            None,
-        )
-        if lemma_bucket_row is None:
+        lemma_ref = lemma_ref_by_id.get(int(lemma_id))
+        if lemma_ref is None:
             raise RuntimeError(
                 f"sense_id={sense_id} references unknown lemma_id={lemma_id}"
             )
-        lemma_ref = str(lemma_bucket_row[1])
         bucket = bucket256_v1(str(sense_ref))
         if not 0 <= bucket < LOOKUP_FAMILY_SIZE:
             raise RuntimeError(
@@ -555,7 +588,7 @@ def _partition_lookup_shards(
             raise RuntimeError(f"duplicate sense_route for sense_ref={sense_ref!r}")
         seen_routes.add(str(sense_ref))
         sense_route_partitions.setdefault(bucket, []).append((str(sense_ref), lemma_ref))
-    return lemma_partitions, sense_route_partitions
+    return lemma_partitions, surface_partitions, sense_route_partitions
 
 
 def _partition_entry_shards(
@@ -564,6 +597,7 @@ def _partition_entry_shards(
     meanings: Sequence[tuple[int, int, str, str, int, str, str, str]],
     surface_forms: Sequence[tuple[str, int]],
     example_lemma: Sequence[tuple[int, int]],
+    examples: Sequence[tuple[Any, ...]],
 ) -> dict[int, dict[str, list[Any]]]:
     """Partition lemma-driven rows by ``bucket256_v1(lemma_semantic_ref)``.
 
@@ -571,6 +605,11 @@ def _partition_entry_shards(
     to those senses, the surface forms and the ``example_lemma`` join.
     It deliberately does **not** carry the example payload: example rows
     live in the example family keyed by ``example.id % 64``.
+
+    Every ``example_lemma.example_id`` is validated against the
+    authoritative example-id set before writing; a dangling reference is
+    a fatal builder error. Example routing itself stays
+    ``example.id % 64``.
     """
     buckets: dict[int, dict[str, list[Any]]] = {}
     lemma_bucket: dict[int, int] = {}
@@ -610,11 +649,16 @@ def _partition_entry_shards(
         if surface_bucket is None:
             raise RuntimeError(f"surface_form references unknown lemma_id={lemma_id}")
         buckets[surface_bucket]["surface_forms"].append((form, lemma_id))
+    example_ids = {int(row[0]) for row in examples}
     for lemma_id, example_id in example_lemma:
         el_bucket = lemma_bucket.get(int(lemma_id))
         if el_bucket is None:
             raise RuntimeError(
                 f"example_lemma references unknown lemma_id={lemma_id}"
+            )
+        if int(example_id) not in example_ids:
+            raise RuntimeError(
+                f"example_lemma references unknown example_id={example_id}"
             )
         buckets[el_bucket]["example_lemma"].append((lemma_id, example_id))
     return buckets
@@ -639,14 +683,14 @@ def _write_lookup_shard(
     connection: sqlite3.Connection,
     bucket: int,
     lemma_rows: Sequence[tuple[int, str, str, str | None, int | None, str, str]],
-    surface_by_lemma: Mapping[int, list[str]],
+    surface_rows: Sequence[tuple[str, int]],
     sense_route_rows: Sequence[tuple[str, str]] = (),
 ) -> None:
     """Populate a single lookup shard.
 
     The lookup shard carries the lemma rows the runtime predicate reads,
-    the surface-form rows used for surface-form lookup, and the
-    ``sense_route`` rows whose ``sense_ref`` falls in
+    ONLY the surface-form rows whose closure bucket is this bucket, and
+    the ``sense_route`` rows whose ``sense_ref`` falls in
     ``bucket256_v1(sense_ref) == bucket``. The sense_route table is
     bucket-closed: every authoritative ``sense_ref`` appears in exactly
     one lookup shard and points to its real parent ``lemma_ref``.
@@ -671,17 +715,19 @@ def _write_lookup_shard(
         ],
     )
     seen: set[tuple[int, str]] = set()
-    surface_rows: list[tuple[str, int]] = []
-    for lemma_id, forms in sorted(surface_by_lemma.items()):
-        for form in sorted(forms):
-            key = (lemma_id, form)
-            if key in seen:
-                continue
-            seen.add(key)
-            surface_rows.append((form, lemma_id))
+    surface_rows_sorted = sorted(
+        ((int(lemma_id), str(form)) for form, lemma_id in surface_rows)
+    )
+    ordered_surface_rows: list[tuple[str, int]] = []
+    for lemma_id, form in surface_rows_sorted:
+        key = (lemma_id, form)
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered_surface_rows.append((form, lemma_id))
     connection.executemany(
         "INSERT INTO surface_form (form, lemma_id) VALUES (?, ?)",
-        surface_rows,
+        ordered_surface_rows,
     )
     if sense_route_rows:
         deduped_routes: dict[str, str] = {}
@@ -767,6 +813,26 @@ def _write_example_shard(
     connection.commit()
 
 
+def _validate_lookup_surface_closure(
+    lemma_partitions: Mapping[int, Sequence[tuple[Any, ...]]],
+    surface_partitions: Mapping[int, Sequence[tuple[str, int]]],
+) -> None:
+    """Prove the surface_form -> lemma join is locally closed per bucket.
+
+    Every ``(form, lemma_id)`` surface row must share its bucket with the
+    corresponding lemma row, so the runtime join never needs another
+    bucket. Runs in approximately linear time in the partitioned rows.
+    """
+    for bucket, rows in surface_partitions.items():
+        lemma_ids = {int(row[0]) for row in lemma_partitions.get(bucket, ())}
+        for form, lemma_id in rows:
+            if int(lemma_id) not in lemma_ids:
+                raise RuntimeError(
+                    f"surface_form {form!r} for lemma_id={lemma_id} in "
+                    f"lookup bucket {bucket} has no lemma row in that bucket"
+                )
+
+
 def _canonicalize_blob(blob: bytes) -> bytes:
     """Return an exact blob unchanged; placeholder for future canonicalization."""
     return blob
@@ -807,20 +873,17 @@ def build_corpus(
                 child.unlink()
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    surface_by_lemma: dict[int, list[str]] = {}
-    for form, lemma_id in surface_forms:
-        surface_by_lemma.setdefault(lemma_id, []).append(form)
-
-    lookup_partitions, sense_route_partitions = _partition_lookup_shards(
-        lemmas, surface_forms, senses
+    lookup_partitions, surface_partitions, sense_route_partitions = (
+        _partition_lookup_shards(lemmas, surface_forms, senses)
     )
     _validate_sense_route_partitions(
         senses=senses,
         sense_route_partitions=sense_route_partitions,
         lemma_refs_by_id=lemma_refs_by_id,
     )
+    _validate_lookup_surface_closure(lookup_partitions, surface_partitions)
     entry_partitions = _partition_entry_shards(
-        lemmas, senses, meanings, surface_forms, example_lemma
+        lemmas, senses, meanings, surface_forms, example_lemma, examples
     )
     example_partitions = _partition_example_shards(examples)
 
@@ -837,7 +900,7 @@ def build_corpus(
                 connection,
                 bucket,
                 lookup_partitions.get(bucket, []),
-                surface_by_lemma,
+                surface_partitions.get(bucket, []),
                 sense_route_partitions.get(bucket, ()),
             )
             connection.commit()

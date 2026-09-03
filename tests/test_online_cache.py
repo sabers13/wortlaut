@@ -25,8 +25,10 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -40,7 +42,7 @@ from app.online_manifest import (
     SHARD_FAMILY_LOOKUP,
     ManifestAsset,
 )
-from app.provider import ProviderIntegrityError
+from app.provider import ProviderBudgetExceededError, ProviderIntegrityError
 
 
 @pytest.fixture
@@ -261,11 +263,14 @@ def test_cache_single_flight_under_concurrency(
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join()
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "single-flight waiter deadlocked"
     assert not errors
     # All leases are different but they all share the same underlying
     # canonical file. The transport must have been invoked only once.
     assert counter["count"] == 1
+    # Exactly the leader performed the transfer; every waiter piggy-backed.
+    assert sum(1 for lease in leases if lease.was_downloaded) == 1
     for lease in leases:
         cache.release(lease)
 
@@ -345,3 +350,218 @@ def test_cache_records_stats_for_hits_misses_and_corruption(
     stats: CacheStats = cache.stats
     assert stats.hits >= 1
     assert stats.misses >= 1
+
+
+# ---------------------------------------------------------------------------
+# C5 — pre-download budget/reservation hook at the download boundary
+# ---------------------------------------------------------------------------
+
+
+def test_before_download_hook_rejects_before_transport(
+    tmp_path: Path, simple_lookup_asset: ManifestAsset
+) -> None:
+    """A ``before_download`` rejection means zero transport invocation."""
+    payload = (tmp_path / "lookup-007.sqlite").read_bytes()
+    calls = {"count": 0}
+
+    def transport(request: ShardRequest) -> bytes:
+        calls["count"] += 1
+        return payload
+
+    cache = ShardCache(tmp_path / "cache", transport=transport)
+    request = ShardRequest(
+        identity=ShardIdentity(SHARD_FAMILY_LOOKUP, 7),
+        asset=simple_lookup_asset,
+    )
+
+    def hook(identity: ShardIdentity) -> None:
+        assert identity == request.identity
+        raise ProviderBudgetExceededError("online_dictionary_budget_exceeded")
+
+    with pytest.raises(ProviderBudgetExceededError):
+        cache.lease(request, before_download=hook)
+    assert calls["count"] == 0
+    # Bookkeeping cleared: a normal lease afterwards downloads cleanly.
+    lease = cache.lease(request)
+    try:
+        assert lease.was_downloaded is True
+        assert calls["count"] == 1
+    finally:
+        cache.release(lease)
+
+
+def test_before_download_hook_runs_only_for_leader(
+    tmp_path: Path, simple_lookup_asset: ManifestAsset
+) -> None:
+    """Verified cache hits never reach the reservation hook."""
+    payload = (tmp_path / "lookup-007.sqlite").read_bytes()
+    hook_calls: list[ShardIdentity] = []
+
+    def transport(request: ShardRequest) -> bytes:
+        return payload
+
+    cache = ShardCache(tmp_path / "cache", transport=transport)
+    request = ShardRequest(
+        identity=ShardIdentity(SHARD_FAMILY_LOOKUP, 7),
+        asset=simple_lookup_asset,
+    )
+
+    def hook(identity: ShardIdentity) -> None:
+        hook_calls.append(identity)
+
+    first = cache.lease(request, before_download=hook)
+    cache.release(first)
+    assert hook_calls == [request.identity]
+    second = cache.lease(request, before_download=hook)
+    try:
+        assert second.was_downloaded is False
+    finally:
+        cache.release(second)
+    assert len(hook_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# C6 — single-flight failure and waiter semantics
+# ---------------------------------------------------------------------------
+
+
+def test_single_flight_leader_failure_wakes_all_waiters(
+    tmp_path: Path, simple_lookup_asset: ManifestAsset
+) -> None:
+    """A leader failure wakes every waiter with the same structured failure."""
+    payload = (tmp_path / "lookup-007.sqlite").read_bytes()
+    release_gate = threading.Event()
+    entered = threading.Event()
+    mode = {"fail": True}
+
+    def transport(request: ShardRequest) -> bytes:
+        entered.set()
+        assert release_gate.wait(timeout=10)
+        if mode["fail"]:
+            raise ProviderIntegrityError("boom")
+        return payload
+
+    cache = ShardCache(tmp_path / "cache", transport=transport)
+    request = ShardRequest(
+        identity=ShardIdentity(SHARD_FAMILY_LOOKUP, 7),
+        asset=simple_lookup_asset,
+    )
+    errors: list[BaseException] = []
+    leases: list[Any] = []
+
+    def worker() -> None:
+        try:
+            leases.append(cache.lease(request))
+        except BaseException as exc:  # noqa: BLE001 - failure is the assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(5)]
+    for thread in threads:
+        thread.start()
+    assert entered.wait(timeout=10)
+    time.sleep(0.2)  # let the waiters block on the single-flight event
+    release_gate.set()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "waiter deadlocked after leader failure"
+    assert not leases
+    assert len(errors) == 5
+    assert all(isinstance(exc, ProviderIntegrityError) for exc in errors)
+    # Bookkeeping eventually clears: a later lease downloads cleanly.
+    mode["fail"] = False
+    recovered = cache.lease(request)
+    try:
+        assert recovered.was_downloaded is True
+    finally:
+        cache.release(recovered)
+
+
+# ---------------------------------------------------------------------------
+# C14 — clear-cache mutation serialization
+# ---------------------------------------------------------------------------
+
+
+def _wait_until(predicate: Callable[[], bool], *, timeout: float = 10.0) -> None:
+    """Spin until ``predicate()`` is true; fail instead of hanging."""
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "timed out waiting for condition"
+        time.sleep(0.01)
+
+
+def test_clear_waits_for_inflight_download_and_blocks_new_leases(
+    tmp_path: Path, simple_lookup_asset: ManifestAsset
+) -> None:
+    """Clear serializes against in-flight downloads and new acquisitions."""
+    payload = (tmp_path / "lookup-007.sqlite").read_bytes()
+    calls = {"count": 0}
+    release_gate = threading.Event()
+
+    def transport(request: ShardRequest) -> bytes:
+        calls["count"] += 1
+        assert release_gate.wait(timeout=10)
+        return payload
+
+    cache = ShardCache(tmp_path / "cache", transport=transport)
+    in_flight_request = ShardRequest(
+        identity=ShardIdentity(SHARD_FAMILY_LOOKUP, 8),
+        asset=simple_lookup_asset,
+    )
+    post_clear_request = ShardRequest(
+        identity=ShardIdentity(SHARD_FAMILY_LOOKUP, 9),
+        asset=simple_lookup_asset,
+    )
+    in_flight_leases: list[Any] = []
+    in_flight_errors: list[BaseException] = []
+
+    def download_worker() -> None:
+        try:
+            in_flight_leases.append(cache.lease(in_flight_request))
+        except BaseException as exc:  # noqa: BLE001
+            in_flight_errors.append(exc)
+
+    download_thread = threading.Thread(target=download_worker)
+    download_thread.start()
+    _wait_until(lambda: calls["count"] >= 1)
+
+    clear_thread = threading.Thread(target=cache.clear)
+    clear_thread.start()
+    time.sleep(0.1)
+    # Clear must wait for the in-flight download instead of racing it.
+    assert clear_thread.is_alive(), "clear must wait for in-flight downloads"
+
+    post_clear_leases: list[Any] = []
+    new_lease_thread = threading.Thread(
+        target=lambda: post_clear_leases.append(cache.lease(post_clear_request))
+    )
+    new_lease_thread.start()
+    time.sleep(0.1)
+    # New acquisitions must not race through while clear owns the mutation.
+    assert new_lease_thread.is_alive(), "new lease raced through an active clear"
+
+    release_gate.set()
+    for thread in (download_thread, clear_thread, new_lease_thread):
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "deadlock between download/clear/lease"
+    assert not in_flight_errors
+    for lease in in_flight_leases:
+        cache.release(lease)
+    for lease in post_clear_leases:
+        cache.release(lease)
+
+    # The pre-clear in-flight install was removed by clear: no silent
+    # repopulation of the verified cache after clear completed.
+    verified = tmp_path / "cache" / "verified" / SHARD_FAMILY_LOOKUP
+    assert not (verified / "8.sqlite").exists()
+    # The post-clear acquisition downloaded normally through the gate.
+    assert (verified / "9.sqlite").exists()
+    assert calls["count"] == 2
+
+    # The next post-clear acquisition of the cleared identity downloads
+    # normally again.
+    repeat = cache.lease(in_flight_request)
+    try:
+        assert repeat.was_downloaded is True
+    finally:
+        cache.release(repeat)
+    assert calls["count"] == 3

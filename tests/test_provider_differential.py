@@ -14,6 +14,7 @@ acquisition, lookup-closure, sense-route, and example-bucket flow.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -378,15 +379,11 @@ def online_corpus(
     finally:
         source_conn.close()
 
-    surface_by_lemma: dict[int, list[str]] = {}
-    for form, lemma_id in surface_forms:
-        surface_by_lemma.setdefault(lemma_id, []).append(form)
-
-    lookup_partitions, sense_route_partitions = _partition_lookup_shards(
-        lemmas, surface_forms, senses
+    lookup_partitions, surface_partitions, sense_route_partitions = (
+        _partition_lookup_shards(lemmas, surface_forms, senses)
     )
     entry_partitions = _partition_entry_shards(
-        lemmas, senses, meanings, surface_forms, example_lemma
+        lemmas, senses, meanings, surface_forms, example_lemma, examples
     )
     example_partitions = _partition_example_shards(examples)
 
@@ -433,7 +430,7 @@ def online_corpus(
                 _write_lookup_shard,
                 (
                     lookup_partitions.get(bucket, []),
-                    surface_by_lemma,
+                    surface_partitions.get(bucket, []),
                     sense_route_partitions.get(bucket, ()),
                 ),
             )
@@ -856,9 +853,13 @@ def test_sense_route_does_not_scan_all_entry_shards(
     requested: list[ShardIdentity] = []
     original_lease = online._cache.lease
 
-    def recording_lease(request: ShardRequest) -> Any:
+    def recording_lease(
+        request: ShardRequest,
+        *,
+        before_download: Callable[[ShardIdentity], None] | None = None,
+    ) -> Any:
         requested.append(request.identity)
-        return original_lease(request)
+        return original_lease(request, before_download=before_download)
 
     online._cache.lease = recording_lease  # type: ignore[method-assign]
     try:
@@ -879,9 +880,13 @@ def test_cold_numeric_lemma_id_returns_documented_cache_miss(
     requested: list[Any] = []
     original_lease = online._cache.lease
 
-    def recording_lease(request: ShardRequest) -> Any:
+    def recording_lease(
+        request: ShardRequest,
+        *,
+        before_download: Callable[[ShardIdentity], None] | None = None,
+    ) -> Any:
         requested.append(request.identity)
-        return original_lease(request)
+        return original_lease(request, before_download=before_download)
 
     online._cache.lease = recording_lease  # type: ignore[method-assign]
     try:
@@ -923,9 +928,13 @@ def test_compound_components_routes_sense_via_lookup_then_entry(
     requested: list[tuple[str, int]] = []
     original_lease = online._cache.lease
 
-    def recording_lease(request: ShardRequest) -> Any:
+    def recording_lease(
+        request: ShardRequest,
+        *,
+        before_download: Callable[[ShardIdentity], None] | None = None,
+    ) -> Any:
         requested.append((request.identity.family, request.identity.bucket))
-        return original_lease(request)
+        return original_lease(request, before_download=before_download)
 
     online._cache.lease = recording_lease  # type: ignore[method-assign]
     try:
@@ -1260,3 +1269,209 @@ def test_example_id_refs_point_to_existing_example_records(
                 )
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Final pre-review correction helpers and regressions (C5, C7, C8, C12, C13)
+# ---------------------------------------------------------------------------
+
+
+def _fresh_online_with_counter(
+    online_corpus: tuple[
+        OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes
+    ],
+    tmp_path: Path,
+) -> tuple[OnlineDictionaryProvider, ShardCache, dict[str, int]]:
+    """Build a fresh Online provider over the shared corpus with a counter.
+
+    The module-scoped fixture cache may already hold shards; a fresh
+    cache makes download/budget accounting deterministic per test.
+    """
+    online, manifest, _local, filter_bytes = online_corpus
+    corpus_dir = online._cache.cache_dir.parent / "corpus"
+    calls = {"count": 0}
+
+    def transport(request: ShardRequest) -> bytes:
+        calls["count"] += 1
+        for asset in manifest.assets:
+            if (
+                asset.family == request.identity.family
+                and asset.bucket == request.identity.bucket
+            ):
+                return (corpus_dir / asset.name).read_bytes()
+        raise ProviderIntegrityError("missing fixture shard")
+
+    cache = ShardCache(tmp_path / "cache", transport=transport)
+    provider = OnlineDictionaryProvider(
+        manifest=manifest,
+        cache=cache,
+        filter_payload=filter_bytes,
+        dataset_token=manifest.dataset_token,
+    )
+    return provider, cache, calls
+
+
+def test_33rd_lookup_download_rejected_before_transport(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+    tmp_path: Path,
+) -> None:
+    """The 33rd distinct lookup identity is rejected BEFORE any download."""
+    provider, cache, calls = _fresh_online_with_counter(online_corpus, tmp_path)
+    _, manifest, _, _ = online_corpus
+    with provider.operation() as budget:
+        held = []
+        for bucket in range(MAX_NEW_LOOKUP_DOWNLOADS):
+            asset = next(a for a in manifest.lookup_assets if a.bucket == bucket)
+            lease = provider._lease_with_budget(
+                ShardRequest(ShardIdentity(SHARD_FAMILY_LOOKUP, bucket), asset),
+                budget,
+            )
+            held.append(lease)
+        assert calls["count"] == MAX_NEW_LOOKUP_DOWNLOADS
+        asset32 = next(
+            a for a in manifest.lookup_assets if a.bucket == MAX_NEW_LOOKUP_DOWNLOADS
+        )
+        with pytest.raises(ProviderBudgetExceededError):
+            provider._lease_with_budget(
+                ShardRequest(
+                    ShardIdentity(SHARD_FAMILY_LOOKUP, MAX_NEW_LOOKUP_DOWNLOADS),
+                    asset32,
+                ),
+                budget,
+            )
+        # Rejected before transport: the invocation count is unchanged.
+        assert calls["count"] == MAX_NEW_LOOKUP_DOWNLOADS
+        for lease in held:
+            cache.release(lease)
+
+
+def test_sense_route_shares_active_operation_budget(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+    tmp_path: Path,
+) -> None:
+    """An uncached sense_route consumes one lookup identity; cached is free."""
+    from app.routing import bucket256_v1
+
+    provider, _cache, calls = _fresh_online_with_counter(online_corpus, tmp_path)
+    _, _, local, _ = online_corpus
+    sense_refs = [local.lookup_senses(i)[0].semantic_ref for i in range(1, 6)]
+    target = next(ref for ref in sense_refs if bucket256_v1(ref) >= 32)
+    with provider.operation() as budget:
+        route = provider.sense_route(target)
+        assert route is not None
+        assert budget.spent == 1
+        calls_after_first = calls["count"]
+        assert calls_after_first == 1
+        route_again = provider.sense_route(target)
+        assert route_again == route
+        assert budget.spent == 1
+        assert calls["count"] == calls_after_first
+
+
+def test_sense_route_can_be_rejected_as_33rd_identity_before_transport(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+    tmp_path: Path,
+) -> None:
+    """A sense-route download can be the 33rd identity: rejected pre-network."""
+    from app.routing import bucket256_v1
+
+    provider, cache, calls = _fresh_online_with_counter(online_corpus, tmp_path)
+    _, manifest, local, _ = online_corpus
+    sense_refs = [local.lookup_senses(i)[0].semantic_ref for i in range(1, 6)]
+    target = next(ref for ref in sense_refs if bucket256_v1(ref) >= 32)
+    with provider.operation() as budget:
+        held = []
+        for bucket in range(MAX_NEW_LOOKUP_DOWNLOADS):
+            asset = next(a for a in manifest.lookup_assets if a.bucket == bucket)
+            held.append(
+                provider._lease_with_budget(
+                    ShardRequest(ShardIdentity(SHARD_FAMILY_LOOKUP, bucket), asset),
+                    budget,
+                )
+            )
+        assert calls["count"] == MAX_NEW_LOOKUP_DOWNLOADS
+        with pytest.raises(ProviderBudgetExceededError):
+            provider.sense_route(target)
+        assert calls["count"] == MAX_NEW_LOOKUP_DOWNLOADS
+        for lease in held:
+            cache.release(lease)
+
+
+def test_nested_operation_yields_same_budget_object(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+    tmp_path: Path,
+) -> None:
+    """Nested ``operation()`` yields the SAME budget; spend accumulates."""
+    provider, _cache, _calls = _fresh_online_with_counter(online_corpus, tmp_path)
+    with provider.operation() as outer:
+        provider.lookup_exact("Haus")
+        spent_after_first = outer.spent
+        assert spent_after_first >= 1
+        with provider.operation() as inner:
+            assert inner is outer
+            provider.lookup_surface_form("Häuser")
+            spent_inside = outer.spent
+        assert spent_inside >= spent_after_first
+        provider.lookup_exact("See")
+        assert outer.spent >= spent_inside
+
+
+def test_candidate_lookup_resolves_surface_form_absent_from_lemma_bloom(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """``candidate_lookup`` must not Bloom-prune valid surface forms.
+
+    ``Häuser`` is NOT an authoritative lemma and is Bloom-negative as a
+    lemma, but resolves through ``surface_form``. The candidate ladder
+    must return the same result as Local.
+    """
+    online, _, local, _ = online_corpus
+    assert not local.lookup_exact("Häuser")
+    assert not online.filter.contains_query("Häuser")
+    local_surface = [hit.semantic_ref for hit in local.lookup_surface_form("Häuser")]
+    assert local_surface, "fixture premise: Local resolves Häuser via surface_form"
+    local_candidates = [
+        (c.lemma.semantic_ref, c.lemma.lemma) for c in local.candidate_lookup("Häuser")
+    ]
+    online_candidates = [
+        (c.lemma.semantic_ref, c.lemma.lemma)
+        for c in online.candidate_lookup("Häuser")
+    ]
+    assert online_candidates, "Online must not Bloom-prune the surface form"
+    assert sorted(online_candidates) == sorted(local_candidates)
+
+
+def test_lemma_for_ref_populates_numeric_identity(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+    tmp_path: Path,
+) -> None:
+    """``lemma_for_ref`` observation enables numeric reads without a scan."""
+    provider, cache, _calls = _fresh_online_with_counter(online_corpus, tmp_path)
+    _, _, local, _ = online_corpus
+    local_entry = local.lemma_for_id(1)
+    assert local_entry is not None
+    lemma_ref = local_entry.semantic_ref
+    lemma_id = int(local_entry.lemma_id)
+    assert provider.senses_for_lemma(lemma_id) == ()
+    observed = provider.lemma_for_ref(lemma_ref)
+    assert observed is not None
+    assert int(observed.lemma_id) == lemma_id
+    requested: list[ShardIdentity] = []
+    original_lease = cache.lease
+
+    def recording_lease(
+        request: ShardRequest,
+        *,
+        before_download: Callable[[ShardIdentity], None] | None = None,
+    ) -> Any:
+        requested.append(request.identity)
+        return original_lease(request, before_download=before_download)
+
+    cache.lease = recording_lease  # type: ignore[method-assign]
+    try:
+        senses = provider.senses_for_lemma(lemma_id)
+    finally:
+        cache.lease = original_lease  # type: ignore[method-assign]
+    assert senses, "numeric read must succeed after lemma_for_ref observation"
+    assert requested, "expected at least one shard acquisition"
+    assert {identity.family for identity in requested} == {"entry"}
