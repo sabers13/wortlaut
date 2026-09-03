@@ -7,6 +7,7 @@ name = "flashcard"
 version = "0.1.0"
 description = "Wortlaut: a standalone German vocabulary and flashcard learning application"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi==0.141.1",

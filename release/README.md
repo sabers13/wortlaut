@@ -37,9 +37,8 @@ Stage-04 asset:
 | Classification | `source-backed-stage02-plus-stage04-canary` |
 | Canonical local filename | `dictionary.sqlite` |
 
-The v2 `download_url` is intentionally `null`; it is not publicly released.
-Publication of the exact Stage-04 asset remains blocked pending owner confirmation
-of redistribution rights for the contributed rows documented in `ATTRIBUTION-v2.md`.
-Once authorized and published, a remote asset may be named `dictionary-v2.sqlite`,
-while the installer will atomically activate it under the canonical local name
-`dictionary.sqlite`.
+The v2 `download_url` remains `null` until the public release is exposed. The
+owner has confirmed redistribution rights for the contributed rows documented in
+`ATTRIBUTION-v2.md`; that rights prerequisite is satisfied. On publication, the
+remote asset is named `dictionary-v2.sqlite`, while the installer atomically
+activates it under the canonical local name `dictionary.sqlite`.

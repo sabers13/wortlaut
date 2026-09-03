@@ -43,8 +43,8 @@ in [`WORKFLOW.md`](WORKFLOW.md), [`AGENTS.md`](AGENTS.md), and the
 
 ```bash
 # 1. Clone or download the repository
-git clone https://github.com/sabers13/flashcard.git
-cd flashcard
+git clone https://github.com/sabers13/wortlaut.git
+cd wortlaut
 
 # 2. Install Python dependencies into a local virtual environment
 python3 -m venv .venv
@@ -284,3 +284,11 @@ See:
 
 The `make gate` command runs the authoritative validation: ruff,
 strict mypy, the full pytest suite, and the executable AGENTS checks.
+
+## Licensing
+
+The Wortlaut application source code is licensed under the [MIT License](LICENSE).
+The dictionary and source-data content are not relicensed under MIT: their
+licensing and attribution are governed separately by
+[`release/ATTRIBUTION-v2.md`](release/ATTRIBUTION-v2.md) and the per-row
+`source`/`license` metadata in the dictionary.

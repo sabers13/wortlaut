@@ -1,8 +1,7 @@
-# Flashcard Dictionary Attribution (v2 candidate)
+# Wortlaut Dictionary Attribution (v2)
 
 This document covers the exact recovered Stage-04 dictionary identified by
 SHA-256 `1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c`.
-It is a technical release candidate, not a publicly released asset.
 
 ## Upstream sources
 
@@ -32,7 +31,7 @@ contains 58 `sense_meaning_derivation` edges linking those generated rows to
 non-generated source meanings. These edges preserve traversal to the source
 material used as derivation input.
 
-## Contributed manual adjudications — publication blocker
+## Contributed manual adjudications
 
 The recovered database also contains two `sense_meaning` rows with
 `source='contributed'`, an asserted `license='CC BY-SA'`, and an empty-string
@@ -43,11 +42,8 @@ The recovered database also contains two `sense_meaning` rows with
 | 577162 | Marmarameer |
 | 577190 | Mod |
 
-Repository/build evidence records these as owner-authored or owner-corrected
-manual adjudications. This recovery session has not independently established a
-contributor redistribution grant. In particular, the database's asserted license
-field is not itself evidence of the contributor's authorization.
-
-**Public redistribution of this exact Stage-04 asset is blocked until the
-repository owner explicitly confirms authorship/rights and grants redistribution
-under CC BY-SA for IDs 577162 and 577190.**
+On 2026-09-03, the repository owner explicitly confirmed authorship or
+redistribution rights for these manual adjudications and licensed them under CC
+BY-SA for redistribution as part of the Wortlaut dictionary. This specific
+contributor-rights prerequisite is satisfied. The database's asserted license
+field is not itself the evidence of that confirmation.
