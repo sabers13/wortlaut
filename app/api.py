@@ -755,7 +755,7 @@ def create_app(
         expected_version=expected_dictionary_version,
     )
 
-    app = FastAPI(title="Flashcard Vocabulary API", version="0.1.0")
+    app = FastAPI(title="Wortlaut Vocabulary API", version="0.1.0")
 
     app.state.dict_path = dict_p
     app.state.user_db_path = user_db_p

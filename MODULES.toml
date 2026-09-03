@@ -185,10 +185,17 @@ owned_paths = [
     "frontend/src/app.ts",
     "frontend/src/main.ts",
     "frontend/src/styles/tokens.css",
+    "frontend/src/study/extra-info-preference.ts",
+    "frontend/src/study/extra-info-preference.test.ts",
 ]
 dependencies = ["frontend_api"]
-focused_tests = ["frontend/tests/e2e/product.spec.ts"]
+focused_tests = [
+    "frontend/src/study/extra-info-preference.test.ts",
+    "frontend/tests/e2e/product.spec.ts",
+    "frontend/tests/e2e/study-extra-info.spec.ts",
+]
 focused_commands = [
+    "npm test --prefix frontend",
     "npm run --prefix frontend test:e2e",
     "npm run --prefix frontend typecheck",
     "npm run --prefix frontend build",
@@ -217,6 +224,7 @@ id = "standalone"
 owned_paths = [
     "app/standalone.py",
     "flashcard",
+    "wortlaut",
     "release/dictionary-manifest-v1.json",
     "release/ATTRIBUTION.md",
     "release/README.md",

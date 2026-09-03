@@ -1,14 +1,19 @@
 """Subprocess smoke test for the standalone launcher.
 
-Drives the ``./flashcard`` launcher through argparse, a missing
+Drives the ``./wortlaut`` launcher through argparse, a missing
 dictionary error, the install-dictionary path, and the custom-port
 same-origin browser security path. The launcher is invoked as a real
-shell script (the shebang ``./flashcard``) for the dedicated
+shell script (the shebang ``./wortlaut``) for the dedicated
 subprocess tests so a regression in the launcher re-exec path or its
 loopback bind contract is caught end-to-end. The test never launches a
 long-running server — it verifies the launcher's fail-closed error
 paths and CLI plumbing so a regression in the single-command UX is
 caught.
+
+A handful of tests near the end additionally drive the ``./flashcard``
+legacy compatibility alias to prove it resolves to the exact same
+application behavior as ``./wortlaut`` (it re-execs into ``./wortlaut``
+and duplicates no launcher logic).
 """
 
 from __future__ import annotations
@@ -36,19 +41,20 @@ from app.dict_install import compute_sha256
 from tools.build_dict import compute_lemma_semantic_ref, compute_sense_semantic_ref
 
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "reference" / "schema.sql"
-LAUNCHER = Path(__file__).resolve().parents[1] / "flashcard"
+LAUNCHER = Path(__file__).resolve().parents[1] / "wortlaut"
+FLASHCARD_ALIAS = Path(__file__).resolve().parents[1] / "flashcard"
 PYTHON = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
 
 
 def _load_launcher_module() -> types.ModuleType:
-    """Load ``./flashcard`` as an in-process module for call-count assertions.
+    """Load ``./wortlaut`` as an in-process module for call-count assertions.
 
     The launcher has no ``.py`` suffix, so the loader must be constructed
     explicitly rather than inferred from the filename. Loaded fresh per
     call; ``if __name__ == "__main__":`` never runs because the module is
     imported, not executed as ``__main__``, so no venv re-exec happens.
     """
-    loader = SourceFileLoader("flashcard_launcher_inprocess", str(LAUNCHER))
+    loader = SourceFileLoader("wortlaut_launcher_inprocess", str(LAUNCHER))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
@@ -124,13 +130,13 @@ def _run_launcher(
 ) -> subprocess.CompletedProcess[str]:
     """Drive the launcher.
 
-    ``via_shebang=True`` invokes ``./flashcard`` directly, exercising the
+    ``via_shebang=True`` invokes ``./wortlaut`` directly, exercising the
     real user command path and the launcher's venv re-exec logic.
-    ``via_shebang=False`` invokes ``sys.executable ./flashcard ...``
+    ``via_shebang=False`` invokes ``sys.executable ./wortlaut ...``
     for tests that want to bypass the shebang.
     """
     if via_shebang:
-        cmd = ["./flashcard", *args]
+        cmd = ["./wortlaut", *args]
     else:
         cmd = [sys.executable, str(LAUNCHER), *args]
     proc = subprocess.run(
@@ -188,7 +194,7 @@ def test_launcher_reexecs_only_into_repository_venv(
     """
     repo = tmp_path / "repo"
     repo.mkdir()
-    launcher = repo / "flashcard"
+    launcher = repo / "wortlaut"
     launcher.write_bytes(LAUNCHER.read_bytes())
     _instrument_launcher_for_reexec(launcher)
     launcher.chmod(0o755)
@@ -222,7 +228,7 @@ def test_launcher_reexecs_only_into_repository_venv(
 def test_launcher_inside_repository_venv_does_not_reexec(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    launcher = repo / "flashcard"
+    launcher = repo / "wortlaut"
     launcher.write_bytes(LAUNCHER.read_bytes())
     _instrument_launcher_for_reexec(launcher)
     launcher.chmod(0o755)
@@ -245,7 +251,7 @@ def test_launcher_inside_repository_venv_does_not_reexec(tmp_path: Path) -> None
 def test_launcher_help_prints_expected_text(tmp_path: Path) -> None:
     proc = _run_launcher("--help", cwd=tmp_path)
     assert proc.returncode == 0
-    assert "Run the Flashcard standalone web app" in proc.stdout
+    assert "Run the Wortlaut standalone web app" in proc.stdout
     assert "--data-dir" in proc.stdout
     assert "--install-dictionary" in proc.stdout
     # Host binding is intentionally non-configurable.
@@ -255,12 +261,12 @@ def test_launcher_help_prints_expected_text(tmp_path: Path) -> None:
 
 
 def test_launcher_help_via_shebang(tmp_path: Path) -> None:
-    """``./flashcard --help`` must succeed even when invoked via the
+    """``./wortlaut --help`` must succeed even when invoked via the
     shebang path, exercising the launcher's venv re-exec logic.
     """
     proc = _run_launcher("--help", cwd=LAUNCHER.parent, via_shebang=True)
     assert proc.returncode == 0
-    assert "Run the Flashcard standalone web app" in proc.stdout
+    assert "Run the Wortlaut standalone web app" in proc.stdout
 
 
 def test_launcher_fails_closed_without_venv(tmp_path: Path) -> None:
@@ -274,7 +280,7 @@ def test_launcher_fails_closed_without_venv(tmp_path: Path) -> None:
     fake_no_venv = tmp_path / "no_venv_repo"
     fake_no_venv.mkdir()
     # Copy the launcher script to the empty directory.
-    target_launcher = fake_no_venv / "flashcard"
+    target_launcher = fake_no_venv / "wortlaut"
     target_launcher.write_bytes(LAUNCHER.read_bytes())
     target_launcher.chmod(0o755)
     # Confirm there is no venv next to it.
@@ -749,7 +755,7 @@ def test_launcher_install_dictionary_lands_at_canonical_filename(
         # install lands and check the artifact on disk.
         proc = subprocess.Popen(
             [
-                "./flashcard",
+                "./wortlaut",
                 "--data-dir",
                 str(tmp_path / "data"),
                 "--manifest",
@@ -837,7 +843,7 @@ def test_launcher_install_then_normal_launch_succeeds_without_dict_path(
         # Install path via shebang.
         install_proc = subprocess.Popen(
             [
-                "./flashcard",
+                "./wortlaut",
                 "--data-dir",
                 str(tmp_path / "data"),
                 "--manifest",
@@ -866,7 +872,7 @@ def test_launcher_install_then_normal_launch_succeeds_without_dict_path(
 
         serve_proc = subprocess.Popen(
             [
-                "./flashcard",
+                "./wortlaut",
                 "--data-dir",
                 str(tmp_path / "data"),
                 "--manifest",
@@ -1005,3 +1011,98 @@ def test_launcher_custom_port_same_origin_succeeds_and_hostile_origin_rejected(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=2)
+
+
+# ---------------------------------------------------------------------------
+# ``./flashcard`` legacy compatibility alias
+#
+# The alias duplicates no launcher logic: it re-execs ``./wortlaut`` with the
+# same argv. These tests prove that resolution actually happens and that the
+# two commands are observably the same application from a user's point of
+# view, not just that both files exist.
+# ---------------------------------------------------------------------------
+
+
+def test_flashcard_alias_help_matches_wortlaut(tmp_path: Path) -> None:
+    """``./flashcard --help`` must produce the exact same output as
+    ``./wortlaut --help``: the alias re-execs the canonical launcher rather
+    than maintaining a second copy of its argparse configuration.
+    """
+    wortlaut_proc = subprocess.run(
+        ["./wortlaut", "--help"],
+        cwd=str(LAUNCHER.parent),
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    flashcard_proc = subprocess.run(
+        ["./flashcard", "--help"],
+        cwd=str(FLASHCARD_ALIAS.parent),
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert wortlaut_proc.returncode == 0
+    assert flashcard_proc.returncode == wortlaut_proc.returncode
+    assert flashcard_proc.stdout == wortlaut_proc.stdout
+    assert "Run the Wortlaut standalone web app" in flashcard_proc.stdout
+
+
+def test_flashcard_alias_reexecs_wortlaut_with_same_argv(tmp_path: Path) -> None:
+    """The alias must re-exec into ``./wortlaut`` (not a copy of it),
+    preserving argv exactly, so a fix to the canonical launcher never needs
+    a matching fix in the alias.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    wortlaut_copy = repo / "wortlaut"
+    wortlaut_copy.write_bytes(LAUNCHER.read_bytes())
+    _instrument_launcher_for_reexec(wortlaut_copy)
+    wortlaut_copy.chmod(0o755)
+    flashcard_copy = repo / "flashcard"
+    flashcard_copy.write_bytes(FLASHCARD_ALIAS.read_bytes())
+    flashcard_copy.chmod(0o755)
+    _make_repo_venv(repo)
+
+    args = ["--data-dir", str(tmp_path / "data"), "--help"]
+    proc = subprocess.run(
+        [str(flashcard_copy), *args],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert proc.returncode == 0
+    record = _post_reexec_record(proc.stdout)
+    # argv[0] is the wortlaut script path the alias re-exec'd into, not the
+    # flashcard alias path.
+    assert record["argv"] == [str(wortlaut_copy), *args]
+
+
+def test_flashcard_alias_fails_closed_without_venv(tmp_path: Path) -> None:
+    """The alias must surface the same fail-closed venv error as the
+    canonical launcher, since it is the same process after re-exec.
+    """
+    fake_no_venv = tmp_path / "no_venv_repo"
+    fake_no_venv.mkdir()
+    wortlaut_copy = fake_no_venv / "wortlaut"
+    wortlaut_copy.write_bytes(LAUNCHER.read_bytes())
+    wortlaut_copy.chmod(0o755)
+    flashcard_copy = fake_no_venv / "flashcard"
+    flashcard_copy.write_bytes(FLASHCARD_ALIAS.read_bytes())
+    flashcard_copy.chmod(0o755)
+    assert not (fake_no_venv / ".venv").exists()
+
+    proc = subprocess.run(
+        [sys.executable, str(flashcard_copy), "--help"],
+        cwd=str(fake_no_venv),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert proc.returncode != 0
+    assert "repository virtualenv is missing" in proc.stderr

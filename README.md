@@ -1,9 +1,9 @@
-# Flashcard
+# Wortlaut
 
 A standalone, offline-first German flashcard application. Everything you
 need runs on your machine; nothing leaves your network.
 
-Flashcard is a single-user learning tool. You create decks, capture or
+Wortlaut is a single-user learning tool. You create decks, capture or
 import vocabulary, study on a confidence-based review schedule, and
 back up your own data. The dictionary is a read-only distributable
 asset; your cards, reviews, and audio are private data you fully own.
@@ -60,23 +60,26 @@ python3 -m venv .venv
 #    `dictionary.sqlite` at the default slot:
 #       $XDG_DATA_HOME/flashcard/dictionary/dictionary.sqlite
 #    using the SHA-256 / size in `release/dictionary-manifest-v2.json`.
-#    Once the dictionary is published, `./flashcard --install-dictionary`
+#    Once the dictionary is published, `./wortlaut --install-dictionary`
 #    will fetch and verify it automatically.
 
 # 5. Launch
-./flashcard
+./wortlaut
 ```
 
 You only need to install the dictionary once. Subsequent launches
 reuse the verified dictionary already on disk.
 
-`./flashcard` automatically re-executes itself through the
+`./wortlaut` automatically re-executes itself through the
 repository-local `.venv/bin/python` interpreter, so you do not have to
-`source .venv/bin/activate` first.
+`source .venv/bin/activate` first. `./flashcard` (the product's former
+name) still works as a compatibility alias — it re-execs `./wortlaut`
+with the same arguments — but new scripts and documentation should use
+`./wortlaut`.
 
 ## First launch
 
-The first time you start Flashcard:
+The first time you start Wortlaut:
 
 1. The launcher prints the resolved per-user data directory, for
    example `~/.local/share/flashcard/`.
@@ -86,6 +89,38 @@ The first time you start Flashcard:
 
 You will land on the empty deck screen. Create a deck, add a card,
 review it, repeat.
+
+## Studying a card
+
+Each due card first shows only its headword, part of speech, and IPA:
+
+```
+das Haus
+NOUN · /haʊ̯s/
+
+[ Reveal answer ]
+```
+
+Press **Space** or click **Reveal answer** to see the answer. The
+revealed answer stays deliberately compact — the primary German (and,
+where available, English) learner meaning, one primary example
+sentence, and a **Play pronunciation** button (replay it any time with
+**R**) — followed by your **1–5** confidence rating for how well you
+knew it.
+
+Everything else — full grammar (including noun plural/genitive),
+additional examples, personal meaning editing, and custom-pronunciation
+recording/management — lives behind a **Show extra info** button so it
+never clutters the default review path. Click it (or **Hide extra
+info** to collapse it again) whenever you want the detail.
+
+If you always want that detail visible, check **Always show extra
+info** on any revealed card. From then on, Extra info opens
+automatically as soon as you reveal a card — turn the checkbox off to
+go back to reviewing compactly. This is a local browser preference
+(stored under one `localStorage` key in your browser, never in the
+user database or on the server), so it is per-browser and persists
+across restarts, but is not part of your synced study data.
 
 ## Where data lives
 
@@ -159,12 +194,12 @@ dictionary release:
 
 1. Place the new `dictionary-manifest-vN.json` (and matching attribution /
    `LICENSE`) in `release/`.
-2. Run `./flashcard --manifest release/dictionary-manifest-vN.json
+2. Run `./wortlaut --manifest release/dictionary-manifest-vN.json
    --install-dictionary --data-dir <your data dir>`.
 
 The installer refuses to overwrite a still-valid dictionary; remove
 the old `dictionary.sqlite` first if you want a forced reinstall.
-On the next normal startup, Flashcard relinks semantic-reference-backed note
+On the next normal startup, Wortlaut relinks semantic-reference-backed note
 bindings and atomically replaces the active dictionary metadata; cards, review
 history, and user-authored meanings are preserved.
 
@@ -179,8 +214,8 @@ still listens only on `127.0.0.1:8000` inside its runtime configuration.
 
 * **Stop**: `Ctrl+C` in the terminal where the launcher is running.
   The FastAPI server shuts down cleanly.
-* **Restart**: `./flashcard` again. Your state is preserved.
-* **Run in the background**: `./flashcard --no-browser` keeps the
+* **Restart**: `./wortlaut` again. Your state is preserved.
+* **Run in the background**: `./wortlaut --no-browser` keeps the
   server up without opening a browser window. Combine with a
   process supervisor of your choice if you want a daemon.
 
@@ -189,7 +224,7 @@ still listens only on `127.0.0.1:8000` inside its runtime configuration.
 To bind the API to a non-default port:
 
 ```bash
-./flashcard --port 8123
+./wortlaut --port 8123
 ```
 
 The launcher then binds `127.0.0.1:8123`, opens
@@ -228,7 +263,7 @@ a literal newline inside an Anki field).
 | Symptom                                  | Likely cause / fix                                          |
 | ---------------------------------------- | ----------------------------------------------------------- |
 | "repository virtualenv is missing"       | Run `python3 -m venv .venv && .venv/bin/pip install -e .` once. |
-| "dictionary asset is missing"            | Place a verified `dictionary.sqlite` at the default slot, or run `./flashcard --install-dictionary` (once the production artefact is published). |
+| "dictionary asset is missing"            | Place a verified `dictionary.sqlite` at the default slot, or run `./wortlaut --install-dictionary` (once the production artefact is published). |
 | "dictionary verification failed"        | The canonical file under `dictionary/` does not match the active v2 manifest. Remove the file and re-install it. |
 | "no verified dictionary and the manifest has no download_url" | The v2 production artefact is not yet published. Place `dictionary.sqlite` manually at the default slot. |
 | Browser does not open                    | Use `--no-browser` and visit <http://127.0.0.1:8000> yourself. |

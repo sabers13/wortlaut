@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "flashcard"
 version = "0.1.0"
-description = "German flashcard learning system"
+description = "Wortlaut: a standalone German vocabulary and flashcard learning application"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

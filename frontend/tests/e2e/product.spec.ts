@@ -74,7 +74,7 @@ test('FastAPI static product has explicit loading, error, and empty deck states'
   await page.reload();
   await expect(page.getByText('No decks yet. Create one to begin organizing German vocabulary.')).toBeVisible();
   const openApi = await page.evaluate(async () => (await fetch('/openapi.json')).json());
-  expect(openApi.info.title).toBe('Flashcard Vocabulary API');
+  expect(openApi.info.title).toBe('Wortlaut Vocabulary API');
 });
 
 test('manual creation, local audio, review, unavailable fallback, and both exports work through FastAPI', async ({ page }) => {
@@ -94,6 +94,9 @@ test('manual creation, local audio, review, unavailable fallback, and both expor
   await expect(page.getByRole('heading', { name: 'Haus' })).toBeVisible({ timeout: firstServerTimeout });
   await page.keyboard.press('Space');
   await expect(page.getByText('How well did you know it?')).toBeVisible();
+  // Custom pronunciation management is secondary and lives behind Extra info.
+  await expect(page.getByRole('button', { name: 'Add your pronunciation' })).toBeHidden();
+  await page.getByRole('button', { name: 'Show extra info' }).click();
   await page.getByRole('button', { name: 'Add your pronunciation' }).click();
   await page.locator('input[type=file]').setInputFiles({
     name: 'tiny.wav',
@@ -102,10 +105,10 @@ test('manual creation, local audio, review, unavailable fallback, and both expor
   });
   await expect(page.locator('audio.audio-preview')).toBeVisible();
   await page.getByRole('button', { name: 'Save recording' }).click();
-  await expect(page.locator('.pronunciation').getByRole('status')).toContainText('Custom pronunciation saved.');
+  await expect(page.locator('.pronunciation-simple').getByRole('status')).toContainText('Custom pronunciation saved.');
   await page.getByRole('button', { name: 'Revert to automatic' }).click();
   await page.getByRole('button', { name: 'Confirm revert to automatic' }).click();
-  await expect(page.locator('.pronunciation').getByRole('status')).toContainText('Automatic pronunciation restored.');
+  await expect(page.locator('.pronunciation-simple').getByRole('status')).toContainText('Automatic pronunciation restored.');
   await page.getByRole('button', { name: 'Play pronunciation' }).click();
   await expect(page.getByRole('alert')).toContainText(/Audio for 'Haus' not found|Pronunciation is unavailable/);
   await page.keyboard.press("Space");

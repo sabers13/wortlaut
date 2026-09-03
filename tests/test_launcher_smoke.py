@@ -29,7 +29,7 @@ import pytest
 from tools.build_dict import compute_lemma_semantic_ref, compute_sense_semantic_ref
 
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "reference" / "schema.sql"
-LAUNCHER = Path(__file__).resolve().parents[1] / "flashcard"
+LAUNCHER = Path(__file__).resolve().parents[1] / "wortlaut"
 PYTHON = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
 
 

@@ -3,6 +3,13 @@ import { customElement, state } from 'lit/decorators.js';
 import { createVocabClient } from './api/client.ts';
 import { ApiError } from './api/errors.ts';
 import type { Candidate, CandidateSense, CaptureContext, DeckSummary, MeaningLanguage, NextCardData, RenderedMeaning } from './api/types.ts';
+import {
+  extraInfoOpenOnCardLoad,
+  extraInfoOpenOnPreferenceChange,
+  extraInfoOpenOnReveal,
+  readAlwaysShowExtraInfo,
+  writeAlwaysShowExtraInfo,
+} from './study/extra-info-preference.ts';
 
 type DeckListStatus = 'loading' | 'ready' | 'error';
 type LookupStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -26,6 +33,20 @@ interface CaptureCandidateSelection {
 }
 
 const vocabClient = createVocabClient();
+
+/**
+ * ``window.localStorage`` itself can throw on access (private browsing in
+ * some browsers, storage disabled by policy), not just its methods, so the
+ * accessor is wrapped too. Returns ``null`` when storage is unavailable;
+ * every caller already treats that the same as "nothing persisted".
+ */
+function localStorageOrNull(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Standalone navigation shell for server-authoritative decks.
@@ -117,9 +138,12 @@ export class FlashcardApp extends LitElement {
     .meaning { margin: 0; font-size: 1.25rem; }
     .example { margin: 0; padding-left: var(--space-16); border-left: 3px solid var(--accent); font-size: 1.05rem; }
     .example-translation { display: block; margin-top: var(--space-4); color: var(--muted); font-size: .9rem; }
-    .details { border-top: 1px solid var(--border); padding-top: var(--space-16); }
-    .details summary { cursor: pointer; font-weight: 650; }
-    .detail-block { margin-top: var(--space-16); }
+    .pronunciation-simple { display: grid; gap: var(--space-8); }
+    .extra-info-row { display: flex; flex-wrap: wrap; gap: var(--space-12); align-items: center; }
+    .always-extra-toggle { display: flex; flex-direction: row; align-items: center; gap: var(--space-8); font-size: .875rem; font-weight: 500; }
+    .always-extra-toggle input { width: auto; }
+    .extra-info { display: grid; gap: var(--space-16); border-top: 1px solid var(--border); padding-top: var(--space-16); }
+    .detail-block { margin-top: 0; }
     .detail-block p, .detail-block ul { margin-bottom: 0; }
     .detail-block ul { padding-left: var(--space-24); }
     .confidence-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: var(--space-8); }
@@ -209,7 +233,8 @@ export class FlashcardApp extends LitElement {
   @state() private isRevealed = false;
   @state() private isReviewing = false;
   @state() private studyError = '';
-  @state() private moreDetails = false;
+  @state() private extraInfoOpen = false;
+  @state() private alwaysShowExtraInfo: boolean = readAlwaysShowExtraInfo(localStorageOrNull());
   @state() private glossDrafts: Record<MeaningLanguage, string> = { de: '', en: '' };
   @state() private glossState = '';
   @state() private glossError = '';
@@ -374,7 +399,7 @@ export class FlashcardApp extends LitElement {
     this.studyDeckId = deckId ?? null;
     this.studyCard = null;
     this.isRevealed = false;
-    this.moreDetails = false;
+    this.extraInfoOpen = extraInfoOpenOnCardLoad();
     this.studyError = '';
     this.clearPronunciationState();
     await this.loadStudyCard();
@@ -395,7 +420,7 @@ export class FlashcardApp extends LitElement {
       const response = await vocabClient.getNextCard(this.studyDeckId ?? undefined);
       this.studyCard = response.card;
       this.isRevealed = false;
-      this.moreDetails = false;
+      this.extraInfoOpen = extraInfoOpenOnCardLoad();
       this.hasCustomAudio = Boolean(response.card?.front.audio_trigger.token?.startsWith('custom:'));
       this.glossDrafts = { de: this.userGlossValue(response.card, 'de'), en: this.userGlossValue(response.card, 'en') };
       this.glossState = '';
@@ -412,8 +437,21 @@ export class FlashcardApp extends LitElement {
   private revealCard(): void {
     if (!this.studyCard || this.isRevealed || this.isReviewing) return;
     this.isRevealed = true;
-    this.moreDetails = false;
+    this.extraInfoOpen = extraInfoOpenOnReveal(this.alwaysShowExtraInfo);
     this.focusTarget = 'answer';
+  }
+
+  private toggleExtraInfo(): void {
+    this.extraInfoOpen = !this.extraInfoOpen;
+  }
+
+  private setAlwaysShowExtraInfo(checked: boolean): void {
+    this.alwaysShowExtraInfo = checked;
+    writeAlwaysShowExtraInfo(localStorageOrNull(), checked);
+    this.extraInfoOpen = extraInfoOpenOnPreferenceChange({
+      isRevealed: this.isRevealed,
+      newPreference: checked,
+    });
   }
 
   private async submitConfidence(confidence: number): Promise<void> {
@@ -1351,11 +1389,14 @@ export class FlashcardApp extends LitElement {
     `;
   }
 
-  private renderPronunciation() {
-    const recordingFailed = this.recordingStatus === 'save-error';
+  /**
+   * The simple "Play pronunciation" control. Always visible on the revealed
+   * answer, outside Extra info — recording and custom-pronunciation
+   * management live in {@link renderPronunciationManagement} instead.
+   */
+  private renderSimplePronunciation() {
     return html`
-      <section class="pronunciation" aria-labelledby="pronunciation-title">
-        <h3 id="pronunciation-title">Pronunciation</h3>
+      <div class="pronunciation-simple">
         <div class="audio-actions">
           <button type="button" @click=${() => void this.playPronunciation()} ?disabled=${this.audioStatus === 'loading'}>
             ${this.audioStatus === 'loading' ? 'Loading pronunciation…' : this.audioStatus === 'playing' ? 'Playing pronunciation…' : 'Play pronunciation'}
@@ -1363,6 +1404,20 @@ export class FlashcardApp extends LitElement {
           <span class="caption">Press R to replay</span>
         </div>
         ${this.audioMessage ? html`<p class="inline-status ${this.audioStatus === 'unavailable' ? 'error' : ''}" role=${this.audioStatus === 'unavailable' ? 'alert' : 'status'}>${this.audioMessage}</p>` : nothing}
+      </div>
+    `;
+  }
+
+  /**
+   * Recording and custom-pronunciation management. Secondary to ordinary
+   * review, so it lives inside Extra info rather than on the default
+   * revealed answer.
+   */
+  private renderPronunciationManagement() {
+    const recordingFailed = this.recordingStatus === 'save-error';
+    return html`
+      <section class="pronunciation" aria-labelledby="pronunciation-title">
+        <h3 id="pronunciation-title">Custom pronunciation</h3>
         ${this.hasCustomAudio ? html`
           <div class="audio-actions">
             <button type="button" @click=${() => { this.showRecordingControls = !this.showRecordingControls; this.revertConfirmation = false; }}>
@@ -1462,16 +1517,32 @@ export class FlashcardApp extends LitElement {
               <p class="meaning"><span class="meaning-label">German</span><br />${deMeaning?.lines[0] ?? 'No German learner meaning is available.'}</p>
               ${enMeaning ? html`<p class="meaning"><span class="meaning-label">English</span><br />${enMeaning.lines[0] ?? ''}</p>` : nothing}
               ${primaryExample ? html`<p class="example">${primaryExample.de}${primaryExample.en ? html`<span class="example-translation">${primaryExample.en}</span>` : nothing}</p>` : nothing}
-              <button type="button" aria-expanded=${this.moreDetails ? 'true' : 'false'} @click=${() => { this.moreDetails = !this.moreDetails; }}>More details</button>
-              ${this.moreDetails ? html`
-                <div class="details">
-                  <div class="detail-block"><span class="meaning-label">Grammar</span><p>${card.back.grammar.lines.join(' · ') || card.back.pos}</p>${card.back.plural ? html`<p>Plural: ${card.back.plural}</p>` : nothing}</div>
+              ${this.renderSimplePronunciation()}
+              <div class="extra-info-row">
+                <button
+                  type="button"
+                  aria-expanded=${this.extraInfoOpen ? 'true' : 'false'}
+                  aria-controls="extra-info-panel"
+                  @click=${this.toggleExtraInfo}
+                >${this.extraInfoOpen ? 'Hide extra info' : 'Show extra info'}</button>
+                <label class="always-extra-toggle">
+                  <input
+                    type="checkbox"
+                    .checked=${this.alwaysShowExtraInfo}
+                    @change=${(event: Event) => this.setAlwaysShowExtraInfo((event.target as HTMLInputElement).checked)}
+                  />
+                  Always show extra info
+                </label>
+              </div>
+              ${this.extraInfoOpen ? html`
+                <div class="extra-info" id="extra-info-panel">
+                  <div class="detail-block"><span class="meaning-label">Grammar</span><p>${card.back.grammar.lines.join(' · ') || card.back.pos}</p></div>
                   ${extraMeaningLines.length ? html`<div class="detail-block"><span class="meaning-label">Extended notes</span><ul>${extraMeaningLines.map((line) => html`<li>${line}</li>`)}</ul></div>` : nothing}
                   ${otherExamples.length ? html`<div class="detail-block"><span class="meaning-label">Additional examples</span>${otherExamples.map((example) => html`<p class="example">${example.de}${example.en ? html`<span class="example-translation">${example.en}</span>` : nothing}</p>`)}</div>` : nothing}
+                  ${this.renderPronunciationManagement()}
+                  ${this.renderMeaningEditor(card)}
                 </div>
               ` : nothing}
-              ${this.renderPronunciation()}
-              ${this.renderMeaningEditor(card)}
               <div>
                 <p class="front-label">How well did you know it?</p>
                 <div class="confidence-grid">
@@ -1535,7 +1606,7 @@ export class FlashcardApp extends LitElement {
       <div class="shell">
         <header>
           <div>
-            <h1>Flashcards</h1>
+            <h1>Wortlaut</h1>
             <div class="subtitle">German vocabulary</div>
           </div>
           <nav class="primary-nav" aria-label="Main navigation">
