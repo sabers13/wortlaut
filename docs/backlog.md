@@ -49,6 +49,43 @@ them. REJECTED items are listed so they do not resurface.
   change**, or the repaired file silently escapes the gate that is supposed to
   verify it.
 
+- **Online/offline dictionary modes (ADR-0008) — BLOCKED on cold review #1.**
+  `docs/adr/0008-online-offline-dictionary.md` carries `NEEDS COLD REVIEW`;
+  `tasks/slice-10.md` is written, dependency-closed and dispatch-ready but must
+  not be dispatched until a fresh cold orchestrator session passes review #1
+  under WORKFLOW §7 / AGENTS G7. Unblocked by that review passing. Independent
+  of slice-9: the two slices touch disjoint scopes and may be ordered freely.
+  The ADR-0008 §13.3 production shard build and the `dictionary-online-v2`
+  release are a separate authorized operation and are outside slice-10.
+
+### Filed by ADR-0008, not resolved in it
+
+- **`surface_form` carries leaked Wiktionary template tags.** Eleven forms map
+  to more than 1,024 lemmas — `de-ndecl` (65,310), `no-table-tags` (42,183),
+  `strong` (29,551), `de-adecl` (14,941), `de-conj` (10,217), `weak` (9,114),
+  `neuter strong` (6,226), `masculine strong` (1,810), `neuter` (1,729) — plus
+  the genuine paradigm heads `haben` (15,168) and `sein` (2,975), which the
+  surface path never reaches because `resolve_word` matches them exactly first.
+  The tag rows are data defects. Removing them would change the v2 dataset
+  SHA-256 and therefore the published release identity, so ADR-0008 §5.7
+  designs around them instead. Fix in a future dictionary version, never as a
+  side effect of another slice.
+- **`split_compound` is pathological on unknown long words.** Measured against
+  the real v2 asset: one unknown 16-character word costs 633 oracle calls over
+  96 distinct lookup keys and ~285 s of cold-cache wall clock. This is current
+  offline behaviour, not something ADR-0008 introduces; ADR-0008's membership
+  filter incidentally bounds the *network* cost but not the call count. Worth a
+  memoized or bounded splitter in its own slice, with ADR-0001 D3 (exactly one
+  resolver) and AGENTS R2 intact.
+- **Unbounded example payloads.** `_materialize_candidate_from_ref` returns
+  every ranked example for a lemma with no cap; `der` has 230,795 example links.
+  This affects both dictionary modes identically. Bounding it is an observable
+  API change and needs its own owner decision — ADR-0008 deliberately does not
+  smuggle it in.
+- **Compressed online shards.** ADR-0008 §12.5 ships uncompressed shards in v1
+  to avoid a decompression surface and a second integrity boundary. Revisit as
+  a pure optimization once the format is proven.
+
 ## Deferred (cite: ADR-0001 §14)
 
 - `.apkg` export via genanki (~50 lines; carries scheduling + media that TSV cannot).
