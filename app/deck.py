@@ -21,6 +21,7 @@ from typing import Any, TypeAlias, cast
 from fsrs import Card, Rating, Scheduler, State
 
 from app.dictionary import DictionaryAsset, DictionaryAssetError, validate_candidate_dictionary
+from app.provider import DictionaryProvider
 
 DictionaryMeanings: TypeAlias = Mapping[str, object]
 ComponentBinding: TypeAlias = tuple[str, str]
@@ -661,6 +662,48 @@ class DictionaryRuntime:
             if self._closed:
                 raise DictionaryClosedError("runtime is closed")
             return self._current_generation.asset.asset_token
+
+    @property
+    def lemma_ids(self) -> Mapping[str, int]:
+        """Return the durable ``lemma_ref -> lemma_id`` map for the active asset."""
+        with self._lock:
+            if self._closed:
+                raise DictionaryClosedError("runtime is closed")
+            return self._current_generation.asset.lemma_ids
+
+    @property
+    def sense_ids(self) -> Mapping[str, tuple[int, int]]:
+        """Return the durable ``sense_ref -> (sense_id, lemma_id)`` map for the active asset."""
+        with self._lock:
+            if self._closed:
+                raise DictionaryClosedError("runtime is closed")
+            return self._current_generation.asset.sense_ids
+
+    def provider(self) -> DictionaryProvider:
+        """Return a Slice-11 ``DictionaryProvider`` adapter for the current asset.
+
+        Slice 12: ``app/api.py`` migrated served-product dictionary reads
+        off raw ``asset.connection`` access onto the abstract provider
+        contract. The adapter wraps the existing validated asset (and
+        therefore reuses the runtime's read pin semantics) so the
+        provider code path remains consistent with the activation /
+        relink rules already enforced by ``DictionaryRuntime``.
+        """
+        with self._lock:
+            if self._closed:
+                raise DictionaryClosedError("runtime is closed")
+            gen = self._current_generation
+            cached = getattr(gen, "_provider_view", None)
+            if cached is not None:
+                return cached  # type: ignore[no-any-return]
+            from app.provider_local import LocalDictionaryProvider
+
+            view = LocalDictionaryProvider(gen.asset.path, asset=gen.asset)
+            try:
+                gen._provider_view = view  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            return view
 
     @property
     def current_generation_id(self) -> int:

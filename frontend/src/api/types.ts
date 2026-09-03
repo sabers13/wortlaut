@@ -330,3 +330,62 @@ export interface DeleteDeckResponse {
   id: number;
   deleted: boolean;
 }
+
+export type DictionaryMode = 'offline' | 'online' | 'unconfigured';
+
+export interface DictionarySettingsInfo {
+  mode: DictionaryMode;
+  canonical_offline_path: string;
+  canonical_offline_present: boolean;
+  canonical_offline_valid: boolean;
+  online_active: boolean;
+  online_info?: {
+    dataset_token: string;
+    asset_token: string;
+    cache_dir: string;
+  };
+}
+
+export interface InstallOfflineRequest {
+  manifest_bytes?: number;
+  download_url?: string;
+}
+
+export interface InstallOfflineResponse {
+  status: string;
+  canonical_offline_path?: string;
+  sha256?: string;
+  byte_size?: number;
+  measured_bytes?: number;
+  safety_threshold_bytes?: number;
+}
+
+export interface RemoveOfflineRequest {
+  filename?: string;
+}
+
+export interface RemoveOfflineResponse {
+  status: string;
+  detail: string;
+  canonical_offline_path?: string;
+}
+
+export interface ClearOnlineCacheResponse {
+  status: string;
+  removed_count: number;
+}
+
+export interface UseOnlineResponse {
+  status: 'online';
+  online_info: {
+    dataset_token: string;
+    asset_token: string;
+    cache_dir: string;
+  };
+}
+
+export interface UseOfflineResponse {
+  status: 'offline';
+  asset_token?: string;
+  canonical_offline_path?: string;
+}

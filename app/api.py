@@ -49,9 +49,24 @@ from app.deck import (
     set_meaning_languages,
     set_user_meaning,
 )
-from app.dictionary import DictionaryAssetError
+from app.dictionary import DictionaryAssetError, validate_candidate_dictionary
+from app.dictionary_mode import (
+    OFFLINE_INSTALL_DEFAULT_MANIFEST_BYTES,
+    OfflineInstallRefused,
+    preflight_offline_install,
+    remove_canonical_offline,
+    session_status,
+)
+from app.dictionary_session import DictionarySession, OnlineSessionInfo
 from app.examples import rank_examples
 from app.export import ExportAudio, build_apkg
+from app.provider import (
+    DictionaryProvider,
+    ProviderBudgetExceededError,
+    ProviderIntegrityError,
+    ProviderNetworkError,
+    ProviderUnavailableError,
+)
 from app.render import (
     AudioTrigger,
     CardRenderInput,
@@ -82,6 +97,14 @@ def _get_nlp() -> Any | None:
 
 
 class _ConnectionLookupOracle(LookupProtocol):
+    """Legacy SQL-backed oracle retained only for legacy tests of the old path.
+
+    The served-product endpoints migrated onto ``_ProviderOracle`` (see
+    below); this class is preserved so non-product unit tests can
+    exercise the raw SQLite lookup closure under the same resolver
+    signature. New code MUST go through :class:`DictionaryProvider`.
+    """
+
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
@@ -167,137 +190,201 @@ class _ConnectionLookupOracle(LookupProtocol):
         ]
 
 
+_PROVIDER_FAILURE_CODES: Final[MappingProxyType[str, int]] = MappingProxyType(
+    {
+        "network": 502,
+        "integrity": 502,
+        "budget": 503,
+        "unavailable": 503,
+    }
+)
+
+
+def _provider_failure_to_response(exc: BaseException) -> JSONResponse:
+    """Translate a provider failure to a structured HTTP response.
+
+    The product contract refuses to map provider failures onto a silent
+    ``needs_gloss`` / ``not_found`` outcome or successful PART-B write.
+    The error carries a stable code clients can distinguish.
+    """
+    if isinstance(exc, ProviderBudgetExceededError):
+        detail_code = "budget"
+    elif isinstance(exc, ProviderNetworkError):
+        detail_code = "network"
+    elif isinstance(exc, ProviderIntegrityError):
+        detail_code = "integrity"
+    else:
+        detail_code = "unavailable"
+    status_code = int(_PROVIDER_FAILURE_CODES[detail_code])
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "detail": f"online_provider_error: {detail_code}",
+            "code": detail_code,
+            "message": str(exc),
+        },
+    )
+
+
+class _ProviderOracle(LookupProtocol):
+    """Provider-backed resolver oracle used by every served-product endpoint.
+
+    CF1: the provider's hit type is ``LemmaHit`` with field ``lemma_id``,
+    while the resolver's :class:`LemmaRecord` exposes ``id``. This is
+    the smallest mechanical adapter at the integration boundary; neither
+    contract is redesigned for the field name.
+    """
+
+    def __init__(self, provider: DictionaryProvider) -> None:
+        self._provider = provider
+
+    def lookup_exact(
+        self, lemma: str, pos: str | None = None, gender: str | None = None
+    ) -> Sequence[LemmaRecord]:
+        hits = self._provider.lookup_exact(lemma, pos=pos, gender=gender)
+        return tuple(
+            LemmaRecord(
+                id=int(hit.lemma_id),
+                lemma=str(hit.lemma),
+                pos=str(hit.pos),
+                gender=hit.gender,
+                semantic_ref=str(hit.semantic_ref),
+                freq_rank=hit.freq_rank,
+            )
+            for hit in hits
+        )
+
+    def lookup_surface_form(self, form: str) -> Sequence[LemmaRecord]:
+        # CF2: surface-form lookup must preserve Local's surface-only
+        # semantics. We delegate to the provider's
+        # ``lookup_surface_form`` directly; Local and Online both probe
+        # ONLY the surface-form table (no implicit lemma-table
+        # pre-query that could suppress valid surface results).
+        hits = self._provider.lookup_surface_form(form)
+        return tuple(
+            LemmaRecord(
+                id=int(hit.lemma_id),
+                lemma=str(hit.lemma),
+                pos=str(hit.pos),
+                gender=hit.gender,
+                semantic_ref=str(hit.semantic_ref),
+                freq_rank=hit.freq_rank,
+            )
+            for hit in hits
+        )
+
+    def lookup_senses(self, lemma_id: int) -> Sequence[SenseRecord]:
+        hits = self._provider.lookup_senses(int(lemma_id))
+        return tuple(
+            SenseRecord(
+                id=int(h.sense_id),
+                lemma_id=int(h.lemma_id),
+                ord=int(h.ord),
+                semantic_ref=str(h.semantic_ref),
+            )
+            for h in hits
+        )
+
+
 def _materialize_candidate_from_ref(
     ref: Ref,
-    dict_conn: sqlite3.Connection,
-    oracle: _ConnectionLookupOracle,
+    provider: DictionaryProvider,
+    oracle: _ProviderOracle,
     *,
     known_lemmas: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     if ref.status == "resolved":
-        cur = dict_conn.execute(
-            """
-            SELECT id, semantic_ref, lemma, pos, gender, plural, plural_none,
-                   genitive_sg, aux, separable, particle, reflexive, praesens_3sg,
-                   praeteritum_3sg, partizip_ii, governs, comparative, superlative,
-                   ipa, ipa_source, freq_rank, source, license
-            FROM lemma
-            WHERE (lemma = ? OR lower(lemma) = ?)
-            ORDER BY freq_rank ASC NULLS LAST, pos ASC, gender ASC NULLS LAST, semantic_ref ASC
-            """,
-            (ref.lemma, ref.lemma.lower()),
+        # Slice 12 provider migration: the served-product materialization
+        # no longer opens a raw ``asset.connection`` or issues SQL. It
+        # routes through ``LookupProtocol.lookup_exact`` (provider-backed)
+        # to resolve the durable lemma ref, then asks the provider for a
+        # composite entry and examples through the Slice-11 contract.
+        lemma_hits = provider.lookup_exact(
+            ref.lemma, pos=ref.pos, gender=ref.gender
         )
-        lem_rows = cur.fetchall()
-        if not lem_rows:
+        if not lemma_hits:
             return None
-        lem = next(
-            (row for row in lem_rows if row[3] == ref.pos and row[4] == ref.gender),
+        matched_hit = next(
+            (
+                hit
+                for hit in lemma_hits
+                if hit.pos == ref.pos and hit.gender == ref.gender
+            ),
             None,
         )
-        if lem is None:
+        if matched_hit is None:
             return None
-        lem_id = int(lem[0])
-        lem_ref = str(lem[1])
+        lemma_id = int(matched_hit.lemma_id)
+        entry = provider.entry_for_id(lemma_id)
+        if entry is None:
+            return None
 
-        s_cur = dict_conn.execute(
-            """
-            SELECT id, lemma_id, semantic_ref, source_namespace, source_ref, ord,
-                   register, source, license
-            FROM sense WHERE lemma_id = ?
-            ORDER BY ord ASC, semantic_ref ASC, id ASC
-            """,
-            (lem_id,),
-        )
-        sense_rows = s_cur.fetchall()
-
-        m_cur = dict_conn.execute(
-            """
-            SELECT sm.id, sm.sense_id, sm.language, sm.kind, sm.ord, sm.text,
-                   sm.source, sm.license
-            FROM sense_meaning sm
-            JOIN sense s ON sm.sense_id = s.id
-            WHERE s.lemma_id = ?
-            ORDER BY sm.language ASC, sm.kind ASC, sm.ord ASC, sm.id ASC
-            """,
-            (lem_id,),
-        )
-        meaning_rows = m_cur.fetchall()
-
-        meanings_by_sense: dict[int, list[dict[str, Any]]] = {}
-        for mr in meaning_rows:
-            sid = int(mr[1])
-            meanings_by_sense.setdefault(sid, []).append({
-                "language": str(mr[2]),
-                "kind": str(mr[3]),
-                "ord": int(mr[4]),
-                "text": str(mr[5]),
-                "source": str(mr[6]),
-                "license": str(mr[7]),
-            })
+        lem_ref = str(entry.lemma.semantic_ref)
 
         senses_list: list[dict[str, Any]] = []
-        for sr in sense_rows:
-            sid = int(sr[0])
-            s_sref = str(sr[2])
-            s_means = meanings_by_sense.get(sid, [])
+        for sense in entry.senses:
+            sid = int(sense.sense_id)
+            s_sref = str(sense.semantic_ref)
+            s_means = [
+                {
+                    "language": str(m.language),
+                    "kind": str(m.kind),
+                    "ord": int(m.ord),
+                    "text": str(m.text),
+                    "source": str(m.source),
+                    "license": str(m.license),
+                }
+                for m in entry.meanings
+                if int(m.sense_id) == sid
+            ]
             gloss_text = s_means[0]["text"] if s_means else ""
             senses_list.append({
                 "sense_id": sid,
                 "sense_semantic_ref": s_sref,
                 "ref": s_sref,
-                "ord": int(sr[5]),
+                "ord": int(sense.ord),
                 "gloss": gloss_text,
                 "meanings": s_means,
             })
 
-        ex_cur = dict_conn.execute(
-            """
-            SELECT e.id, e.de, e.en, e.source, e.source_ref, e.license, e.token_count, e.has_proper
-            FROM example e
-            JOIN example_lemma el ON e.id = el.example_id
-            WHERE el.lemma_id = ?
-            ORDER BY e.id ASC
-            """,
-            (lem_id,),
-        )
         raw_examples = [
             {
-                "id": int(er[0]),
-                "de": str(er[1]),
-                "en": str(er[2]) if er[2] is not None else None,
-                "source": str(er[3]),
-                "license": str(er[5]),
-                "token_count": int(er[6]) if er[6] is not None else None,
-                "has_proper": bool(er[7]),
+                "id": int(ex.example_id),
+                "de": str(ex.de),
+                "en": str(ex.en) if ex.en is not None else None,
+                "source": str(ex.source) if ex.source is not None else "",
+                "license": str(ex.license) if ex.license is not None else "",
+                "token_count": int(ex.token_count) if ex.token_count is not None else None,
+                "has_proper": bool(ex.has_proper),
             }
-            for er in ex_cur.fetchall()
+            for ex in entry.examples
         ]
         ranked_exs = rank_examples(raw_examples, known_lemmas=known_lemmas)
 
         grammar_data = {
-            "pos": str(lem[3]),
-            "gender": str(lem[4]) if lem[4] is not None else None,
-            "plural": str(lem[5]) if lem[5] is not None else None,
-            "genitive_sg": str(lem[7]) if lem[7] is not None else None,
-            "aux": str(lem[8]) if lem[8] is not None else None,
-            "separable": bool(lem[9]),
-            "particle": str(lem[10]) if lem[10] is not None else None,
-            "reflexive": bool(lem[11]),
-            "praesens_3sg": str(lem[12]) if lem[12] is not None else None,
-            "praeteritum_3sg": str(lem[13]) if lem[13] is not None else None,
-            "partizip_ii": str(lem[14]) if lem[14] is not None else None,
-            "governs": str(lem[15]) if lem[15] is not None else None,
-            "comparative": str(lem[16]) if lem[16] is not None else None,
-            "superlative": str(lem[17]) if lem[17] is not None else None,
-            "ipa": str(lem[18]) if lem[18] is not None else None,
+            "pos": str(entry.lemma.pos),
+            "gender": entry.lemma.gender,
+            "plural": entry.lemma.plural,
+            "genitive_sg": entry.lemma.genitive_sg,
+            "aux": entry.lemma.aux,
+            "separable": bool(entry.lemma.separable),
+            "particle": entry.lemma.particle,
+            "reflexive": bool(entry.lemma.reflexive),
+            "praesens_3sg": entry.lemma.praesens_3sg,
+            "praeteritum_3sg": entry.lemma.praeteritum_3sg,
+            "partizip_ii": entry.lemma.partizip_ii,
+            "governs": entry.lemma.governs,
+            "comparative": entry.lemma.comparative,
+            "superlative": entry.lemma.superlative,
+            "ipa": entry.lemma.ipa,
         }
 
         return {
             "ref": lem_ref,
             "lemma_semantic_ref": lem_ref,
-            "lemma": str(lem[2]),
-            "pos": str(lem[3]),
-            "gender": str(lem[4]) if lem[4] is not None else None,
+            "lemma": str(entry.lemma.lemma),
+            "pos": str(entry.lemma.pos),
+            "gender": entry.lemma.gender,
             "status": "resolved",
             "senses": senses_list,
             "grammar": grammar_data,
@@ -697,10 +784,49 @@ def _piper_runner_if_available() -> Callable[[str, str], bytes] | None:
     return run_piper
 
 
+def _runtime_or_unconfigured(
+    app: FastAPI, runtime: "DictionaryRuntime | None"
+) -> "JSONResponse | DictionaryRuntime":
+    """Return the runtime or a 503 chooser-state response for Offline-only endpoints."""
+    if runtime is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": (
+                    "Offline-only endpoint called while a non-Offline "
+                    "session is active or no provider is configured"
+                ),
+                "code": "offline_runtime_unavailable",
+            },
+        )
+    return runtime
+
+
+def _session_or_unconfigured(app: FastAPI) -> "JSONResponse | DictionarySession":
+    """Return the bound ``DictionarySession`` or a 503 chooser-state response.
+
+    The chooser-state response carries a stable ``code`` so the UI can
+    show the runtime chooser without crashing other endpoints.
+    """
+    session = getattr(app.state, "session", None)
+    if session is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": (
+                    "dictionary is not configured for this session; the "
+                    "runtime chooser is visible"
+                ),
+                "code": "dictionary_unconfigured",
+            },
+        )
+    return session  # type: ignore[no-any-return]
+
+
 def create_app(
-    dict_path: Path | str,
-    user_db_path: Path | str,
-    cors_origins: Sequence[str] | set[str],
+    dict_path: Path | str | None = None,
+    user_db_path: Path | str | None = None,
+    cors_origins: Sequence[str] | set[str] | None = None,
     *,
     tts_remote_url: str | None = None,
     media_dir: Path | str | None = None,
@@ -708,6 +834,14 @@ def create_app(
     service_port: int = 8000,
     expected_dictionary_sha256: str | None = None,
     expected_dictionary_version: str = "v1",
+    runtime: "DictionaryRuntime | None" = None,
+    online_provider: "DictionaryProvider | None" = None,
+    online_session_info: "OnlineSessionInfo | None" = None,
+    online_provider_factory: (
+        "Callable[[], tuple[DictionaryProvider, OnlineSessionInfo]] | None"
+    ) = None,
+    manifest_filename: str = "dictionary.sqlite",
+    managed_dictionary_dir: Path | str | None = None,
     human_audio_id_for_observation: Callable[[Mapping[str, object]], str | None] | None = None,
     human_audio_resolver: Callable[[str], tuple[bytes, HumanAudioProvenance]] | None = None,
     piper_runner: Callable[[str, str], bytes] | None = None,
@@ -715,7 +849,27 @@ def create_app(
     """Create and configure the standalone FastAPI vocabulary application.
 
     Zero module-level state; no environment reads at import time (AGENTS C1).
+
+    Two construction modes:
+
+    1. ``dict_path`` is provided — the application builds a
+       ``DictionaryRuntime`` from the canonical Offline dictionary. This
+       is the legacy fully-local mode and the canonical launcher's mode.
+    2. ``runtime`` is provided — a pre-built ``DictionaryRuntime`` (with
+       a verified canonical asset) is reused; E2E harnesses use this to
+       share a single runtime across endpoints.
+    3. ``online_provider`` is provided — an ``OnlineDictionaryProvider``
+       built against the deterministic Slice 11 harness. The application
+       binds a session to that provider instead of a runtime. No PART-B
+       migration is performed when Online mode is bound; ``user_db_path``
+       is still required for fresh note creation against existing user
+       state.
+
+    The session-scoped chooser/preference state is held on ``app.state``
+    but never persisted.
     """
+    if user_db_path is None:
+        raise ValueError("user_db_path is required")
     if not isinstance(cors_origins, (list, tuple, set, frozenset)):
         raise TypeError("cors_origins must be a sequence or set of origin strings")
     if isinstance(service_port, bool) or not isinstance(service_port, int):
@@ -731,7 +885,6 @@ def create_app(
 
     cors_origins_set = set(cors_origins)
 
-    dict_p = Path(dict_path).resolve()
     user_db_p = Path(user_db_path).resolve()
 
     resolved_media_dir = (
@@ -748,16 +901,37 @@ def create_app(
     resolved_media_dir.mkdir(parents=True, exist_ok=True)
     resolved_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    runtime = DictionaryRuntime(
-        dict_p,
-        user_db_p,
-        expected_sha256=expected_dictionary_sha256,
-        expected_version=expected_dictionary_version,
+    if runtime is None and online_provider is None:
+        if dict_path is None:
+            # Slice 12 chooser state: no provider bound yet. The runtime
+            # Settings endpoint exposes
+            # ``/vocab/settings/dictionary/install-offline`` /
+            # ``use-online`` etc. which construct a session at runtime.
+            # The /vocab/lookup + dictionary reads in chooser state are
+            # themselves not used (the UI shows the chooser).
+            runtime = None
+        else:
+            dict_p = Path(dict_path).resolve()
+            runtime = DictionaryRuntime(
+                dict_p,
+                user_db_p,
+                expected_sha256=expected_dictionary_sha256,
+                expected_version=expected_dictionary_version,
+            )
+    elif online_provider is not None:
+        if dict_path is not None or runtime is not None:
+            raise ValueError(
+                "online_provider cannot be combined with dict_path or runtime"
+            )
+
+    resolved_managed_dir = (
+        Path(managed_dictionary_dir).resolve()
+        if managed_dictionary_dir is not None
+        else user_db_p.parent / "dictionary"
     )
 
     app = FastAPI(title="Wortlaut Vocabulary API", version="0.1.0")
 
-    app.state.dict_path = dict_p
     app.state.user_db_path = user_db_p
     app.state.cors_origins = cors_origins_set
     app.state.tts_remote_url = tts_remote_url
@@ -766,7 +940,43 @@ def create_app(
     app.state.human_audio_id_for_observation = human_audio_id_for_observation
     app.state.human_audio_resolver = human_audio_resolver
     app.state.piper_runner = piper_runner or _piper_runner_if_available()
-    app.state.runtime = runtime
+    app.state.manifest_filename = manifest_filename
+    app.state.managed_dictionary_dir = resolved_managed_dir
+    app.state.online_provider_factory = online_provider_factory
+    app.state.expected_dictionary_sha256 = expected_dictionary_sha256
+    app.state.expected_dictionary_version = expected_dictionary_version
+
+    if runtime is not None:
+        app.state.dict_path = runtime.managed_dir / "dictionary.sqlite"
+        app.state.runtime = runtime
+        session = DictionarySession(runtime=runtime)
+        app.state.session = session
+        app.state.dictionary_mode = "offline"
+        app.state.online_session_info = None
+    elif online_provider is not None:
+        info = online_session_info or OnlineSessionInfo(
+            dataset_token=str(getattr(online_provider, "_dataset_token", "online")),
+            asset_token=str(online_provider.asset_token),
+            cache_dir=str(getattr(online_provider, "_cache_dir", "")),
+        )
+        app.state.online_provider = online_provider
+        app.state.dict_path = None
+        session = DictionarySession(provider=online_provider, online_info=info)
+        app.state.session = session
+        app.state.dictionary_mode = "online"
+        app.state.online_session_info = info
+        app.state.runtime = None
+    else:
+        # Slice 12 chooser state: no dictionary provider bound yet. The
+        # session is intentionally None; the Settings endpoint rebuilds
+        # it once the user chooses. Most served-product reads will
+        # surface a structured 503 until the chooser resolves.
+        app.state.runtime = None
+        app.state.online_provider = None
+        app.state.online_session_info = None
+        app.state.session = None
+        app.state.dictionary_mode = "unconfigured"
+        app.state.dict_path = None
 
     app.add_middleware(
         BrowserSecurityMiddleware,
@@ -776,8 +986,15 @@ def create_app(
 
     @app.on_event("shutdown")
     def shutdown_event() -> None:
-        if hasattr(app.state, "runtime") and not app.state.runtime.is_closed:
-            app.state.runtime.close()
+        try:
+            if runtime is not None and not runtime.is_closed:
+                runtime.close()
+        except Exception:
+            pass
+        try:
+            session.close()
+        except Exception:
+            pass
 
     # -----------------------------------------------------------------------
     # Endpoints under /vocab prefix
@@ -792,7 +1009,13 @@ def create_app(
                 content={"detail": "Query parameter 'q' must not be empty"},
             )
 
-        asset_token, candidates = runtime.materialize_lookup(clean_q)
+        guard = _session_or_unconfigured(app)
+        if isinstance(guard, JSONResponse):
+            return guard
+        try:
+            asset_token, candidates = guard.materialize_lookup(clean_q)
+        except ProviderUnavailableError as exc:
+            return _provider_failure_to_response(exc)
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={
@@ -812,7 +1035,13 @@ def create_app(
                 content={"detail": "query must not be empty"},
             )
         clean_q = query.strip()
-        asset_token, candidates = runtime.materialize_lookup(clean_q)
+        guard = _session_or_unconfigured(app)
+        if isinstance(guard, JSONResponse):
+            return guard
+        try:
+            asset_token, candidates = guard.materialize_lookup(clean_q)
+        except ProviderUnavailableError as exc:
+            return _provider_failure_to_response(exc)
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={
@@ -879,11 +1108,16 @@ def create_app(
 
         selected_text = sentence_text[start:end].strip()
 
-        with runtime.reading() as snapshot:
-            token = snapshot.asset_token
-            # Perform candidate resolution
-            dict_conn = runtime._current_generation.asset.connection
-            oracle = _ConnectionLookupOracle(dict_conn)
+        guard = _session_or_unconfigured(app)
+        if isinstance(guard, JSONResponse):
+            return guard
+        with guard.reading():
+            token = guard.asset_token()
+            # Perform candidate resolution through the Slice-11
+            # provider contract; the served-product read path no longer
+            # opens the asset's raw SQLite connection.
+            provider = guard.provider()
+            oracle = _ProviderOracle(provider)
 
             # Try spacy token resolution if possible
             refs: list[Ref] = []
@@ -895,14 +1129,20 @@ def create_app(
                         t for t in doc if t.idx < end and (t.idx + len(t.text)) > start
                     ]
                     for tok in target_tokens:
-                        for r in resolve_token(tok, oracle):
-                            if r not in refs:
-                                refs.append(r)
+                        try:
+                            for r in resolve_token(tok, oracle):
+                                if r not in refs:
+                                    refs.append(r)
+                        except ProviderUnavailableError as exc:
+                            return _provider_failure_to_response(exc)
                 except Exception:
                     refs = []
 
             if not refs and selected_text:
-                refs = list(resolve_word(selected_text, oracle))
+                try:
+                    refs = list(resolve_word(selected_text, oracle))
+                except ProviderUnavailableError as exc:
+                    return _provider_failure_to_response(exc)
 
             if not refs and selected_text:
                 refs = [
@@ -916,9 +1156,12 @@ def create_app(
 
             candidates: list[dict[str, Any]] = []
             for r in refs:
-                cand = _materialize_candidate_from_ref(
-                    r, dict_conn, oracle, known_lemmas=known_lemmas
-                )
+                try:
+                    cand = _materialize_candidate_from_ref(
+                        r, provider, oracle, known_lemmas=known_lemmas
+                    )
+                except ProviderUnavailableError as exc:
+                    return _provider_failure_to_response(exc)
                 if cand is not None:
                     candidates.append(cand)
 
@@ -1021,8 +1264,8 @@ def create_app(
                             content={"detail": "selected_span out of bounds"},
                         )
 
-        with runtime.reading() as snapshot:
-            active_token = snapshot.asset_token
+        with session.reading() as snapshot:
+            active_token = session.asset_token()
             if picker_token != active_token:
                 return JSONResponse(
                     status_code=status.HTTP_409_CONFLICT,
@@ -1464,9 +1707,14 @@ def create_app(
                 content={"detail": "csv_text contains no valid lines"},
             )
 
-        with runtime.reading():
-            dict_conn = runtime._current_generation.asset.connection
-            oracle = _ConnectionLookupOracle(dict_conn)
+        guard = _session_or_unconfigured(app)
+        if isinstance(guard, JSONResponse):
+            return guard
+        with guard.reading():
+            # Provider-backed oracle; the served-product read path no
+            # longer opens the asset's raw SQLite connection.
+            provider = guard.provider()
+            oracle = _ProviderOracle(provider)
 
             conn = _get_user_db_conn(app)
             try:
@@ -1483,7 +1731,10 @@ def create_app(
                 reused_count = 0
 
                 for word in lines:
-                    refs = list(resolve_word(word, oracle))
+                    try:
+                        refs = list(resolve_word(word, oracle))
+                    except ProviderUnavailableError as exc:
+                        return _provider_failure_to_response(exc)
                     if refs:
                         top_ref = refs[0]
                     else:
@@ -1495,7 +1746,10 @@ def create_app(
                         )
 
                     st_val = top_ref.status
-                    exact_lemmas = oracle.lookup_exact(top_ref.lemma, pos=top_ref.pos)
+                    try:
+                        exact_lemmas = oracle.lookup_exact(top_ref.lemma, pos=top_ref.pos)
+                    except ProviderUnavailableError as exc:
+                        return _provider_failure_to_response(exc)
                     if exact_lemmas and exact_lemmas[0].semantic_ref:
                         clean_lem_ref = str(exact_lemmas[0].semantic_ref)
                     else:
@@ -1505,7 +1759,10 @@ def create_app(
                     c_binds: tuple[tuple[str, str], ...] = ()
 
                     if st_val == "resolved":
-                        senses = oracle.lookup_senses(top_ref.lemma_id or 0)
+                        try:
+                            senses = oracle.lookup_senses(top_ref.lemma_id or 0)
+                        except ProviderUnavailableError as exc:
+                            return _provider_failure_to_response(exc)
                         if senses and senses[0].semantic_ref:
                             clean_sense_ref = str(senses[0].semantic_ref)
                         else:
@@ -1580,8 +1837,8 @@ def create_app(
         # 1. Stale picker token validation (ADR-0004 D47)
         picker_token = body.get("asset_token")
 
-        with runtime.reading() as snapshot:
-            active_token = snapshot.asset_token
+        with session.reading() as snapshot:
+            active_token = session.asset_token()
             if picker_token != active_token:
                 return JSONResponse(
                     status_code=status.HTTP_409_CONFLICT,
@@ -1824,7 +2081,10 @@ def create_app(
 
     @app.get("/vocab/cards/next")
     def next_card_endpoint(deck_id: int | None = None) -> JSONResponse:
-        card_obs = runtime.observe_card_render(deck_id=deck_id)
+        guard = _runtime_or_unconfigured(app, runtime)
+        if isinstance(guard, JSONResponse):
+            return guard
+        card_obs = guard.observe_card_render(deck_id=deck_id)
         if card_obs is None:
             return JSONResponse(
                 status_code=status.HTTP_200_OK,
@@ -2214,14 +2474,17 @@ def create_app(
                 content={"detail": "version must be a non-blank string"},
             )
 
+        guard = _runtime_or_unconfigured(app, runtime)
+        if isinstance(guard, JSONResponse):
+            return guard
         try:
-            runtime.activate_dictionary(path_val.strip(), version=version.strip())
+            guard.activate_dictionary(path_val.strip(), version=version.strip())
             return JSONResponse(
                 status_code=status.HTTP_200_OK,
                 content={
                     "status": "activated",
                     "version": version.strip(),
-                    "asset_token": runtime.asset_token,
+                    "asset_token": guard.asset_token,
                 },
             )
         except DictionaryClosedError as exc:
@@ -2335,7 +2598,10 @@ def create_app(
 
     @app.get("/vocab/export/anki")
     def export_anki_endpoint(deck_id: int | None = None) -> Response:
-        cards_obs = runtime.observe_export_payload(deck_id=deck_id)
+        guard = _runtime_or_unconfigured(app, runtime)
+        if isinstance(guard, JSONResponse):
+            return guard
+        cards_obs = guard.observe_export_payload(deck_id=deck_id)
 
         tsv_lines: list[str] = [
             "#separator:tab",
@@ -2422,7 +2688,10 @@ def create_app(
             )
 
         deck_name = str(deck_row["name"])
-        observations = runtime.observe_export_payload(deck_id=deck_id)
+        guard = _runtime_or_unconfigured(app, runtime)
+        if isinstance(guard, JSONResponse):
+            return guard
+        observations = guard.observe_export_payload(deck_id=deck_id)
         package_bytes = build_apkg(
             observations,
             deck_name=deck_name,
@@ -2436,6 +2705,453 @@ def create_app(
             content=package_bytes,
             media_type="application/apkg",
             headers={"Content-Disposition": f'attachment; filename="{safe_name}.apkg"'},
+        )
+
+    @app.get("/vocab/settings/dictionary")
+    def settings_dictionary_get() -> JSONResponse:
+        """Return the chooser/runtime status for the Settings UI."""
+        mode = str(getattr(app.state, "dictionary_mode", "unconfigured"))
+        managed = Path(app.state.managed_dictionary_dir)
+        manifest_filename = str(getattr(app.state, "manifest_filename", "dictionary.sqlite"))
+        canonical = managed / manifest_filename
+        present = canonical.is_file()
+        valid = False
+        if present:
+            try:
+                asset = validate_candidate_dictionary(canonical)
+                try:
+                    valid = (
+                        asset.path.name == manifest_filename
+                        and asset.sha256.lower()
+                        == str(
+                            getattr(app.state, "expected_dictionary_sha256", "")
+                            or asset.sha256
+                        ).lower()
+                    )
+                finally:
+                    try:
+                        asset.close()
+                    except Exception:
+                        pass
+            except Exception:
+                valid = False
+        info = getattr(app.state, "online_session_info", None)
+        online_active = mode == "online" or info is not None
+        from app.dictionary_mode import DictionaryModeName
+
+        valid_mode: DictionaryModeName = (
+            "offline" if mode == "offline" else "online" if mode == "online" else "unconfigured"
+        )
+        status_payload = session_status(
+            mode=valid_mode,
+            canonical_offline_path=canonical,
+            canonical_offline_present=present,
+            canonical_offline_valid=valid,
+            online_active=online_active,
+        )
+        if info is not None:
+            status_payload["online_info"] = {
+                "dataset_token": info.dataset_token,
+                "asset_token": info.asset_token,
+                "cache_dir": info.cache_dir,
+            }
+        return JSONResponse(status_code=200, content=status_payload)
+
+    @app.post("/vocab/settings/dictionary/install-offline")
+    async def settings_install_offline(request: Request) -> JSONResponse:
+        """Run the hardened full Offline installer.
+
+        The chooser/Online-active flows use this endpoint to populate
+        the managed canonical slot. The preflight is enforced before
+        any download begins: insufficient free space is rejected
+        immediately, no existing valid Offline dictionary is replaced,
+        and no user data is mutated.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        manifest_bytes_raw = body.get("manifest_bytes")
+        manifest_bytes: int | None
+        if (
+            isinstance(manifest_bytes_raw, int)
+            and not isinstance(manifest_bytes_raw, bool)
+            and manifest_bytes_raw > 0
+        ):
+            manifest_bytes = int(manifest_bytes_raw)
+        else:
+            manifest_bytes = OFFLINE_INSTALL_DEFAULT_MANIFEST_BYTES
+
+        managed = Path(app.state.managed_dictionary_dir)
+        install_path = managed / str(app.state.manifest_filename)
+        # Refuse early when the canonical file is already a valid asset.
+        # The installer's contract refuses to overwrite a validated file;
+        # this matches AGENTS R9 / ADR-0001 §12.
+        if install_path.is_file():
+            try:
+                asset = validate_candidate_dictionary(install_path)
+                try:
+                    return JSONResponse(
+                        status_code=200,
+                        content={
+                            "status": "already_present",
+                            "canonical_offline_path": str(install_path),
+                            "sha256": asset.sha256,
+                            "byte_size": install_path.stat().st_size,
+                        },
+                    )
+                finally:
+                    try:
+                        asset.close()
+                    except Exception:
+                        pass
+            except Exception:
+                # existing file is unusable; fall through to a fresh install
+                pass
+
+        try:
+            peak = preflight_offline_install(
+                manifest_bytes=manifest_bytes, install_dir=managed
+            )
+        except OfflineInstallRefused as exc:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": str(exc),
+                    "code": exc.code,
+                    "available_bytes": exc.available_bytes,
+                    "required_bytes": exc.required_bytes,
+                },
+            )
+
+        try:
+            from app.dict_install import (  # noqa: PLC0415  # noqa: PLC0415
+                DictionaryInstallerError,
+                DictionaryManifest,
+                install_dictionary,
+                parse_manifest_payload,
+            )
+
+            manifest_payload = {
+                "version": "v2",
+                "filename": str(app.state.manifest_filename),
+                "sha256": str(app.state.expected_dictionary_sha256 or ""),
+                "bytes": int(manifest_bytes),
+                "classification": "settings-pull",
+                "attribution": "ATTRIBUTION-v2.md",
+                "download_url": body.get("download_url"),
+            }
+            manifest = parse_manifest_payload(
+                manifest_payload, manifest_path=managed / "manifest.json"
+            )
+            assert isinstance(manifest, DictionaryManifest)
+            install_dictionary(manifest, target_dir=managed)
+        except DictionaryInstallerError as exc:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": str(exc),
+                    "code": "offline_install_failed",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "detail": f"install failed: {exc}",
+                    "code": "offline_install_exception",
+                },
+            )
+
+        # Successful install — record the canonical path/identity on app state.
+        try:
+            asset = validate_candidate_dictionary(install_path)
+            try:
+                app.state.dict_path = install_path
+                app.state.expected_dictionary_sha256 = asset.sha256
+            finally:
+                try:
+                    asset.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "installed",
+                "canonical_offline_path": str(install_path),
+                "measured_bytes": peak.measured_bytes,
+                "safety_threshold_bytes": peak.safety_threshold_bytes,
+            },
+        )
+
+    @app.post("/vocab/settings/dictionary/remove-offline")
+    async def settings_remove_offline(request: Request) -> JSONResponse:
+        """Remove the managed canonical full Offline dictionary.
+
+        The contract is:
+
+        * Offline ACTIVE: refused with a structured, actionable conflict
+          (``offline_dictionary_in_use``). Canonical file remains;
+          ``active_dictionary_metadata`` unchanged; zero user-data
+          mutation.
+        * Online ACTIVE: the canonical file is removed after verifying
+          it is the managed canonical asset; the Online cache and the
+          ``active_dictionary_metadata`` row stay untouched; zero
+          user-data mutation.
+
+        Across both branches, user data (notes, cards, ``review_log``,
+        user/audio/sense refs) never changes.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        mode = str(getattr(app.state, "dictionary_mode", ""))
+        if mode != "online":
+            # Per ADR-0009, Offline-active removal is rejected with a
+            # structured conflict. The user is told to switch to Online
+            # for this session first.
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": (
+                        "offline_dictionary_in_use: switch the session to "
+                        "Online for this session before removing the "
+                        "canonical Offline dictionary."
+                    ),
+                    "code": "offline_dictionary_in_use",
+                    "current_mode": mode,
+                },
+            )
+
+        managed = Path(app.state.managed_dictionary_dir)
+        target_filename = str(
+            body.get("filename") or app.state.manifest_filename
+        )
+        expected_sha = (
+            str(app.state.expected_dictionary_sha256)
+            if app.state.expected_dictionary_sha256
+            else None
+        )
+        expected_bytes = (
+            int(app.state.expected_dictionary_bytes)
+            if getattr(app.state, "expected_dictionary_bytes", None)
+            else None
+        )
+        removed, detail = remove_canonical_offline(
+            managed_dir=managed,
+            target_filename=target_filename,
+            expected_sha256=expected_sha,
+            expected_bytes=expected_bytes,
+        )
+        if not removed:
+            return JSONResponse(
+                status_code=409,
+                content={"detail": detail, "code": "offline_removal_failed"},
+            )
+        app.state.dict_path = None
+        app.state.expected_dictionary_sha256 = None
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "removed",
+                "detail": detail,
+                "canonical_offline_path": str(managed / target_filename),
+            },
+        )
+
+    @app.post("/vocab/settings/dictionary/clear-online-cache")
+    def settings_clear_online_cache() -> JSONResponse:
+        """Clear the Online provider's immutable shard cache directory.
+
+        The Online provider must already be bound, and this only removes
+        Online shard artifacts — user data, the dictionary asset path,
+        and ``active_dictionary_metadata`` are untouched.
+        """
+        info = getattr(app.state, "online_session_info", None)
+        cache_dir = Path(info.cache_dir) if info is not None else None
+        if cache_dir is None or not cache_dir.exists():
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": "online cache is not configured",
+                    "code": "online_cache_not_configured",
+                },
+            )
+        removed_count = 0
+        for entry in cache_dir.iterdir():
+            try:
+                if entry.is_dir():
+                    import shutil
+
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+                removed_count += 1
+            except OSError:
+                pass
+        return JSONResponse(
+            status_code=200,
+            content={"status": "cleared", "removed_count": int(removed_count)},
+        )
+
+    @app.post("/vocab/settings/dictionary/use-online")
+    async def settings_use_online(request: Request) -> JSONResponse:
+        """Switch the session provider to Online for this process.
+
+        Reuses the ``online_provider_factory`` set on ``app.state``. The
+        canonical Offline dictionary file is preserved; only the
+        dictionary source for the running session changes. The
+        ``active_dictionary_metadata`` row and all user data remain
+        intact.
+        """
+        factory = getattr(app.state, "online_provider_factory", None)
+        if factory is None:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": "online_provider_factory is not configured on this server",
+                    "code": "online_provider_unavailable",
+                },
+            )
+        try:
+            provider, info = factory()
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": f"online factory failed: {exc}",
+                    "code": "online_factory_failed",
+                },
+            )
+
+        # Tear down the previous runtime, if any.
+        previous_runtime = getattr(app.state, "runtime", None)
+        if previous_runtime is not None and not previous_runtime.is_closed:
+            try:
+                previous_runtime.close()
+            except Exception:
+                pass
+
+        previous_session = getattr(app.state, "session", None)
+        if previous_session is not None:
+            try:
+                previous_session.close()
+            except Exception:
+                pass
+
+        new_session = DictionarySession(provider=provider, online_info=info)
+        app.state.session = new_session
+        app.state.online_provider = provider
+        app.state.online_session_info = info
+        app.state.dictionary_mode = "online"
+        app.state.runtime = None
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "online",
+                "online_info": {
+                    "dataset_token": info.dataset_token,
+                    "asset_token": info.asset_token,
+                    "cache_dir": info.cache_dir,
+                },
+            },
+        )
+
+    @app.post("/vocab/settings/dictionary/use-offline")
+    async def settings_use_offline(request: Request) -> JSONResponse:
+        """Switch the session provider to Offline for this process.
+
+        Requires a verified canonical full Offline dictionary at the
+        managed path. Refuses with a structured actionable conflict when
+        no valid asset is present (the user must ``install-offline``
+        first).
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        managed = Path(app.state.managed_dictionary_dir)
+        install_path = managed / str(app.state.manifest_filename)
+        if not install_path.is_file():
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": "no canonical full Offline dictionary available; install first",
+                    "code": "offline_unavailable",
+                    "canonical_offline_path": str(install_path),
+                },
+            )
+        # Validate the asset before swapping the session.
+        try:
+            asset = validate_candidate_dictionary(install_path)
+        except Exception as exc:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": f"offline dictionary is not valid: {exc}",
+                    "code": "offline_unavailable",
+                },
+            )
+        asset_sha = str(asset.sha256)
+        try:
+            new_runtime = DictionaryRuntime(
+                install_path,
+                Path(app.state.user_db_path),
+                expected_sha256=asset_sha,
+                expected_version=str(app.state.expected_dictionary_version),
+            )
+        except Exception as exc:
+            try:
+                asset.close()
+            except Exception:
+                pass
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": f"could not activate offline dictionary: {exc}",
+                    "code": "offline_activation_failed",
+                },
+            )
+        try:
+            asset.close()
+        except Exception:
+            pass
+
+        previous_session = getattr(app.state, "session", None)
+        if previous_session is not None:
+            try:
+                previous_session.close()
+            except Exception:
+                pass
+        previous_online_provider = getattr(app.state, "online_provider", None)
+        if previous_online_provider is not None:
+            try:
+                previous_online_provider.close()
+            except Exception:
+                pass
+
+        new_session = DictionarySession(runtime=new_runtime)
+        app.state.session = new_session
+        app.state.runtime = new_runtime
+        app.state.dictionary_mode = "offline"
+        app.state.online_provider = None
+        app.state.online_session_info = None
+        app.state.dict_path = install_path
+        app.state.expected_dictionary_sha256 = asset_sha
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "offline",
+                "asset_token": new_runtime.asset_token,
+                "canonical_offline_path": str(install_path),
+            },
         )
 
     frontend_dir = Path(__file__).with_name("frontend")

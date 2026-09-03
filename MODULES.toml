@@ -230,15 +230,16 @@ owned_paths = [
     "release/README.md",
     "app/frontend/**",
 ]
-dependencies = ["runtime_api", "dictionary"]
+dependencies = ["runtime_api", "dictionary", "provider", "dictionary_mode"]
 focused_tests = [
     "tests/test_standalone.py",
     "tests/test_launcher.py",
     "tests/test_launcher_smoke.py",
+    "tests/test_slice12_settings.py",
 ]
 focused_commands = ["python -m app.standalone --help"]
 agents_rules = ["R8", "R9", "R12"]
-adrs = ["0001", "0002"]
+adrs = ["0001", "0002", "0009"]
 
 [modules.dict_install]
 id = "dict_install"
@@ -247,6 +248,19 @@ dependencies = ["dictionary"]
 focused_tests = ["tests/test_dict_install.py"]
 agents_rules = ["R9"]
 adrs = ["0001", "0004"]
+
+[modules.dictionary_mode]
+id = "dictionary_mode"
+owned_paths = [
+    "app/dictionary_mode.py",
+    "app/dictionary_session.py",
+]
+dependencies = ["provider"]
+focused_tests = [
+    "tests/test_slice12_settings.py",
+]
+agents_rules = ["R2", "R13"]
+adrs = ["0009"]
 
 [modules.provider]
 id = "provider"

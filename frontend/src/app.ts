@@ -2,7 +2,16 @@ import { LitElement, css, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { createVocabClient } from './api/client.ts';
 import { ApiError } from './api/errors.ts';
-import type { Candidate, CandidateSense, CaptureContext, DeckSummary, MeaningLanguage, NextCardData, RenderedMeaning } from './api/types.ts';
+import type {
+  Candidate,
+  CandidateSense,
+  CaptureContext,
+  DeckSummary,
+  DictionarySettingsInfo,
+  MeaningLanguage,
+  NextCardData,
+  RenderedMeaning,
+} from './api/types.ts';
 import {
   extraInfoOpenOnCardLoad,
   extraInfoOpenOnPreferenceChange,
@@ -14,10 +23,13 @@ import {
 type DeckListStatus = 'loading' | 'ready' | 'error';
 type LookupStatus = 'idle' | 'loading' | 'ready' | 'error';
 type CaptureStatus = 'idle' | 'loading' | 'ready' | 'error';
-type AppView = 'decks' | 'deck' | 'study';
+type AppView = 'decks' | 'deck' | 'study' | 'chooser' | 'settings';
 type StudyStatus = 'idle' | 'loading' | 'ready' | 'empty' | 'error';
 type AudioStatus = 'idle' | 'loading' | 'playing' | 'unavailable';
 type RecordingStatus = 'idle' | 'recording' | 'ready' | 'saving' | 'save-error';
+type SessionMode = 'offline' | 'online' | 'unconfigured';
+type DictionarySettingsStatus = 'loading' | 'ready' | 'error';
+type DictionarySettingsAction = 'idle' | 'installing' | 'removing' | 'clearing' | 'switching-online' | 'switching-offline';
 
 const confidenceLabels = [
   ['1', 'Not at all'],
@@ -249,6 +261,13 @@ export class FlashcardApp extends LitElement {
   @state() private showRecordingControls = false;
   @state() private revertConfirmation = false;
   @state() private hasCustomAudio = false;
+  @state() private dictionaryMode: SessionMode = 'unconfigured';
+  @state() private dictionarySettings: DictionarySettingsInfo | null = null;
+  @state() private dictionarySettingsStatus: DictionarySettingsStatus = 'loading';
+  @state() private dictionaryAction: DictionarySettingsAction = 'idle';
+  @state() private dictionaryActionMessage = '';
+  @state() private dictionaryActionError = '';
+  @state() private confirmRemoveOffline = false;
   private focusTarget: 'answer' | 'empty' | null = null;
   private audioPlayer: HTMLAudioElement | null = null;
   private mediaRecorder: MediaRecorder | null = null;
@@ -257,6 +276,7 @@ export class FlashcardApp extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.loadDecks();
+    void this.loadDictionarySettings();
     window.addEventListener('keydown', this.handleStudyKeydown);
   }
 
@@ -1579,6 +1599,228 @@ export class FlashcardApp extends LitElement {
     `;
   }
 
+  private async loadDictionarySettings(): Promise<void> {
+    this.dictionarySettingsStatus = 'loading';
+    this.dictionaryActionError = '';
+    try {
+      const info = await vocabClient.getDictionarySettings();
+      this.dictionarySettings = info;
+      this.dictionaryMode = info.mode;
+      this.dictionarySettingsStatus = 'ready';
+      // The chooser is the runtime's unconfigured view; UI surfaces it
+      // when the server says so, and only then.
+      if (info.mode === 'unconfigured' && this.view !== 'study' && this.view !== 'chooser') {
+        // Stay on decks unless the user was already in settings; the
+        // chooser banner is rendered inside renderSettings so it's
+        // reachable from anywhere.
+      }
+    } catch (error) {
+      this.dictionarySettingsStatus = 'error';
+      this.dictionaryActionError = this.messageFor(
+        error,
+        'Could not read the dictionary settings.',
+      );
+    }
+  }
+
+  private async useOnline(): Promise<void> {
+    this.dictionaryAction = 'switching-online';
+    this.dictionaryActionMessage = '';
+    this.dictionaryActionError = '';
+    try {
+      await vocabClient.useOnline();
+      this.dictionaryActionMessage = 'Now using Online for this session.';
+      await this.loadDictionarySettings();
+    } catch (error) {
+      this.dictionaryActionError = this.messageFor(
+        error,
+        'Could not switch to Online for this session.',
+      );
+    } finally {
+      this.dictionaryAction = 'idle';
+    }
+  }
+
+  private async useOffline(): Promise<void> {
+    this.dictionaryAction = 'switching-offline';
+    this.dictionaryActionMessage = '';
+    this.dictionaryActionError = '';
+    try {
+      await vocabClient.useOffline();
+      this.dictionaryActionMessage = 'Now using Offline for this session.';
+      await this.loadDictionarySettings();
+    } catch (error) {
+      this.dictionaryActionError = this.messageFor(
+        error,
+        'Could not switch to Offline for this session.',
+      );
+    } finally {
+      this.dictionaryAction = 'idle';
+    }
+  }
+
+  private async installOffline(): Promise<void> {
+    this.dictionaryAction = 'installing';
+    this.dictionaryActionMessage = '';
+    this.dictionaryActionError = '';
+    try {
+      const result = await vocabClient.installOffline();
+      this.dictionaryActionMessage = `Installed full Offline dictionary (status: ${result.status}).`;
+      await this.loadDictionarySettings();
+    } catch (error) {
+      this.dictionaryActionError = this.messageFor(
+        error,
+        'Could not install the full Offline dictionary.',
+      );
+    } finally {
+      this.dictionaryAction = 'idle';
+    }
+  }
+
+  private async removeOffline(): Promise<void> {
+    this.dictionaryAction = 'removing';
+    this.dictionaryActionMessage = '';
+    this.dictionaryActionError = '';
+    try {
+      const result = await vocabClient.removeOffline();
+      this.dictionaryActionMessage = `Removed Offline dictionary: ${result.detail}`;
+      this.confirmRemoveOffline = false;
+      await this.loadDictionarySettings();
+    } catch (error) {
+      this.dictionaryActionError = this.messageFor(
+        error,
+        'Could not remove the Offline dictionary.',
+      );
+    } finally {
+      this.dictionaryAction = 'idle';
+    }
+  }
+
+  private async clearOnlineCache(): Promise<void> {
+    this.dictionaryAction = 'clearing';
+    this.dictionaryActionMessage = '';
+    this.dictionaryActionError = '';
+    try {
+      const result = await vocabClient.clearOnlineCache();
+      this.dictionaryActionMessage = `Online cache cleared (${result.removed_count} entries).`;
+      await this.loadDictionarySettings();
+    } catch (error) {
+      this.dictionaryActionError = this.messageFor(
+        error,
+        'Could not clear the Online cache.',
+      );
+    } finally {
+      this.dictionaryAction = 'idle';
+    }
+  }
+
+  private renderChooser() {
+    return html`
+      <main class="panel" aria-labelledby="chooser-title">
+        <h2 id="chooser-title">Choose how to use the dictionary</h2>
+        <p class="muted">
+          No canonical full Offline dictionary is available yet. Pick how this
+          process should serve the vocabulary:
+        </p>
+        <div class="workflow-grid">
+          <section class="workflow" aria-labelledby="chooser-online-title">
+            <h3 id="chooser-online-title">Use Online</h3>
+            <p>Start now without downloading the full dictionary. Online applies
+              to the current session only.</p>
+            <button class="primary" type="button" @click=${() => void this.useOnline()} ?disabled=${this.dictionaryAction !== 'idle'}>
+              ${this.dictionaryAction === 'switching-online' ? 'Switching…' : 'Use Online'}
+            </button>
+          </section>
+          <section class="workflow" aria-labelledby="chooser-offline-title">
+            <h3 id="chooser-offline-title">Download for Offline use</h3>
+            <p>Download ~945 MB and work without internet afterward. The
+              free-space preflight happens before any download begins.</p>
+            <button type="button" @click=${() => void this.installOffline()} ?disabled=${this.dictionaryAction !== 'idle'}>
+              ${this.dictionaryAction === 'installing' ? 'Starting install…' : 'Download for Offline use'}
+            </button>
+          </section>
+        </div>
+        ${this.dictionaryActionError ? html`<p class="inline-status error" role="alert">${this.dictionaryActionError}</p>` : nothing}
+      </main>
+    `;
+  }
+
+  private renderSettings() {
+    const info = this.dictionarySettings;
+    const showChooserBanner = this.dictionaryMode === 'unconfigured' && info?.canonical_offline_valid !== true;
+    return html`
+      <main class="panel" aria-labelledby="settings-title">
+        <div class="toolbar"><h2 id="settings-title">Dictionary</h2><button @click=${() => void this.loadDictionarySettings()} ?disabled=${this.dictionarySettingsStatus === 'loading'}>${this.dictionarySettingsStatus === 'loading' ? 'Refreshing…' : 'Refresh'}</button></div>
+        ${this.dictionarySettingsStatus === 'error' ? html`<p class="inline-status error" role="alert">${this.dictionaryActionError}</p>` : nothing}
+        ${showChooserBanner ? this.renderChooserInline() : nothing}
+        ${info ? html`
+          <dl class="settings-meta">
+            <dt>Mode</dt><dd data-testid="dictionary-mode">${info.mode}</dd>
+            <dt>Canonical Offline</dt><dd><code>${info.canonical_offline_path}</code></dd>
+            <dt>Present</dt><dd>${info.canonical_offline_present ? 'yes' : 'no'}</dd>
+            <dt>Valid</dt><dd>${info.canonical_offline_valid ? 'yes' : 'no'}</dd>
+            ${info.online_info ? html`
+              <dt>Online dataset token</dt><dd><code>${info.online_info.dataset_token.slice(0, 16)}…</code></dd>
+            ` : nothing}
+          </dl>
+        ` : nothing}
+        <div class="workflow-grid">
+          <section class="workflow" aria-labelledby="online-action-title">
+            <h3 id="online-action-title">Online</h3>
+            <p>${info?.mode === 'online' ? 'Online is active for this session.' : 'Use the trusted Online dictionary for this session only.'}</p>
+            <button class="primary" type="button" @click=${() => void this.useOnline()} ?disabled=${this.dictionaryAction !== 'idle' || info?.mode === 'online'}>
+              ${this.dictionaryAction === 'switching-online' ? 'Switching…' : 'Use Online for this session'}
+            </button>
+            <button type="button" @click=${() => void this.clearOnlineCache()} ?disabled=${this.dictionaryAction !== 'idle' || !info?.online_active}>
+              ${this.dictionaryAction === 'clearing' ? 'Clearing…' : 'Clear Online cache'}
+            </button>
+          </section>
+          <section class="workflow" aria-labelledby="offline-action-title">
+            <h3 id="offline-action-title">Offline</h3>
+            <p>${info?.mode === 'offline' ? 'Offline is active for this session.' : 'Activate the trusted full Offline dictionary for this session.'}</p>
+            <button class="primary" type="button" @click=${() => void this.useOffline()} ?disabled=${this.dictionaryAction !== 'idle' || info?.mode === 'offline' || !info?.canonical_offline_valid}>
+              ${this.dictionaryAction === 'switching-offline' ? 'Switching…' : 'Use Offline'}
+            </button>
+            <button type="button" @click=${() => void this.installOffline()} ?disabled=${this.dictionaryAction !== 'idle' || info?.canonical_offline_valid === true}>
+              ${this.dictionaryAction === 'installing' ? 'Starting install…' : 'Download for Offline use'}
+            </button>
+            ${info?.mode === 'offline' && !this.confirmRemoveOffline ? html`
+              <button class="danger" type="button" @click=${() => { this.confirmRemoveOffline = true; }} ?disabled=${this.dictionaryAction !== 'idle'}>
+                Remove Offline dictionary
+              </button>
+            ` : nothing}
+            ${this.confirmRemoveOffline ? html`
+              <div class="confirm" role="alertdialog">
+                <p>Remove the canonical Offline dictionary while Online is active? Choose another mode (Online for this session) first if Offline is in use.</p>
+                <button class="danger" type="button" @click=${() => void this.removeOffline()} ?disabled=${this.dictionaryAction !== 'idle'}>Confirm remove Offline</button>
+                <button type="button" @click=${() => { this.confirmRemoveOffline = false; }}>Cancel</button>
+              </div>
+            ` : nothing}
+          </section>
+        </div>
+        ${this.dictionaryActionMessage ? html`<p class="inline-status" role="status">${this.dictionaryActionMessage}</p>` : nothing}
+        ${this.dictionaryActionError ? html`<p class="inline-status error" role="alert">${this.dictionaryActionError}</p>` : nothing}
+      </main>
+    `;
+  }
+
+  private renderChooserInline() {
+    return html`
+      <section class="panel" aria-labelledby="inline-chooser-title">
+        <h3 id="inline-chooser-title">Choose how to use the dictionary</h3>
+        <p class="muted">No canonical full Offline dictionary is available. Online applies to this session only.</p>
+        <div class="actions">
+          <button class="primary" type="button" @click=${() => void this.useOnline()} ?disabled=${this.dictionaryAction !== 'idle'}>
+            ${this.dictionaryAction === 'switching-online' ? 'Switching…' : 'Use Online'}
+          </button>
+          <button type="button" @click=${() => void this.installOffline()} ?disabled=${this.dictionaryAction !== 'idle'}>
+            ${this.dictionaryAction === 'installing' ? 'Starting install…' : 'Download for Offline use'}
+          </button>
+        </div>
+      </section>
+    `;
+  }
+
   private renderDeckDetail(deck: DeckSummary) {
     return html`
       <section class="panel" aria-labelledby="deck-title">
@@ -1612,11 +1854,15 @@ export class FlashcardApp extends LitElement {
           <nav class="primary-nav" aria-label="Main navigation">
             <button type="button" aria-current=${this.view === 'study' ? 'false' : 'page'} @click=${() => { this.view = 'decks'; this.selectedDeckId = null; }}>Decks</button>
             <button type="button" aria-current=${this.view === 'study' ? 'page' : 'false'} @click=${() => void this.openStudy()}>Study due</button>
+            <button type="button" aria-current=${this.view === 'settings' || this.view === 'chooser' ? 'page' : 'false'} @click=${() => { this.view = 'settings'; void this.loadDictionarySettings(); }}>Settings</button>
             <button type="button" @click=${this.loadDecks} ?disabled=${this.deckStatus === 'loading'}>${this.deckStatus === 'loading' ? 'Refreshing…' : 'Refresh decks'}</button>
           </nav>
         </header>
         ${this.renderNotices()}
-        ${this.view === 'study' ? this.renderStudy() : showDeckList ? html`
+        ${this.view === 'chooser' ? this.renderChooser() :
+          this.view === 'settings' ? this.renderSettings() :
+          this.view === 'study' ? this.renderStudy() :
+          showDeckList ? html`
           <main class="panel">
             <div class="toolbar"><h2>Your decks</h2><span class="muted" aria-live="polite">${this.deckStatus === 'ready' ? 'Server-synced' : ''}</span></div>
             <form class="form-row" @submit=${this.createDeck}>
