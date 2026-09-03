@@ -13,6 +13,14 @@ structure, fsyncs bytes, then atomically installs the canonical artifact.
 Reads against the cache always re-verify before handing out a new
 validated lease within the process; ``safe_unlink`` is used for clear-
 cache and active leases retain their private snapshot.
+
+Every lease carries a ``was_downloaded`` boolean. The Online provider
+charges its per-operation budget against NEW remote lookup-shard
+downloads only: a verified cached read (``was_downloaded == False``)
+is free, a missing-path download (``was_downloaded == True``) charges,
+and a corrupt cached artifact that has to be refetched
+(``was_downloaded == True``) also charges — the previous candidate's
+path-existence predicate under-charged in that case.
 """
 
 from __future__ import annotations
@@ -28,7 +36,6 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
 
 from app.online_manifest import (
     ManifestAsset,
@@ -60,6 +67,12 @@ class ShardLease:
     open it for reads but must not delete it. The lease owner is the
     cache, which retains the snapshot for the duration of any active
     lease.
+
+    ``was_downloaded`` is ``True`` when this lease was produced by an
+    actual remote download in this process (miss, corruption refetch,
+    clear-cache rebuild). It is ``False`` for a verified cached re-read
+    or for the single-flight waiters that piggy-back on a concurrent
+    download.
     """
 
     identity: ShardIdentity
@@ -68,6 +81,7 @@ class ShardLease:
     sha256: str
     byte_size: int
     schema_version: str
+    was_downloaded: bool = False
 
     @property
     def family(self) -> str:
@@ -84,16 +98,6 @@ class ShardRequest:
 
     identity: ShardIdentity
     asset: ManifestAsset
-
-
-class ShardTransport(Any):  # type: ignore[misc]
-    """Callable transport signature: download ``bytes`` for an asset.
-
-    Implementations are responsible for all network trust enforcement
-    (HTTPS pinning, redirect validation, userinfo rejection, etc.). The
-    cache treats the returned bytes as a private stream and validates them
-    before any canonical install.
-    """
 
 
 @dataclass(frozen=True)
@@ -117,6 +121,49 @@ class _PrivateSnapshot:
     sha256: str
 
 
+@dataclass
+class _StatsCounter:
+    hits: int = 0
+    misses: int = 0
+    refetches: int = 0
+    corruptions: int = 0
+    clears: int = 0
+    downloads: int = 0
+    active_leases: int = 0
+
+    def record_hit(self) -> None:
+        self.hits += 1
+
+    def record_miss(self) -> None:
+        self.misses += 1
+
+    def record_corruption(self) -> None:
+        self.corruptions += 1
+        self.refetches += 1
+
+    def record_clear(self) -> None:
+        self.clears += 1
+
+    def record_download(self) -> None:
+        self.downloads += 1
+
+    def record_lease(self) -> None:
+        # lease install opens and pins one private snapshot; release
+        # drops the count elsewhere (kept here for symmetry but no-op).
+        return
+
+    def snapshot(self) -> CacheStats:
+        return CacheStats(
+            hits=self.hits,
+            misses=self.misses,
+            refetches=self.refetches,
+            corruptions=self.corruptions,
+            clears=self.clears,
+            downloads=self.downloads,
+            active_leases=self.active_leases,
+        )
+
+
 class ShardCache:
     """Process-local verified shard cache with single-flight and immutable leases.
 
@@ -128,6 +175,9 @@ class ShardCache:
 
     Cache-miss downloads are single-flight per identity: a second
     concurrent call against the same identity waits on the same future.
+    The first call sets ``was_downloaded=True``; waiters receive a
+    lease with ``was_downloaded=False``. Corruption quarantines and
+    refetches set ``was_downloaded=True`` for the recovery lease.
     """
 
     def __init__(
@@ -147,7 +197,8 @@ class ShardCache:
         )
         self._structure_validator = structure_validator or _default_structure_validator
         self._inflight: dict[ShardIdentity, threading.Event] = {}
-        self._inflight_payload: dict[ShardIdentity, bytes | None] = {}
+        self._inflight_payload: dict[ShardIdentity, bytes] = {}
+        self._inflight_was_download: dict[ShardIdentity, bool] = {}
         self._inflight_waiters: dict[ShardIdentity, int] = {}
         self._lease_to_id: dict[ShardLease, int] = {}
         self._lock = threading.Lock()
@@ -174,6 +225,13 @@ class ShardCache:
         installs a verified canonical artifact under
         ``cache_dir/verified/<family>/<bucket>``. On hit it re-runs the
         size/SHA/structure verification before producing the lease.
+
+        The returned lease's ``was_downloaded`` field is ``True`` only
+        when this call performed an actual remote download (miss,
+        corruption refetch, or clear-cache rebuild). Verified cached
+        reads and single-flight waiters see ``False``. The Online
+        provider uses that signal to charge its per-operation budget
+        against new remote lookup-shard downloads only.
         """
         if not isinstance(request, ShardRequest):
             raise TypeError("request must be a ShardRequest")
@@ -190,55 +248,12 @@ class ShardCache:
             except ProviderIntegrityError:
                 self._stats.record_corruption()
                 self._quarantine(canonical_path)
-            else:
-                lease = self._install_lease(request, payload)
-                self._stats.record_hit()
-                return lease
+                return self._download_path(request)
+            lease = self._install_lease(request, payload, was_downloaded=False)
+            self._stats.record_hit()
+            return lease
 
-        # Single-flight per identity.
-        with self._lock:
-            inflight = self._inflight.get(request.identity)
-            if inflight is None:
-                inflight = threading.Event()
-                self._inflight[request.identity] = inflight
-                self._inflight_payload[request.identity] = None
-                self._inflight_waiters[request.identity] = 0
-                should_download = True
-            else:
-                should_download = False
-            self._inflight_waiters[request.identity] += 1
-
-        if should_download:
-            self._stats.record_miss()
-            try:
-                payload = self._download_and_validate(request)
-            except Exception:
-                with self._lock:
-                    self._inflight.pop(request.identity, None)
-                    self._inflight_payload.pop(request.identity, None)
-                    self._inflight_waiters.pop(request.identity, None)
-                raise
-            with self._lock:
-                self._inflight_payload[request.identity] = payload
-                inflight.set()
-        else:
-            self._stats.record_miss()
-            inflight.wait()
-
-        with self._lock:
-            payload_opt = self._inflight_payload.get(request.identity, None)
-            resolved_payload: bytes | None = (
-                payload_opt if isinstance(payload_opt, bytes) else None
-            )
-            self._inflight_waiters[request.identity] -= 1
-            if self._inflight_waiters[request.identity] <= 0:
-                self._inflight.pop(request.identity, None)
-                self._inflight_payload.pop(request.identity, None)
-                self._inflight_waiters.pop(request.identity, None)
-        if resolved_payload is None:
-            raise ProviderIntegrityError("shard download produced no payload")
-        lease = self._install_lease(request, resolved_payload)
-        return lease
+        return self._download_path(request)
 
     def release(self, lease: ShardLease) -> None:
         """Release one lease and delete its private snapshot."""
@@ -310,6 +325,58 @@ class ShardCache:
         self._structure_validator(_identity_for_asset(asset), payload, path)
         return payload
 
+    def _download_path(self, request: ShardRequest) -> ShardLease:
+        """Acquire a verified lease via the single-flight download path."""
+        # Single-flight per identity. The inflight bookkeeping is
+        # keyed by the request identity; concurrent calls to OTHER
+        # identities must not overwrite this identity's bookkeeping.
+        with self._lock:
+            inflight = self._inflight.get(request.identity)
+            if inflight is None:
+                inflight = threading.Event()
+                self._inflight[request.identity] = inflight
+                self._inflight_payload[request.identity] = b""
+                self._inflight_was_download[request.identity] = False
+                self._inflight_waiters[request.identity] = 0
+                should_download = True
+            else:
+                should_download = False
+            self._inflight_waiters[request.identity] += 1
+
+        if should_download:
+            self._stats.record_miss()
+            try:
+                payload = self._download_and_validate(request)
+            except Exception:
+                with self._lock:
+                    self._inflight.pop(request.identity, None)
+                    self._inflight_payload.pop(request.identity, None)
+                    self._inflight_was_download.pop(request.identity, None)
+                    self._inflight_waiters.pop(request.identity, None)
+                raise
+            with self._lock:
+                self._inflight_payload[request.identity] = payload
+                self._inflight_was_download[request.identity] = True
+                inflight.set()
+        else:
+            self._stats.record_miss()
+            inflight.wait()
+
+        with self._lock:
+            payload = self._inflight_payload.get(request.identity, b"")
+            was_downloaded = self._inflight_was_download.get(request.identity, False)
+            self._inflight_waiters[request.identity] -= 1
+            if self._inflight_waiters[request.identity] <= 0:
+                self._inflight.pop(request.identity, None)
+                self._inflight_payload.pop(request.identity, None)
+                self._inflight_was_download.pop(request.identity, None)
+                self._inflight_waiters.pop(request.identity, None)
+        if not payload:
+            raise ProviderIntegrityError("shard download produced no payload")
+        # Only the first waiter observes a fresh download; subsequent
+        # single-flight waiters and verified re-reads both see False.
+        return self._install_lease(request, payload, was_downloaded=was_downloaded)
+
     def _download_and_validate(self, request: ShardRequest) -> bytes:
         payload = self._transport(request)
         if not isinstance(payload, (bytes, bytearray)):
@@ -354,7 +421,9 @@ class ShardCache:
         self._stats.record_download()
         return payload
 
-    def _install_lease(self, request: ShardRequest, payload: bytes) -> ShardLease:
+    def _install_lease(
+        self, request: ShardRequest, payload: bytes, *, was_downloaded: bool
+    ) -> ShardLease:
         with self._lock_serialise:
             descriptor, snap_name = tempfile.mkstemp(suffix=".sqlite")
             snap_path = Path(snap_name)
@@ -378,6 +447,7 @@ class ShardCache:
                 sha256=request.asset.sha256,
                 byte_size=request.asset.byte_size,
                 schema_version=request.asset.schema_version,
+                was_downloaded=was_downloaded,
             )
             self._lease_to_id[lease] = self._lease_counter
             return lease
@@ -393,49 +463,6 @@ class ShardCache:
             os.replace(path, target)
         except OSError:
             path.unlink(missing_ok=True)
-
-
-@dataclass
-class _StatsCounter:
-    hits: int = 0
-    misses: int = 0
-    refetches: int = 0
-    corruptions: int = 0
-    clears: int = 0
-    downloads: int = 0
-    active_leases: int = 0
-
-    def record_hit(self) -> None:
-        self.hits += 1
-
-    def record_miss(self) -> None:
-        self.misses += 1
-
-    def record_corruption(self) -> None:
-        self.corruptions += 1
-        self.refetches += 1
-
-    def record_clear(self) -> None:
-        self.clears += 1
-
-    def record_download(self) -> None:
-        self.downloads += 1
-
-    def record_lease(self) -> None:
-        # lease install opens and pins one private snapshot; release
-        # drops the count elsewhere (kept here for symmetry but no-op).
-        return
-
-    def snapshot(self) -> CacheStats:
-        return CacheStats(
-            hits=self.hits,
-            misses=self.misses,
-            refetches=self.refetches,
-            corruptions=self.corruptions,
-            clears=self.clears,
-            downloads=self.downloads,
-            active_leases=self.active_leases,
-        )
 
 
 def _identity_for_asset(asset: ManifestAsset) -> ShardIdentity:

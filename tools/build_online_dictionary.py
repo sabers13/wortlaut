@@ -273,7 +273,18 @@ def _read_authoritative_example_lemma(
 
 
 def _init_lookup_shard(connection: sqlite3.Connection) -> None:
-    """Create the lookup-shard schema."""
+    """Create the lookup-shard schema.
+
+    The lookup shard carries:
+
+    * the lemma rows the runtime predicate reads;
+    * the surface_form rows used for surface-form lookup;
+    * a ``sense_route`` table that resolves ``sense_ref -> lemma_ref`` in a
+      single bucket-closed fetch. Every authoritative ``sense_ref`` is
+      indexed by ``bucket256_v1(sense_ref)`` (the same lookup-family routing
+      function used for lemma lookups), so the runtime never scans across
+      families to recover the sense-to-lemma mapping.
+    """
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS lemma (
@@ -291,12 +302,25 @@ def _init_lookup_shard(connection: sqlite3.Connection) -> None:
           lemma_id  INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS ix_lookup_surface ON surface_form(form);
+        CREATE TABLE IF NOT EXISTS sense_route (
+          sense_ref TEXT PRIMARY KEY,
+          lemma_ref TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS ix_lookup_sense_route_lemma ON sense_route(lemma_ref);
         """
     )
 
 
 def _init_entry_shard(connection: sqlite3.Connection) -> None:
-    """Create the entry-shard schema."""
+    """Create the entry-shard schema.
+
+    The entry shard carries the lemma row, its senses, the localized
+    meanings attached to those senses, the surface forms and the
+    ``example_lemma`` join. It deliberately does **not** carry the
+    authoritative ``example`` payload: example rows live in the 64-shard
+    example family keyed by ``example.id % 64``. Carrying the full payload
+    here would silently allow the runtime to bypass the example family.
+    """
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS lemma (
@@ -361,17 +385,6 @@ def _init_entry_shard(connection: sqlite3.Connection) -> None:
           example_id INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS ix_entry_example_lemma ON example_lemma(lemma_id);
-
-        CREATE TABLE IF NOT EXISTS example (
-          id           INTEGER PRIMARY KEY,
-          de           TEXT NOT NULL,
-          en           TEXT,
-          source       TEXT,
-          source_ref   TEXT,
-          license      TEXT,
-          token_count  INTEGER,
-          has_proper   INTEGER NOT NULL DEFAULT 0
-        );
         """
     )
 
@@ -422,19 +435,93 @@ def _compute_bucket_targets_for_lookup(
     return targets
 
 
+def _validate_sense_route_partitions(
+    *,
+    senses: Sequence[tuple[int, int, str, str, str, int, str | None, str | None, str | None]],
+    sense_route_partitions: Mapping[int, Sequence[tuple[str, str]]],
+    lemma_refs_by_id: Mapping[int, str],
+) -> None:
+    """Validate that every authoritative ``sense_ref`` is bucket-closed.
+
+    Each authoritative sense must appear in exactly one sense_route
+    bucket, the bucket must equal ``bucket256_v1(sense_ref)``, and the
+    routed ``lemma_ref`` must equal the lemma's authoritative
+    ``semantic_ref``. Missing, extra, or misrouted sense_refs are fatal
+    builder errors so the runtime can rely on the index.
+    """
+    expected: dict[str, int] = {}
+    for sense_id, lemma_id, sense_ref, _, _, _, _, _, _ in senses:
+        if not isinstance(sense_ref, str) or not sense_ref:
+            raise RuntimeError(f"sense_id={sense_id} has empty sense_ref")
+        if sense_ref in expected:
+            raise RuntimeError(f"duplicate sense_ref={sense_ref!r}")
+        expected[sense_ref] = bucket256_v1(sense_ref)
+    routed: dict[str, str] = {}
+    for bucket, rows in sense_route_partitions.items():
+        for sense_ref, lemma_ref in rows:
+            if sense_ref in routed:
+                raise RuntimeError(
+                    f"duplicate sense_route bucket={bucket} sense_ref={sense_ref!r}"
+                )
+            routed[sense_ref] = lemma_ref
+    missing = set(expected.keys()) - set(routed.keys())
+    if missing:
+        sample = sorted(missing)[:5]
+        raise RuntimeError(
+            f"sense_route missing for sense_refs: {sample} "
+            f"(and {len(missing) - len(sample)} more)"
+        )
+    extra = set(routed.keys()) - set(expected.keys())
+    if extra:
+        sample = sorted(extra)[:5]
+        raise RuntimeError(
+            f"sense_route has unexpected sense_refs: {sample} "
+            f"(and {len(extra) - len(sample)} more)"
+        )
+    for sense_ref, expected_bucket in expected.items():
+        lemma_ref = routed[sense_ref]
+        owner_lemma_id = next(
+            (
+                int(lemma_id)
+                for sense_id, lemma_id, ref, _, _, _, _, _, _ in senses
+                if ref == sense_ref
+            ),
+            None,
+        )
+        if owner_lemma_id is None:
+            raise RuntimeError(f"sense_ref={sense_ref!r} has no authoritative sense row")
+        if lemma_refs_by_id.get(owner_lemma_id) != lemma_ref:
+            raise RuntimeError(
+                f"sense_route bucket={expected_bucket} sense_ref={sense_ref!r} "
+                f"routes to {lemma_ref!r} but authoritative lemma_ref is "
+                f"{lemma_refs_by_id.get(owner_lemma_id)!r}"
+            )
+
+
 def _partition_lookup_shards(
     lemmas: Sequence[tuple[Any, ...]],
     surface_forms: Sequence[tuple[str, int]],
-) -> dict[int, list[tuple[Any, ...]]]:
-    """Partition lemmas into 256 lookup buckets using the closure rule.
+    senses: Sequence[tuple[int, int, str, str, str, int, str | None, str | None, str | None]],
+) -> tuple[dict[int, list[tuple[Any, ...]]], dict[int, list[tuple[str, str]]]]:
+    """Partition lookup-shard rows into 256 buckets using the closure rule.
+
+    Returns:
+
+    * ``lemma_partitions``: ``bucket -> lemma_rows`` placed for every
+      authoritative lemma by ``bucket256_v1(X)`` union
+      ``bucket256_v1(sqlite_ascii_lower(X))``.
+    * ``sense_route_partitions``: ``bucket -> (sense_ref, lemma_ref)`` rows
+      indexed by ``bucket256_v1(sense_ref)``. The sense_route is the
+      single bucket-closed routing table that replaces the cross-family
+      scan the previous candidate used.
 
     The full lemma row tuple is preserved; the lookup-shard writer reads
-    only the first six columns it needs.
+    only the columns it needs.
     """
     surface_by_lemma: dict[int, list[tuple[int, str]]] = {}
     for form, lemma_id in surface_forms:
         surface_by_lemma.setdefault(lemma_id, []).append((lemma_id, form))
-    buckets: dict[int, list[tuple[Any, ...]]] = {}
+    lemma_partitions: dict[int, list[tuple[Any, ...]]] = {}
     for row in lemmas:
         lemma_id = row[0]
         lemma_text = row[2]
@@ -444,8 +531,31 @@ def _partition_lookup_shards(
             surface_form_lookup=surface_by_lemma.get(lemma_id, []),
         )
         for bucket in targets:
-            buckets.setdefault(bucket, []).append(row)
-    return buckets
+            lemma_partitions.setdefault(bucket, []).append(row)
+
+    sense_route_partitions: dict[int, list[tuple[str, str]]] = {}
+    seen_routes: set[str] = set()
+    for sense_row in senses:
+        sense_id, lemma_id, sense_ref, _, _, _, _, _, _ = sense_row
+        lemma_bucket_row: tuple[Any, ...] | None = next(
+            (lemma_row for lemma_row in lemmas if int(lemma_row[0]) == int(lemma_id)),
+            None,
+        )
+        if lemma_bucket_row is None:
+            raise RuntimeError(
+                f"sense_id={sense_id} references unknown lemma_id={lemma_id}"
+            )
+        lemma_ref = str(lemma_bucket_row[1])
+        bucket = bucket256_v1(str(sense_ref))
+        if not 0 <= bucket < LOOKUP_FAMILY_SIZE:
+            raise RuntimeError(
+                f"sense_ref={sense_ref!r} routed to out-of-range bucket {bucket}"
+            )
+        if sense_ref in seen_routes:
+            raise RuntimeError(f"duplicate sense_route for sense_ref={sense_ref!r}")
+        seen_routes.add(str(sense_ref))
+        sense_route_partitions.setdefault(bucket, []).append((str(sense_ref), lemma_ref))
+    return lemma_partitions, sense_route_partitions
 
 
 def _partition_entry_shards(
@@ -453,18 +563,14 @@ def _partition_entry_shards(
     senses: Sequence[tuple[int, int, str, str, str, int, str | None, str | None, str | None]],
     meanings: Sequence[tuple[int, int, str, str, int, str, str, str]],
     surface_forms: Sequence[tuple[str, int]],
-    examples: Sequence[
-        tuple[int, str, str | None, str | None, str | None, str | None, int | None, int]
-    ],
     example_lemma: Sequence[tuple[int, int]],
 ) -> dict[int, dict[str, list[Any]]]:
     """Partition lemma-driven rows by ``bucket256_v1(lemma_semantic_ref)``.
 
     The entry shard owns the lemma row, its senses, the meanings attached
-    to those senses, the surface forms and the example_lemma + example
-    rows that reference the lemma's examples. Each entry shard has all
-    data needed to satisfy provider reads without a follow-up remote
-    fetch.
+    to those senses, the surface forms and the ``example_lemma`` join.
+    It deliberately does **not** carry the example payload: example rows
+    live in the example family keyed by ``example.id % 64``.
     """
     buckets: dict[int, dict[str, list[Any]]] = {}
     lemma_bucket: dict[int, int] = {}
@@ -477,7 +583,6 @@ def _partition_entry_shards(
             "senses": [],
             "meanings": [],
             "surface_forms": [],
-            "examples": [],
             "example_lemma": [],
         })
         bucket_state["lemmas"].append(row)
@@ -505,8 +610,6 @@ def _partition_entry_shards(
         if surface_bucket is None:
             raise RuntimeError(f"surface_form references unknown lemma_id={lemma_id}")
         buckets[surface_bucket]["surface_forms"].append((form, lemma_id))
-    example_by_id: dict[int, tuple[Any, ...]] = {int(r[0]): r for r in examples}
-    examples_per_bucket: dict[int, list[tuple[Any, ...]]] = {}
     for lemma_id, example_id in example_lemma:
         el_bucket = lemma_bucket.get(int(lemma_id))
         if el_bucket is None:
@@ -514,19 +617,6 @@ def _partition_entry_shards(
                 f"example_lemma references unknown lemma_id={lemma_id}"
             )
         buckets[el_bucket]["example_lemma"].append((lemma_id, example_id))
-        example_value = example_by_id.get(int(example_id))
-        if example_value is not None:
-            examples_per_bucket.setdefault(el_bucket, []).append(example_value)
-    for bucket, rows in examples_per_bucket.items():
-        seen_ids: set[int] = set()
-        for row in rows:
-            if row is None:
-                continue
-            example_id = int(row[0])
-            if example_id in seen_ids:
-                continue
-            seen_ids.add(example_id)
-            buckets[bucket]["examples"].append(row)
     return buckets
 
 
@@ -550,8 +640,17 @@ def _write_lookup_shard(
     bucket: int,
     lemma_rows: Sequence[tuple[int, str, str, str | None, int | None, str, str]],
     surface_by_lemma: Mapping[int, list[str]],
+    sense_route_rows: Sequence[tuple[str, str]] = (),
 ) -> None:
-    """Populate a single lookup shard."""
+    """Populate a single lookup shard.
+
+    The lookup shard carries the lemma rows the runtime predicate reads,
+    the surface-form rows used for surface-form lookup, and the
+    ``sense_route`` rows whose ``sense_ref`` falls in
+    ``bucket256_v1(sense_ref) == bucket``. The sense_route table is
+    bucket-closed: every authoritative ``sense_ref`` appears in exactly
+    one lookup shard and points to its real parent ``lemma_ref``.
+    """
     _init_lookup_shard(connection)
     lemma_rows_sorted = sorted(
         lemma_rows,
@@ -584,6 +683,21 @@ def _write_lookup_shard(
         "INSERT INTO surface_form (form, lemma_id) VALUES (?, ?)",
         surface_rows,
     )
+    if sense_route_rows:
+        deduped_routes: dict[str, str] = {}
+        for sense_ref, lemma_ref in sense_route_rows:
+            if sense_ref in deduped_routes:
+                if deduped_routes[sense_ref] != lemma_ref:
+                    raise RuntimeError(
+                        f"sense_route bucket {bucket} has conflicting "
+                        f"lemma_ref for sense_ref={sense_ref!r}"
+                    )
+                continue
+            deduped_routes[sense_ref] = lemma_ref
+        connection.executemany(
+            "INSERT INTO sense_route (sense_ref, lemma_ref) VALUES (?, ?)",
+            [(sense_ref, lemma_ref) for sense_ref, lemma_ref in sorted(deduped_routes.items())],
+        )
     connection.commit()
     connection.execute("VACUUM")
     connection.commit()
@@ -596,10 +710,15 @@ def _write_entry_shard(
     sense_rows: Sequence[tuple[Any, ...]],
     meaning_rows: Sequence[tuple[Any, ...]],
     surface_rows: Sequence[tuple[str, int]],
-    example_rows: Sequence[tuple[Any, ...]],
     example_lemma_rows: Sequence[tuple[int, int]],
 ) -> None:
-    """Populate a single entry shard."""
+    """Populate a single entry shard.
+
+    The entry shard carries the lemma row, its senses, the meanings
+    attached to those senses, the surface forms and the ``example_lemma``
+    join. It does not carry the authoritative ``example`` payload: that
+    lives in the example family keyed by ``example.id % 64``.
+    """
     _init_entry_shard(connection)
     connection.executemany(
         "INSERT INTO lemma (id, semantic_ref, lemma, pos, gender, freq_rank, plural, "
@@ -625,11 +744,6 @@ def _write_entry_shard(
     connection.executemany(
         "INSERT INTO example_lemma (lemma_id, example_id) VALUES (?, ?)",
         example_lemma_rows,
-    )
-    connection.executemany(
-        "INSERT INTO example (id, de, en, source, source_ref, license, token_count, "
-        "has_proper) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        example_rows,
     )
     connection.commit()
     connection.execute("VACUUM")
@@ -681,6 +795,10 @@ def build_corpus(
     finally:
         source.close()
 
+    lemma_refs_by_id: dict[int, str] = {
+        int(row[0]): str(row[1]) for row in lemmas
+    }
+
     inputs.output_dir.mkdir(parents=True, exist_ok=True)
     tmp_dir = inputs.output_dir / ".tmp"
     if tmp_dir.exists():
@@ -693,9 +811,16 @@ def build_corpus(
     for form, lemma_id in surface_forms:
         surface_by_lemma.setdefault(lemma_id, []).append(form)
 
-    lookup_partitions = _partition_lookup_shards(lemmas, surface_forms)
+    lookup_partitions, sense_route_partitions = _partition_lookup_shards(
+        lemmas, surface_forms, senses
+    )
+    _validate_sense_route_partitions(
+        senses=senses,
+        sense_route_partitions=sense_route_partitions,
+        lemma_refs_by_id=lemma_refs_by_id,
+    )
     entry_partitions = _partition_entry_shards(
-        lemmas, senses, meanings, surface_forms, examples, example_lemma
+        lemmas, senses, meanings, surface_forms, example_lemma
     )
     example_partitions = _partition_example_shards(examples)
 
@@ -713,6 +838,7 @@ def build_corpus(
                 bucket,
                 lookup_partitions.get(bucket, []),
                 surface_by_lemma,
+                sense_route_partitions.get(bucket, ()),
             )
             connection.commit()
             connection.close()
@@ -744,7 +870,6 @@ def build_corpus(
             "senses": [],
             "meanings": [],
             "surface_forms": [],
-            "examples": [],
             "example_lemma": [],
         })
         connection = sqlite3.connect(
@@ -760,7 +885,6 @@ def build_corpus(
                 state["senses"],
                 state["meanings"],
                 state["surface_forms"],
-                state["examples"],
                 state["example_lemma"],
             )
             connection.close()
@@ -814,15 +938,23 @@ def build_corpus(
             )
         )
 
-    # Build the membership filter over authoritative lemmas
-    filter_canonical = inputs.output_dir / _filter_name()
-    filter_payload = BloomFilter.from_authoritative_lemmas(
-        (row[2] for row in lemmas),
-        size_bits=512,
-    ).to_bytes()
+    # Build the membership filter over authoritative lemmas using dynamic
+    # sizing (m = -n ln p / (ln 2)^2, k = round((m/n) ln 2)). The closure
+    # rule inserts both ``X`` and ``sqlite_ascii_lower(X)`` per lemma.
+    closure_keys: list[str] = []
+    seen_keys: set[str] = set()
+    for row in lemmas:
+        lemma_text = str(row[2])
+        for variant in (lemma_text, _sqlite_ascii_lower(lemma_text)):
+            if variant in seen_keys:
+                continue
+            seen_keys.add(variant)
+            closure_keys.append(variant)
+    filter_payload = BloomFilter.from_closure_keys(closure_keys).to_bytes()
     payload = _canonicalize_blob(filter_payload)
     tmp_filter = tmp_dir / "membership-filter.bin"
     tmp_filter.write_bytes(payload)
+    filter_canonical = inputs.output_dir / _filter_name()
     _install_blob(tmp_filter, filter_canonical)
     digest = sha256(filter_canonical.read_bytes()).hexdigest()
     assets.append(

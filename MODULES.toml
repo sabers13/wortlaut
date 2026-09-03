@@ -282,11 +282,13 @@ adrs = ["0009"]
 id = "online_cache"
 owned_paths = [
     "app/online_cache.py",
+    "app/online_transport.py",
 ]
 dependencies = ["online_manifest"]
 focused_tests = [
     "tests/test_online_cache.py",
     "tests/test_provider_differential.py",
+    "tests/test_online_transport.py",
 ]
 agents_rules = ["R13"]
 adrs = ["0009"]

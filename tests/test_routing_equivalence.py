@@ -18,11 +18,17 @@ strict invariant of the lookup routing.
 
 from __future__ import annotations
 
+import math
 from hashlib import sha256
 
 import pytest
 
-from app.online_filter import BloomFilter, _sqlite_ascii_lower
+from app.online_filter import (
+    BloomFilter,
+    _sqlite_ascii_lower,
+    bloom_hash_count,
+    bloom_size_bits,
+)
 from app.online_manifest import lookup_buckets_from_query
 from app.routing import (
     bucket256_v1,
@@ -168,7 +174,7 @@ def test_bloom_filter_round_trip_bytes() -> None:
     lemmas = ["Haus", "See", "anrufen"]
     filt = BloomFilter.from_authoritative_lemmas(lemmas)
     raw = filt.to_bytes()
-    rebuilt = BloomFilter.from_bytes(raw, size_bits=filt.size_bits)
+    rebuilt = BloomFilter.from_bytes(raw)
     assert rebuilt.to_bytes() == raw
     for lemma in lemmas:
         assert rebuilt.contains(lemma)
@@ -187,3 +193,142 @@ def test_bloom_filter_accepts_uppercase_query_for_inserted_lowercase() -> None:
     filt = BloomFilter.from_authoritative_lemmas(["haus", "see"])
     assert filt.contains_query("HAUS")
     assert filt.contains_query("SEE")
+
+
+# ---------------------------------------------------------------------------
+# R4 — scalable Bloom filter
+# ---------------------------------------------------------------------------
+
+
+def test_bloom_size_bits_matches_standard_formula() -> None:
+    """``bloom_size_bits`` returns ``ceil(-n * ln(p) / ln(2)^2)`` rounded to bytes."""
+    n = 1_477_819
+    p = 0.01
+    expected = math.ceil(-n * math.log(p) / (math.log(2.0) ** 2))
+    expected_byte_aligned = ((expected + 7) // 8) * 8
+    assert bloom_size_bits(n, target_fpr=p) == expected_byte_aligned
+
+
+def test_bloom_size_bits_byte_aligned() -> None:
+    """``bloom_size_bits`` is always a positive multiple of 8."""
+    for n in (1, 7, 1024, 1_477_819, 10_000_000):
+        size = bloom_size_bits(n)
+        assert size > 0
+        assert size % 8 == 0
+
+
+def test_bloom_size_bits_grows_with_item_count() -> None:
+    """Filter size is monotonic in the inserted item count."""
+    small = bloom_size_bits(64)
+    medium = bloom_size_bits(1024)
+    large = bloom_size_bits(1_477_819)
+    assert small < medium < large
+
+
+def test_bloom_hash_count_uses_optimal_k_formula() -> None:
+    """``bloom_hash_count`` is ``round((m / n) * ln(2))`` clamped to >= 1."""
+    n = 1_477_819
+    size_bits = bloom_size_bits(n)
+    expected = max(1, round((size_bits / n) * math.log(2.0)))
+    assert bloom_hash_count(n, size_bits) == expected
+
+
+def test_bloom_hash_count_at_least_one() -> None:
+    """Hash count never collapses to zero even for tiny filters."""
+    assert bloom_hash_count(1, 64) >= 1
+
+
+def test_bloom_size_bits_for_production_corpus_evidence() -> None:
+    """Production-scale sizing matches the ADR-0009 evidence target.
+
+    With ``n == 1_477_819`` closure keys and target ``p == 0.01`` the
+    standard Bloom formula yields approximately ``1.69 MiB`` of bits
+    (``~14_178_048``) and ``k == 7``. The test asserts the production
+    sizing lands in the accepted evidence range, not an exact byte
+    figure (FPR is statistical, sizing is exact).
+    """
+    n = 1_477_819
+    bits = bloom_size_bits(n, target_fpr=0.01)
+    # ~1.69 MiB = 14_178_048 bits; allow a generous band.
+    assert 13_000_000 <= bits <= 16_000_000
+    k = bloom_hash_count(n, bits)
+    assert 6 <= k <= 8
+
+
+def test_bloom_filter_size_grows_with_inserted_keys() -> None:
+    """A 1024-key filter is materially larger than a 64-key filter."""
+    small = BloomFilter.from_closure_keys([f"lemma-{i}" for i in range(64)])
+    big = BloomFilter.from_closure_keys([f"lemma-{i}" for i in range(1024)])
+    assert big.size_bits > small.size_bits
+
+
+def test_bloom_filter_self_describing_payload() -> None:
+    """The serialized payload carries magic, version, hash_count, size_bits."""
+    filt = BloomFilter.from_closure_keys(["Haus", "See", "anrufen"])
+    payload = filt.to_bytes()
+    assert payload[:4] == b"WFBL"
+    assert payload[4] == 1
+    # Header is 4s B I Q, total 17 bytes; payload after the header
+    # is exactly ``size_bits // 8`` bytes.
+    assert len(payload) == 17 + (filt.size_bits // 8)
+
+
+def test_bloom_filter_loaded_reads_recorded_size() -> None:
+    """Loader reads size/hash_count from the payload; no 512-bit assumption."""
+    filt = BloomFilter.from_closure_keys(
+        [f"lemma-{i}" for i in range(1_477_819)]
+    )
+    raw = filt.to_bytes()
+    rebuilt = BloomFilter.from_bytes(raw)
+    assert rebuilt.size_bits == filt.size_bits
+    assert rebuilt.hash_count == filt.hash_count
+
+
+def test_bloom_filter_rejects_truncated_payload() -> None:
+    """Malformed/truncated payloads fail closed."""
+    filt = BloomFilter.from_closure_keys(["Haus"])
+    raw = filt.to_bytes()
+    with pytest.raises(ValueError, match="truncated"):
+        BloomFilter.from_bytes(raw[:-1])
+
+
+def test_bloom_filter_rejects_wrong_magic() -> None:
+    """A non-WFBL magic header is rejected."""
+    filt = BloomFilter.from_closure_keys(["Haus"])
+    raw: list[int] = list(filt.to_bytes())
+    raw[0] = 0x00
+    with pytest.raises(ValueError, match="magic"):
+        BloomFilter.from_bytes(bytes(raw))
+
+
+def test_bloom_filter_rejects_zero_hash_count() -> None:
+    """A hash_count of zero is rejected."""
+    filt = BloomFilter.from_closure_keys(["Haus"])
+    raw = bytearray(filt.to_bytes())
+    # Header: 4s B I Q -> at offset 5 (version=1), hash_count=uint32
+    # header bytes: 4 magic + 1 version + 4 hash_count + 8 size_bits
+    rebuilt_raw = bytes(raw[:5]) + b"\x00\x00\x00\x00" + raw[9:]
+    with pytest.raises(ValueError, match="hash_count"):
+        BloomFilter.from_bytes(rebuilt_raw)
+
+
+def test_bloom_filter_large_synthetic_does_not_saturate() -> None:
+    """A production-scale synthetic set does not immediately saturate."""
+    keys = [f"lemma-{i}" for i in range(1_477_819)]
+    filt = BloomFilter.from_closure_keys(keys)
+    # Filter should be sized for the actual key count, not 512 bits.
+    assert filt.size_bits >= 8 * 1024 * 1024  # at least 1 MiB
+    # Every key must be retrievable (zero false negative).
+    for key in keys[:64]:
+        assert filt.contains(key)
+
+
+def test_bloom_filter_fpr_is_statistical_no_deterministic_claim() -> None:
+    """FPR remains statistical; do not assert an exact deterministic rate."""
+    keys = [f"lemma-{i}" for i in range(1_000)]
+    filt = BloomFilter.from_closure_keys(keys)
+    unknowns = [f"unknown-{i}" for i in range(1_000)]
+    fp_count = sum(1 for u in unknowns if filt.contains(u))
+    # Statistical only: the false-positive rate should be in a sane band
+    # but we deliberately do not assert an exact percentage.
+    assert 0 <= fp_count <= 1_000

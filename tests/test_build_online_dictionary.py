@@ -207,7 +207,8 @@ def test_lookup_partition_assigns_every_lemma_to_expected_buckets() -> None:
         (2, "lemma:v1:see", "See", "NOUN", "der", 2, "x", "x"),
     ]
     surface_forms: list[tuple[str, int]] = []
-    partitions = _partition_lookup_shards(lemmas, surface_forms)
+    senses: list[tuple[int, int, str, str, str, int, str | None, str | None, str | None]] = []
+    partitions, _sense_route = _partition_lookup_shards(lemmas, surface_forms, senses)
     targets_haus = {bucket256_v1("Haus"), bucket256_v1(_sqlite_ascii_lower("Haus"))}
     targets_see = {bucket256_v1("See"), bucket256_v1(_sqlite_ascii_lower("See"))}
     covered_haus = {bucket for bucket, rows in partitions.items() for r in rows if r[0] == 1}

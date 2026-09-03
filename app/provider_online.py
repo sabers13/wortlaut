@@ -8,12 +8,18 @@ Implements the abstract ``DictionaryProvider`` contract from
   distribution configuration;
 * routes every lookup through ``bucket256_v1`` and the deterministic
   closure rule;
-* uses a Bloom membership filter for lemma-oracle pruning with zero
-  false negatives for ``Q`` and ``Q.lower()``;
-* downloads lookup shards on demand, single-flight, with byte-count,
-  SHA-256, and SQLite/logical validation, fsync, atomic install;
-* honors the 32-new-lookup-shard budget per top-level resolution
-  operation;
+* resolves ``sense_ref -> lemma_ref`` through the bucket-closed
+  ``sense_route`` table that lives INSIDE the lookup shard family
+  (no entry-family scan);
+* reads example payload from the 64-shard example family keyed by
+  ``example.id % 64``;
+* uses a Bloom membership filter sized from the actual unique
+  closure-key set;
+* charges the per-operation budget against NEW remote lookup-shard
+  downloads only (entry/example acquisitions are free);
+* supports one top-level operation budget across arbitrarily nested
+  ``lookup_exact`` / ``lookup_surface_form`` / ``candidate_lookup`` /
+  ``compound_components`` calls via the ``operation()`` context manager;
 * distinguishes network/integrity/budget failures from dictionary
   misses.
 
@@ -24,8 +30,10 @@ fixture transport.
 
 from __future__ import annotations
 
+import contextvars
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -57,7 +65,7 @@ from app.provider import (
     SenseEntry,
     SenseHit,
 )
-from app.routing import bucket256_v1
+from app.routing import bucket256_v1, example_bucket
 
 MAX_NEW_LOOKUP_DOWNLOADS: int = 32
 
@@ -94,12 +102,13 @@ class _OperationBudget:
         self.budget.charge(identity)
 
 
-@dataclass(frozen=True, slots=True)
-class _ResolvedQuery:
-    """Carrier for one resolved (asset_token, lookup buckets) tuple."""
-
-    asset_token: str
-    lookup_buckets: tuple[int, ...]
+# Context-local active operation budget. A non-None value means nested
+# provider reads share that budget; otherwise each entry-point creates
+# its own throwaway budget. This is NOT a process-global counter; the
+# contextvar is bound to the current async task / thread.
+_active_operation_budget: contextvars.ContextVar[_Budget | None] = contextvars.ContextVar(
+    "_active_operation_budget", default=None
+)
 
 
 class OnlineDictionaryProvider(DictionaryProvider):
@@ -120,8 +129,14 @@ class OnlineDictionaryProvider(DictionaryProvider):
             )
         self._manifest = manifest
         self._cache = cache
-        self._filter = BloomFilter.from_bytes(filter_payload, size_bits=512)
+        self._filter = BloomFilter.from_bytes(filter_payload)
         self._dataset_token = dataset_token
+        # Process/session-local cache identity maps. Populated as rows
+        # are legitimately observed by this provider instance. Used to
+        # resolve a cold numeric ID without scanning 256 shards.
+        self._lemma_id_to_ref: dict[int, str] = {}
+        self._sense_id_to_ref: dict[int, str] = {}
+        self._sense_id_to_lemma_ref: dict[int, str] = {}
         self._closed = False
 
     @property
@@ -143,6 +158,30 @@ class OnlineDictionaryProvider(DictionaryProvider):
         """Idempotently close the provider. Active leases are still released."""
         self._closed = True
 
+    @contextmanager
+    def operation(self) -> Iterator[_Budget]:
+        """Bind one operation budget across nested provider reads.
+
+        All provider reads executed within the ``with`` block share one
+        budget. Reads outside the block fall back to a throwaway budget,
+        preserving the existing per-call API. Nested blocks do not reset
+        the budget: the closest enclosing block wins, and any read
+        without a contextvar falls back to a fresh budget.
+        """
+        budget = _Budget()
+        token = _active_operation_budget.set(budget)
+        try:
+            yield budget
+        finally:
+            _active_operation_budget.reset(token)
+
+    def _current_budget(self) -> _Budget:
+        """Return the active operation budget, or a fresh throwaway one."""
+        budget = _active_operation_budget.get()
+        if budget is not None:
+            return budget
+        return _Budget()
+
     # ------------------------------------------------------------------
     # Provider reads
     # ------------------------------------------------------------------
@@ -151,24 +190,30 @@ class OnlineDictionaryProvider(DictionaryProvider):
         self, lemma: str, pos: str | None = None, gender: str | None = None
     ) -> Sequence[LemmaHit]:
         """Resolve exact lemma text against the Online lookup family."""
-        budget = _Budget()
-        return self._lookup_exact_with_budget(lemma, pos=pos, gender=gender, budget=budget)
+        return self._lookup_exact_with_budget(
+            lemma, pos=pos, gender=gender, budget=self._current_budget()
+        )
 
     def lookup_surface_form(self, form: str) -> Sequence[LemmaHit]:
         """Resolve an inflected surface form through the Online lookup family."""
-        budget = _Budget()
-        return self._lookup_exact_with_budget(form, surface=True, budget=budget)
+        return self._lookup_exact_with_budget(
+            form, surface=True, budget=self._current_budget()
+        )
 
     def lookup_senses(self, lemma_id: int) -> Sequence[SenseHit]:
-        """Resolve senses for a numeric ``lemma_id`` cache."""
+        """Resolve senses for a numeric ``lemma_id`` cache.
+
+        Numeric ``lemma_id`` is an active-asset cache identity only
+        (ADR-0009 / AGENTS R13). The provider maps the ID to its durable
+        ``lemma_ref`` from the in-process cache populated when lookup
+        hits and entry reads legitimately observe the lemma. A cold
+        unknown ID is documented cache-miss semantics and returns an
+        empty tuple without triggering any 256-bucket scan.
+        """
         if not isinstance(lemma_id, int) or isinstance(lemma_id, bool):
             raise TypeError("lemma_id must be an int")
         if lemma_id <= 0:
             return ()
-        if not self.filter.contains_query(f"lemma_id:{lemma_id}"):
-            # The filter is not authoritative for lemma IDs; fall through to
-            # the per-lemma entry shard where we can recover the senses.
-            pass
         lemma_ref = self._lemma_ref_for_numeric_id(lemma_id)
         if lemma_ref is None:
             return ()
@@ -233,6 +278,16 @@ class OnlineDictionaryProvider(DictionaryProvider):
                     "SELECT id FROM lemma WHERE semantic_ref = ?", (lemma_semantic_ref,)
                 ).fetchone()
                 lemma_id = int(lemma_id_row[0]) if lemma_id_row is not None else 0
+                # Populate cache identity maps for any cold numeric IDs
+                # we now legitimately observe.
+                if lemma_id > 0:
+                    self._lemma_id_to_ref.setdefault(lemma_id, lemma_semantic_ref)
+                for row in sense_rows:
+                    sid = int(row[0])
+                    sref = str(row[2])
+                    self._sense_id_to_ref.setdefault(sid, sref)
+                    if lemma_id > 0:
+                        self._sense_id_to_lemma_ref.setdefault(sid, lemma_semantic_ref)
                 return tuple(
                     _row_to_sense_entry(row, lemma_id=int(lemma_id))
                     for row in sense_rows
@@ -267,8 +322,9 @@ class OnlineDictionaryProvider(DictionaryProvider):
         sense_ref = self._sense_ref_for_numeric_id(int(sense_id))
         if sense_ref is None:
             return ()
-        # Entry shards route by lemma_ref, so we must first translate the
-        # sense_ref to its lemma_ref and then bucket the lemma_ref.
+        # Entry shards route by lemma_ref, so we must first translate
+        # the sense_ref to its lemma_ref via the bucket-closed
+        # sense_route index inside the lookup family.
         route = self.sense_route(sense_ref)
         if route is None:
             return ()
@@ -290,46 +346,59 @@ class OnlineDictionaryProvider(DictionaryProvider):
             self._cache.release(lease)
 
     def examples_for_lemma(self, lemma_id: int) -> Sequence[ExampleRecord]:
-        """Return the example sentences linked to a lemma via ``example_lemma``."""
+        """Return the example sentences linked to a lemma.
+
+        The runtime reads the example ``id`` join from the entry shard,
+        groups example IDs by ``example_bucket(example_id)``, acquires
+        exactly the required example shards, and materializes
+        ``ExampleRecord`` from the example family. It deliberately does
+        NOT source example text from the entry shard: that path is the
+        duplicate-payload defect this repair removes.
+        """
         lemma_ref = self._lemma_ref_for_numeric_id(int(lemma_id))
         if lemma_ref is None:
             return ()
-        # Example shards route by ``example.id % 64``; entry shards own the
-        # ``example_lemma`` join. We probe the entry bucket for the lemma
-        # ref and group join rows by example bucket, downloading each
-        # example shard exactly once.
         bucket = bucket256_v1(lemma_ref)
-        lease = self._lease_entry(bucket)
+        entry_lease = self._lease_entry(bucket)
+        example_ids: list[int] = []
         try:
-            with self._open_readonly(lease) as conn:
-                rows = conn.execute(
-                    "SELECT e.id, e.de, e.en, e.source, e.source_ref, e.license, "
-                    "e.token_count, e.has_proper "
-                    "FROM example_lemma el JOIN example e ON el.example_id = e.id "
+            with self._open_readonly(entry_lease) as conn:
+                example_id_rows = conn.execute(
+                    "SELECT el.example_id FROM example_lemma el "
                     "JOIN lemma l ON l.id = el.lemma_id "
                     "WHERE l.semantic_ref = ? "
-                    "ORDER BY e.id ASC",
+                    "ORDER BY el.example_id ASC",
                     (lemma_ref,),
                 ).fetchall()
-                if not rows:
-                    return ()
+                example_ids = [int(r[0]) for r in example_id_rows]
         finally:
-            self._cache.release(lease)
-
-        bucket_to_rows: dict[int, list[tuple[int, ...]]] = {}
-        for row in rows:
-            ex_bucket = int(row[0]) % EXAMPLE_FAMILY_SIZE
-            bucket_to_rows.setdefault(ex_bucket, []).append(tuple(row))
-
+            self._cache.release(entry_lease)
+        if not example_ids:
+            return ()
+        bucket_to_ids: dict[int, list[int]] = {}
+        for example_id in example_ids:
+            bucket_to_ids.setdefault(example_bucket(int(example_id)), []).append(int(example_id))
         results: list[ExampleRecord] = []
-        for example_bucket, examples_in_bucket in sorted(bucket_to_rows.items()):
-            example_lease = self._lease_example(example_bucket)
+        wanted_ids = set(example_ids)
+        for example_bucket_id, ids_in_bucket in sorted(bucket_to_ids.items()):
+            example_lease = self._lease_example(int(example_bucket_id))
             try:
                 with self._open_readonly(example_lease) as conn:
-                    for row in examples_in_bucket:
+                    placeholders = ",".join("?" for _ in ids_in_bucket)
+                    rows = conn.execute(
+                        "SELECT id, de, en, source, source_ref, license, token_count, "
+                        "has_proper FROM example WHERE id IN ("
+                        + placeholders
+                        + ") ORDER BY id ASC",
+                        list(ids_in_bucket),
+                    ).fetchall()
+                    for row in rows:
+                        eid = int(row[0])
+                        if eid not in wanted_ids:
+                            continue
                         results.append(
                             ExampleRecord(
-                                example_id=int(row[0]),
+                                example_id=eid,
                                 de=str(row[1]),
                                 en=str(row[2]) if row[2] is not None else None,
                                 source=str(row[3]) if row[3] is not None else None,
@@ -398,40 +467,42 @@ class OnlineDictionaryProvider(DictionaryProvider):
 
     def candidate_lookup(self, query: str) -> Sequence[CandidateLookup]:
         """Resolve a bare query against the lookup + surface-form ladder."""
-        return self._candidate_lookup_with_budget(query, _Budget())
+        return self._candidate_lookup_with_budget(query, self._current_budget())
 
     def sense_route(self, sense_ref: str) -> tuple[str, str] | None:
         """Resolve ``sense_ref`` to ``(lemma_ref, sense_ref)``.
 
-        Entry shards route by lemma_ref, so this lookup scans all entry
-        shards to recover the durable sense->lemma mapping. The scan
-        completes in bounded time because each shard carries a small
-        number of senses and the cache amortises repeated calls.
+        The sense_route is bucket-closed inside the lookup shard family:
+        ``bucket256_v1(sense_ref)`` is the lookup bucket that owns the
+        ``sense_route`` row. The runtime fetches exactly that lookup
+        shard, queries ``sense_route(sense_ref) -> lemma_ref``, and
+        returns ``None`` if the sense_ref is unknown. No entry-family
+        scan occurs.
         """
         if not isinstance(sense_ref, str) or not sense_ref:
             return None
-        for bucket in range(ENTRY_FAMILY_SIZE):
-            asset = self._entry_asset_for_bucket(bucket)
-            if asset is None:
-                continue
-            request = ShardRequest(
-                identity=ShardIdentity(family=SHARD_FAMILY_ENTRY, bucket=bucket),
-                asset=asset,
-            )
-            lease = self._cache.lease(request)
-            try:
-                with self._open_readonly(lease) as conn:
-                    row = conn.execute(
-                        "SELECT l.semantic_ref FROM sense s "
-                        "JOIN lemma l ON s.lemma_id = l.id "
-                        "WHERE s.semantic_ref = ?",
-                        (sense_ref,),
-                    ).fetchone()
-                    if row is not None:
-                        return str(row[0]), sense_ref
-            finally:
-                self._cache.release(lease)
-        return None
+        bucket = bucket256_v1(sense_ref)
+        if not 0 <= bucket < LOOKUP_FAMILY_SIZE:
+            return None
+        asset = self._lookup_asset_for_bucket(bucket)
+        if asset is None:
+            return None
+        request = ShardRequest(
+            identity=ShardIdentity(family=SHARD_FAMILY_LOOKUP, bucket=bucket),
+            asset=asset,
+        )
+        lease = self._cache.lease(request)
+        try:
+            with self._open_readonly(lease) as conn:
+                row = conn.execute(
+                    "SELECT lemma_ref FROM sense_route WHERE sense_ref = ?",
+                    (sense_ref,),
+                ).fetchone()
+                if row is None:
+                    return None
+                return str(row[0]), sense_ref
+        finally:
+            self._cache.release(lease)
 
     def compound_components(
         self, component_refs: Sequence[tuple[str, str]]
@@ -545,6 +616,9 @@ class OnlineDictionaryProvider(DictionaryProvider):
                         ).fetchall()
                     for row in rows:
                         lemma_id = int(row[0])
+                        lemma_ref = str(row[1])
+                        # Populate cache identity maps as we observe rows.
+                        self._lemma_id_to_ref.setdefault(lemma_id, lemma_ref)
                         if lemma_id in seen_lemma_ids:
                             continue
                         seen_lemma_ids.add(lemma_id)
@@ -553,7 +627,7 @@ class OnlineDictionaryProvider(DictionaryProvider):
                             lemma=str(row[2]),
                             pos=str(row[3]),
                             gender=str(row[4]) if row[4] is not None else None,
-                            semantic_ref=str(row[1]),
+                            semantic_ref=lemma_ref,
                             freq_rank=int(row[5]) if row[5] is not None else None,
                         )
             finally:
@@ -591,10 +665,21 @@ class OnlineDictionaryProvider(DictionaryProvider):
         return tuple(results)
 
     def _select_component_text(self, sense_ref: str) -> dict[str, str]:
-        """Return one deterministic localized text per language for a sense."""
+        """Return one deterministic localized text per language for a sense.
+
+        The compound-component read uses the bucket-closed ``sense_route``
+        table to discover the parent ``lemma_ref``, then opens exactly the
+        entry shard for that lemma. It deliberately does NOT bucket the
+        entry shard by ``bucket256_v1(sense_ref)`` — that path was the
+        compound sense lookup routing defect this repair removes.
+        """
         if not isinstance(sense_ref, str) or not sense_ref:
             return {}
-        bucket = bucket256_v1(sense_ref)
+        route = self.sense_route(sense_ref)
+        if route is None:
+            return {}
+        lemma_ref, _ = route
+        bucket = bucket256_v1(lemma_ref)
         lease = self._lease_entry(bucket)
         try:
             with self._open_readonly(lease) as conn:
@@ -685,21 +770,26 @@ class OnlineDictionaryProvider(DictionaryProvider):
     def _lease_with_budget(
         self, request: ShardRequest, budget: _Budget
     ) -> ShardLease:
-        """Acquire a lookup shard under the budget. Entry/example shards are free."""
-        # Entry / example shards are not counted against the per-operation
-        # lookup budget because the budget is on remote lookup downloads;
-        # see ADR-0009 "at most 32 new remote lookup-shard identities".
+        """Acquire a shard; charge the budget iff the cache actually downloaded.
+
+        Entry / example shards are not counted against the per-operation
+        lookup budget because the budget is on remote lookup downloads
+        (ADR-0009: at most 32 new remote lookup-shard identities). The
+        charge happens based on the ``ShardLease.was_downloaded`` signal
+        set by the cache, not on a stale path-existence predicate —
+        that is what makes a corrupt refetch correctly count as a new
+        remote download while verified cached reads remain free.
+        """
         if request.identity.family != SHARD_FAMILY_LOOKUP:
             return self._cache.lease(request)
-        canonical_path = (
-            self._cache.cache_dir
-            / "verified"
-            / request.identity.family
-            / f"{request.identity.bucket}.sqlite"
-        )
-        if not canonical_path.exists():
-            budget.charge(request.identity)
-        return self._cache.lease(request)
+        lease = self._cache.lease(request)
+        try:
+            if lease.was_downloaded:
+                budget.charge(request.identity)
+            return lease
+        except BaseException:
+            self._cache.release(lease)
+            raise
 
     @staticmethod
     def _open_readonly(lease: ShardLease) -> Any:
@@ -710,61 +800,32 @@ class OnlineDictionaryProvider(DictionaryProvider):
         return conn
 
     def _lemma_ref_for_numeric_id(self, lemma_id: int) -> str | None:
-        """Recover the durable ``lemma_ref`` for a numeric cache.
+        """Resolve a numeric ``lemma_id`` cache to its durable ``lemma_ref``.
 
-        The Online corpus keeps numeric lemma IDs as active-asset caches
-        only. The provider recovers the durable reference by scanning the
-        entry bucket the lemma belongs to via the known mapping. To make
-        this stable for tests, the lookup shards also expose the lemma
-        row; we therefore consult the lookup family first.
+        Reads only the process-local cache populated when this provider
+        instance legitimately observed the lemma via a lookup hit or an
+        entry-shard read. A cold unknown numeric ID is a documented
+        cache-miss (returns ``None``) without triggering any 256-bucket
+        remote scan (ADR-0009 R1 / Defect R1B).
         """
-        # Probing each entry bucket would be unsafe; we instead use the
-        # manifest's per-bucket lemma_refs table, which the builder
-        # populates. Lookups in tests use small corpora so brute force is
-        # acceptable. In production this method is not on the hot path.
-        for bucket in range(ENTRY_FAMILY_SIZE):
-            asset = self._entry_asset_for_bucket(bucket)
-            if asset is None:
-                continue
-            request = ShardRequest(
-                identity=ShardIdentity(family=SHARD_FAMILY_ENTRY, bucket=bucket),
-                asset=asset,
-            )
-            lease = self._cache.lease(request)
-            try:
-                with self._open_readonly(lease) as conn:
-                    row = conn.execute(
-                        "SELECT semantic_ref FROM lemma WHERE id = ?",
-                        (lemma_id,),
-                    ).fetchone()
-                    if row is not None:
-                        return str(row[0])
-            finally:
-                self._cache.release(lease)
-        return None
+        if not isinstance(lemma_id, int) or isinstance(lemma_id, bool):
+            raise TypeError("lemma_id must be an int")
+        if lemma_id <= 0:
+            return None
+        return self._lemma_id_to_ref.get(int(lemma_id))
 
     def _sense_ref_for_numeric_id(self, sense_id: int) -> str | None:
-        """Recover the durable ``sense_ref`` for a numeric cache."""
-        for bucket in range(ENTRY_FAMILY_SIZE):
-            asset = self._entry_asset_for_bucket(bucket)
-            if asset is None:
-                continue
-            request = ShardRequest(
-                identity=ShardIdentity(family=SHARD_FAMILY_ENTRY, bucket=bucket),
-                asset=asset,
-            )
-            lease = self._cache.lease(request)
-            try:
-                with self._open_readonly(lease) as conn:
-                    row = conn.execute(
-                        "SELECT semantic_ref FROM sense WHERE id = ?",
-                        (sense_id,),
-                    ).fetchone()
-                    if row is not None:
-                        return str(row[0])
-            finally:
-                self._cache.release(lease)
-        return None
+        """Resolve a numeric ``sense_id`` cache to its durable ``sense_ref``.
+
+        Reads only the process-local cache populated when this provider
+        instance legitimately observed the sense via the senses-for-ref
+        read. A cold unknown numeric ID is a documented cache-miss.
+        """
+        if not isinstance(sense_id, int) or isinstance(sense_id, bool):
+            raise TypeError("sense_id must be an int")
+        if sense_id <= 0:
+            return None
+        return self._sense_id_to_ref.get(int(sense_id))
 
 
 def _row_to_lemma_entry(row: sqlite3.Row) -> LemmaEntry:
@@ -826,4 +887,6 @@ def _row_to_meaning(row: sqlite3.Row) -> MeaningRow:
 __all__ = [
     "MAX_NEW_LOOKUP_DOWNLOADS",
     "OnlineDictionaryProvider",
+    "_Budget",
+    "_OperationBudget",
 ]

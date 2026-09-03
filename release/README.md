@@ -53,3 +53,16 @@ total, all with `byte_size: 0` and `sha256: 0…0` placeholders). It is **not**
 a production Online asset manifest and is not referenced by any Online
 retrieval path. Slice 13 is publication-only and may produce the real
 manifest at a separate release.
+
+The lookup shards additionally carry a `sense_route(sense_ref, lemma_ref)`
+table bucket-closed on `bucket256_v1(sense_ref)` for the
+`sense_ref -> lemma_ref` lookup the runtime performs before opening any
+entry shard. Entry shards do not carry the authoritative `example`
+payload; example rows live in the 64-shard example family keyed by
+`example.id % 64`. The membership filter is sized dynamically from the
+actual closure-key set and uses a self-describing serialization
+(`WFBL` magic + version + size_bits + hash_count + bit payload); the
+producer never assumes a 512-bit production size. The Product HTTP
+transport (`app/online_transport.py`) is the trusted GitHub Release
+boundary and is the only path that downloads Online shards in product
+use.

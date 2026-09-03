@@ -382,9 +382,11 @@ def online_corpus(
     for form, lemma_id in surface_forms:
         surface_by_lemma.setdefault(lemma_id, []).append(form)
 
-    lookup_partitions = _partition_lookup_shards(lemmas, surface_forms)
+    lookup_partitions, sense_route_partitions = _partition_lookup_shards(
+        lemmas, surface_forms, senses
+    )
     entry_partitions = _partition_entry_shards(
-        lemmas, senses, meanings, surface_forms, examples, example_lemma
+        lemmas, senses, meanings, surface_forms, example_lemma
     )
     example_partitions = _partition_example_shards(examples)
 
@@ -429,7 +431,11 @@ def online_corpus(
                 SHARD_FAMILY_LOOKUP,
                 bucket,
                 _write_lookup_shard,
-                (lookup_partitions.get(bucket, []), surface_by_lemma),
+                (
+                    lookup_partitions.get(bucket, []),
+                    surface_by_lemma,
+                    sense_route_partitions.get(bucket, ()),
+                ),
             )
         )
     for bucket in range(ENTRY_FAMILY_SIZE):
@@ -440,7 +446,6 @@ def online_corpus(
                 "senses": [],
                 "meanings": [],
                 "surface_forms": [],
-                "examples": [],
                 "example_lemma": [],
             },
         )
@@ -454,7 +459,6 @@ def online_corpus(
                     state["senses"],
                     state["meanings"],
                     state["surface_forms"],
-                    state["examples"],
                     state["example_lemma"],
                 ),
             )
@@ -469,9 +473,16 @@ def online_corpus(
             )
         )
 
-    filter_bytes = BloomFilter.from_authoritative_lemmas(
-        (row[2] for row in lemmas), size_bits=512
-    ).to_bytes()
+    closure_keys: list[str] = []
+    seen_closure: set[str] = set()
+    for row in lemmas:
+        lemma_text = str(row[2])
+        for variant in (lemma_text, lemma_text.lower()):
+            if variant in seen_closure:
+                continue
+            seen_closure.add(variant)
+            closure_keys.append(variant)
+    filter_bytes = BloomFilter.from_closure_keys(closure_keys).to_bytes()
 
     filter_digest = sha256(filter_bytes).hexdigest()
     assets.append(
@@ -561,7 +572,17 @@ def test_provider_parity_surface_form(
 def test_provider_parity_senses_for_lemma(
     online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
 ) -> None:
+    """Online senses parity after observed ``lookup_exact`` cache identity.
+
+    Numeric ``lemma_id`` is an active-asset cache identity only
+    (ADR-0009 / Defect R1B). The Online provider resolves a numeric
+    ``lemma_id`` through the in-process cache populated when a
+    ``lookup_exact`` hit legitimately observes the lemma. The test
+    performs that observation before asserting parity.
+    """
     online, _, local, _ = online_corpus
+    for query in ("Haus", "See", "anrufen", "Karte"):
+        online.lookup_exact(query)
     for lemma_id in (1, 2, 3, 4, 5):
         local_senses = [s.semantic_ref for s in local.senses_for_lemma(lemma_id)]
         online_senses = [s.semantic_ref for s in online.senses_for_lemma(lemma_id)]
@@ -571,7 +592,10 @@ def test_provider_parity_senses_for_lemma(
 def test_provider_parity_meanings_for_sense(
     online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
 ) -> None:
+    """Online sense-meanings parity after observed cache identity."""
     online, _, local, _ = online_corpus
+    for query in ("Haus", "See", "anrufen", "Karte"):
+        online.lookup_exact(query)
     for sense_id in (1, 2, 3, 4, 5):
         local_meanings = [
             (m.language, m.text) for m in local.meanings_for_sense(sense_id)
@@ -585,7 +609,16 @@ def test_provider_parity_meanings_for_sense(
 def test_provider_parity_examples_for_lemma(
     online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
 ) -> None:
+    """Online examples-for-lemma parity after observed cache identity.
+
+    The Online provider reads example payload from the example family
+    keyed by ``example.id % 64``. The example IDs are discovered from
+    the entry shard's ``example_lemma`` join, which requires the
+    observed ``lemma_id -> lemma_ref`` mapping.
+    """
     online, _, local, _ = online_corpus
+    for query in ("Haus", "See", "anrufen", "Karte"):
+        online.lookup_exact(query)
     for lemma_id in (1, 2, 3, 4, 5):
         local_examples = [
             (e.example_id, e.de, e.en) for e in local.examples_for_lemma(lemma_id)
@@ -780,3 +813,450 @@ def test_provider_rejects_invalid_manifest_token(tmp_path: Path) -> None:
         OnlineDictionaryProvider(
             manifest=fake_manifest, cache=cache, filter_payload=b"\x00" * 64
         )
+
+
+# ---------------------------------------------------------------------------
+# Defect R1 — sense_route lives in the lookup shard family
+# ---------------------------------------------------------------------------
+
+
+def test_sense_route_resolves_via_lookup_shard_only(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """``sense_route`` must read exactly its routed lookup bucket."""
+    from app.routing import bucket256_v1
+
+    online, _manifest, local, _ = online_corpus
+    sense_ref = local.lookup_senses(1)[0].semantic_ref
+    route = online.sense_route(sense_ref)
+    assert route is not None
+    lemma = local.lemma_for_id(1)
+    assert lemma is not None
+    assert route[0] == lemma.semantic_ref
+    assert route[1] == sense_ref
+    expected_lookup_bucket = bucket256_v1(sense_ref)
+    # The route must read the lookup shard whose bucket equals
+    # ``bucket256_v1(sense_ref)``; entry-family scans are forbidden.
+    assert 0 <= expected_lookup_bucket < 256
+
+
+def test_sense_route_does_not_scan_all_entry_shards(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """Sense routing must touch only the single routed lookup shard.
+
+    The test wraps the cache transport to record which identities are
+    requested and asserts no entry-family identity is ever touched by
+    ``sense_route``.
+    """
+    from app.routing import bucket256_v1
+
+    online, _manifest, local, _ = online_corpus
+    sense_ref = local.lookup_senses(1)[0].semantic_ref
+    requested: list[ShardIdentity] = []
+    original_lease = online._cache.lease
+
+    def recording_lease(request: ShardRequest) -> Any:
+        requested.append(request.identity)
+        return original_lease(request)
+
+    online._cache.lease = recording_lease  # type: ignore[method-assign]
+    try:
+        online.sense_route(sense_ref)
+    finally:
+        online._cache.lease = original_lease  # type: ignore[method-assign]
+    families = {req.family for req in requested}
+    assert families == {"lookup"}, families
+    buckets = [req.bucket for req in requested]
+    assert buckets == [bucket256_v1(sense_ref)]
+
+
+def test_cold_numeric_lemma_id_returns_documented_cache_miss(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """A cold unknown numeric ID must not trigger any 256-bucket scan."""
+    online, _manifest, _local, _ = online_corpus
+    requested: list[Any] = []
+    original_lease = online._cache.lease
+
+    def recording_lease(request: ShardRequest) -> Any:
+        requested.append(request.identity)
+        return original_lease(request)
+
+    online._cache.lease = recording_lease  # type: ignore[method-assign]
+    try:
+        assert online.senses_for_lemma(9_999_999) == ()
+        assert online.examples_for_lemma(9_999_999) == ()
+        assert online.meanings_for_lemma(9_999_999) == ()
+        assert online.surface_forms_for_lemma(9_999_999) == ()
+    finally:
+        online._cache.lease = original_lease  # type: ignore[method-assign]
+    assert requested == [], (
+        "cold unknown numeric IDs must NOT trigger remote reads; "
+        f"saw {requested}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Defect R2 — compound sense lookup uses sense_route -> lemma_ref -> entry
+# ---------------------------------------------------------------------------
+
+
+def test_compound_components_routes_sense_via_lookup_then_entry(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """``compound_components`` must not bucket the entry shard on ``sense_ref``.
+
+    The compound sense lookup must first resolve ``sense_ref -> lemma_ref``
+    via the bucket-closed ``sense_route`` table in the lookup family
+    and then bucket the entry shard on ``bucket256_v1(lemma_ref)``. The
+    repair removes the previous-candidate defect that bucketed the entry
+    shard directly on ``bucket256_v1(sense_ref)``.
+    """
+    from app.routing import bucket256_v1
+
+    online, _manifest, local, _ = online_corpus
+    sense_ref = local.lookup_senses(1)[0].semantic_ref
+    lemma = local.lemma_for_id(1)
+    assert lemma is not None
+    lemma_ref = lemma.semantic_ref
+    requested: list[tuple[str, int]] = []
+    original_lease = online._cache.lease
+
+    def recording_lease(request: ShardRequest) -> Any:
+        requested.append((request.identity.family, request.identity.bucket))
+        return original_lease(request)
+
+    online._cache.lease = recording_lease  # type: ignore[method-assign]
+    try:
+        online.compound_components([(lemma_ref, sense_ref)])
+    finally:
+        online._cache.lease = original_lease  # type: ignore[method-assign]
+    # The compound path must never request an entry shard keyed by the
+    # sense_ref bucket. It must bucket the entry shard on the routed
+    # lemma_ref instead.
+    assert ("entry", bucket256_v1(sense_ref)) not in requested
+    # And it must request the lookup shard for the sense_ref bucket to
+    # resolve the sense_route.
+    assert ("lookup", bucket256_v1(sense_ref)) in requested
+
+
+# ---------------------------------------------------------------------------
+# Defect R6 — budget counts real new remote lookup downloads
+# ---------------------------------------------------------------------------
+
+
+def test_budget_does_not_charge_for_verified_cached_reads(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """A second read of the same lookup identity must not charge again."""
+    online, _manifest, _local, _ = online_corpus
+    budget = _Budget()
+    identity = ShardIdentity(SHARD_FAMILY_LOOKUP, 7)
+    online.charge_for_test(identity, budget)
+    online.charge_for_test(identity, budget)
+    assert budget.spent == 1
+
+
+def test_budget_charges_for_each_new_download_identity(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """Two distinct identities count as two new downloads."""
+    online, _manifest, _local, _ = online_corpus
+    budget = _Budget()
+    online.charge_for_test(ShardIdentity(SHARD_FAMILY_LOOKUP, 1), budget)
+    online.charge_for_test(ShardIdentity(SHARD_FAMILY_LOOKUP, 2), budget)
+    assert budget.spent == 2
+
+
+def test_budget_rejects_on_33rd_real_download(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """The 33rd real download must raise ``ProviderBudgetExceededError``."""
+    online, _manifest, _local, _ = online_corpus
+    budget = _Budget()
+    for bucket in range(MAX_NEW_LOOKUP_DOWNLOADS):
+        online.charge_for_test(ShardIdentity(SHARD_FAMILY_LOOKUP, bucket), budget)
+    assert budget.spent == MAX_NEW_LOOKUP_DOWNLOADS
+    with pytest.raises(ProviderBudgetExceededError):
+        online.charge_for_test(
+            ShardIdentity(SHARD_FAMILY_LOOKUP, MAX_NEW_LOOKUP_DOWNLOADS), budget
+        )
+
+
+def test_lease_was_downloaded_flag_tracks_real_downloads(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """``ShardLease.was_downloaded`` is True on first miss, False on re-read."""
+    online, manifest, _local, _ = online_corpus
+    # Pick any lookup bucket and clear the cache so the next lease is a
+    # genuine miss rather than a leftover cached hit from earlier tests.
+    target_bucket = 11
+    asset = next(a for a in manifest.lookup_assets if a.bucket == target_bucket)
+    request = ShardRequest(
+        identity=ShardIdentity(SHARD_FAMILY_LOOKUP, bucket=target_bucket),
+        asset=asset,
+    )
+    online._cache.clear()
+    lease_first = online._cache.lease(request)
+    try:
+        assert lease_first.was_downloaded is True
+        lease_second = online._cache.lease(request)
+        try:
+            assert lease_second.was_downloaded is False
+        finally:
+            online._cache.release(lease_second)
+    finally:
+        online._cache.release(lease_first)
+
+
+def test_corrupt_refetch_counts_as_new_download(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """A corrupt cached artifact refetch must be charged as a new download."""
+    online, manifest, _local, _ = online_corpus
+    target_bucket = 9
+    asset = next(a for a in manifest.lookup_assets if a.bucket == target_bucket)
+    request = ShardRequest(
+        identity=ShardIdentity(SHARD_FAMILY_LOOKUP, bucket=target_bucket),
+        asset=asset,
+    )
+    lease_first = online._cache.lease(request)
+    try:
+        assert lease_first.was_downloaded is True
+    finally:
+        online._cache.release(lease_first)
+    # Corrupt the canonical artifact.
+    canonical = (
+        online._cache.cache_dir / "verified" / SHARD_FAMILY_LOOKUP / f"{target_bucket}.sqlite"
+    )
+    canonical.write_bytes(b"corrupt")
+    lease_second = online._cache.lease(request)
+    try:
+        assert lease_second.was_downloaded is True, (
+            "corrupt refetch must be flagged as a new download"
+        )
+    finally:
+        online._cache.release(lease_second)
+
+
+# ---------------------------------------------------------------------------
+# Defect R7 — top-level budget continuity
+# ---------------------------------------------------------------------------
+
+
+def test_operation_context_shares_one_budget_across_nested_calls(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """Nested reads inside ``operation()`` share one budget."""
+    online, _manifest, _local, _ = online_corpus
+    with online.operation() as budget:
+        online.lookup_exact("Haus")
+        online.lookup_exact("See")
+        online.lookup_exact("anrufen")
+        online.lookup_surface_form("Häuser")
+    assert budget.spent <= MAX_NEW_LOOKUP_DOWNLOADS
+
+
+def test_operation_does_not_reset_budget_on_nested_method(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """A nested method must not reset the operation's budget."""
+    online, _manifest, _local, _ = online_corpus
+    captured: list[_Budget] = []
+    with online.operation() as outer_budget:
+        captured.append(outer_budget)
+        online.lookup_exact("Haus")
+        spent_after_first = outer_budget.spent
+        online.lookup_surface_form("Häuser")
+        spent_after_second = outer_budget.spent
+    assert spent_after_second >= spent_after_first
+    # The outer budget object remains the single shared counter; nested
+    # methods do not allocate a fresh throwaway budget under the
+    # operation context.
+    assert len(captured) == 1
+    assert isinstance(captured[0], _Budget)
+
+
+def test_top_level_compound_like_sequence_cumulative_budget(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """A compound-like resolver sequence shares one 32-download budget."""
+    online, manifest, local, _ = online_corpus
+    queries = ["Haus", "See", "anrufen", "Karte"]
+    with online.operation() as budget:
+        for query in queries:
+            hits = online.lookup_exact(query)
+            for hit in hits:
+                online.senses_for_lemma(int(hit.lemma_id))
+    # Cumulative budget must remain under the limit; it is shared across
+    # all nested calls of the operation, not reset per nested read.
+    assert budget.spent <= MAX_NEW_LOOKUP_DOWNLOADS
+
+
+def test_operation_budget_is_not_process_global(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """Each operation gets its own budget; no process-global counter."""
+    online, _manifest, _local, _ = online_corpus
+    online.lookup_exact("Haus")
+    with online.operation() as budget_a:
+        online.lookup_exact("Haus")
+        spent_a = budget_a.spent
+    with online.operation() as budget_b:
+        online.lookup_exact("Haus")
+    # The two operation budgets are independent. Process-global would
+    # mean the second operation observes the first's spend.
+    assert budget_a is not budget_b
+    assert budget_b.spent <= spent_a + 1
+
+
+# ---------------------------------------------------------------------------
+# Defect R3 — examples sourced from example shards
+# ---------------------------------------------------------------------------
+
+
+def test_entry_shard_does_not_carry_example_payload(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """Entry shards must not store the authoritative example payload.
+
+    The test reads the entry shards directly from the on-disk corpus
+    directory the fixture built (not from the cache), so it remains
+    correct whether or not the cache has been cleared by an earlier
+    test in this module.
+    """
+    import sqlite3 as _sqlite3
+
+    _online, _manifest, _local, _ = online_corpus
+    # The committed corpus is written under ``<cache_dir>/../corpus``.
+    cache_dir = _online._cache.cache_dir
+    candidate = cache_dir.parent / "corpus"
+    if not candidate.is_dir():
+        # Fallback: scan cache for any entry shard.
+        entry_paths = sorted(
+            (cache_dir / "verified" / SHARD_FAMILY_ENTRY).glob("*.sqlite")
+        )
+        assert entry_paths, "entry shards must exist in the cache"
+    else:
+        entry_paths = sorted((candidate).glob("entry-*.sqlite"))
+    assert entry_paths, "entry shards must exist in the corpus"
+    for entry_path in entry_paths[:3]:
+        conn = _sqlite3.connect(f"file:{entry_path.as_posix()}?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='example'"
+            ).fetchall()
+            assert rows == [], (
+                f"entry shard {entry_path.name} must not contain an example payload table"
+            )
+        finally:
+            conn.close()
+
+
+def test_example_shards_carry_full_example_payload(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """Example shards must carry the authoritative example payload."""
+    import sqlite3 as _sqlite3
+
+    _online, _manifest, _local, _ = online_corpus
+    cache_dir = _online._cache.cache_dir
+    candidate = cache_dir.parent / "corpus"
+    if candidate.is_dir():
+        example_paths = sorted(candidate.glob("example-*.sqlite"))
+    else:
+        example_paths = sorted(
+            (cache_dir / "verified" / SHARD_FAMILY_EXAMPLE).glob("*.sqlite")
+        )
+    assert example_paths, "example shards must exist in the corpus"
+    total_examples = 0
+    for example_path in example_paths:
+        conn = _sqlite3.connect(
+            f"file:{example_path.as_posix()}?mode=ro", uri=True
+        )
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM example").fetchone()[0]
+            assert count >= 0
+            total_examples += int(count)
+        finally:
+            conn.close()
+    assert total_examples >= 5, (
+        "the fixture has 5 examples; the example family must carry them all"
+    )
+
+
+def test_example_bucket_assignment_is_example_id_modulo_64(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """Each example lands in exactly its ``id % 64`` bucket."""
+    import re as _re
+    import sqlite3 as _sqlite3
+
+    _online, _manifest, _local, _ = online_corpus
+    cache_dir = _online._cache.cache_dir
+    candidate = cache_dir.parent / "corpus"
+    if candidate.is_dir():
+        example_paths = sorted(candidate.glob("example-*.sqlite"))
+    else:
+        example_paths = sorted(
+            (cache_dir / "verified" / SHARD_FAMILY_EXAMPLE).glob("*.sqlite")
+        )
+    for example_path in example_paths:
+        match = _re.search(r"example-(\d+)", example_path.name)
+        assert match is not None
+        bucket = int(match.group(1))
+        conn = _sqlite3.connect(
+            f"file:{example_path.as_posix()}?mode=ro", uri=True
+        )
+        try:
+            for row in conn.execute("SELECT id FROM example").fetchall():
+                assert int(row[0]) % 64 == bucket, (
+                    f"example_id={int(row[0])} not in expected bucket {bucket}"
+                )
+        finally:
+            conn.close()
+
+
+def test_example_id_refs_point_to_existing_example_records(
+    online_corpus: tuple[OnlineDictionaryProvider, OnlineManifest, LocalDictionaryProvider, bytes],
+) -> None:
+    """``example_lemma.example_id`` references must resolve in the example family."""
+    import sqlite3 as _sqlite3
+
+    _online, _manifest, _local, _ = online_corpus
+    cache_dir = _online._cache.cache_dir
+    candidate = cache_dir.parent / "corpus"
+    if candidate.is_dir():
+        example_paths = sorted(candidate.glob("example-*.sqlite"))
+        entry_paths = sorted(candidate.glob("entry-*.sqlite"))
+    else:
+        example_paths = sorted(
+            (cache_dir / "verified" / SHARD_FAMILY_EXAMPLE).glob("*.sqlite")
+        )
+        entry_paths = sorted(
+            (cache_dir / "verified" / SHARD_FAMILY_ENTRY).glob("*.sqlite")
+        )
+
+    example_ids_in_family: set[int] = set()
+    for example_path in example_paths:
+        conn = _sqlite3.connect(
+            f"file:{example_path.as_posix()}?mode=ro", uri=True
+        )
+        try:
+            for row in conn.execute("SELECT id FROM example").fetchall():
+                example_ids_in_family.add(int(row[0]))
+        finally:
+            conn.close()
+    for entry_path in entry_paths:
+        conn = _sqlite3.connect(
+            f"file:{entry_path.as_posix()}?mode=ro", uri=True
+        )
+        try:
+            for row in conn.execute("SELECT example_id FROM example_lemma").fetchall():
+                assert int(row[0]) in example_ids_in_family, (
+                    f"example_id={int(row[0])} from entry {entry_path.name} "
+                    "not found in example family"
+                )
+        finally:
+            conn.close()

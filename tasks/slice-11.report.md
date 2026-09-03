@@ -4,246 +4,227 @@
 - starting main SHA: 491a8083094eaf3f011ba393d68a71aceaee4778
 - branch: slice/11
 - startup clean state: confirmed via `git status --porcelain --untracked-files=all`
-  (empty), `git rev-parse HEAD == 491a8083094eaf3f011ba393d68a71aceaee4778`,
+  (empty), `git rev-parse HEAD == 5c37768b7865ab2e8a7c42ba59facd9a1f206b78`,
   `git rev-parse origin/main == 491a8083094eaf3f011ba393d68a71aceaee4778`
-- startup gate results:
+- startup gate results (before this repair):
   - `.venv/bin/ruff check .` -> All checks passed!
-  - `.venv/bin/mypy --strict .` -> Success: no issues found in 45 source files
-  - `.venv/bin/pytest -q` -> 821 passed
+  - `.venv/bin/mypy --strict .` -> Success: no issues found in 58 source files
+  - `.venv/bin/pytest -q` -> 895 passed
   - `.venv/bin/python tools/check_agents.py` -> AGENTS checks passed
-  - `.venv/bin/python tools/check_modules.py` -> MODULES validation passed: 18 modules
+  - `.venv/bin/python tools/check_modules.py` -> MODULES validation passed: 22 modules
 
-## Implementation
+## Orchestrator pre-review repair
 
-### provider contract
-`app/provider.py` defines the abstract `DictionaryProvider` and the typed
-immutable/read-only domain records shared by both implementations:
+The primary orchestrator's pre-review identified seven concrete
+implementation defects in the Slice 11 candidate. This report records
+the bounded repair that closes them. ADR-0009 is **ACCEPTED / FROZEN**
+and was not reopened. No production shards or releases were created.
 
-- `LemmaHit`, `SenseHit`, `LemmaEntry`, `SenseEntry`, `MeaningRow`,
-  `ExampleRecord`, `DictionaryEntry`, `CandidateLookup`, `CompoundComponent`.
-- Structured provider errors: `ProviderUnavailableError`,
-  `ProviderIntegrityError`, `ProviderNetworkError`,
-  `ProviderBudgetExceededError`. None of them ever mean "dictionary
-  miss": Slice 12 translates them to structured UI/API errors.
-- The contract deliberately exposes **no** raw `sqlite3.Connection`
-  (AGENTS C2 / R9 / ADR-0009 O5). Each implementation decides its
-  storage.
+- **Starting candidate:** `5c37768b7865ab2e8a7c42ba59facd9a1f206b78`
 
-### Local provider
-`app/provider_local.py` adapts the existing
-`app.dictionary.Dictionary` / `DictionaryAsset` / `validate_candidate_dictionary`
-machinery to the abstract contract. Every existing read primitive is
-available through the same method names, returning the same typed
-records. The Local provider still operates through the byte-bound
-validated asset lease; no consumer of `app.dictionary` is changed.
+### R1 — entry-family scans are forbidden
 
-### Online provider
-`app/provider_online.py` implements the contract from one validated
-manifest plus a verified shard cache plus a Bloom membership filter.
-The provider enforces:
+The previous candidate's `sense_route`, `_lemma_ref_for_numeric_id`,
+and `_sense_ref_for_numeric_id` methods scanned all 256 entry shards.
+The repair introduces an independent `sense_route(sense_ref, lemma_ref)`
+table **inside** the lookup shard family, bucket-closed on
+`bucket256_v1(sense_ref)` (per ADR-0009). The runtime
+`OnlineDictionaryProvider.sense_route(sense_ref)` opens exactly one
+lookup shard and queries `sense_route(sense_ref) -> lemma_ref`.
+Numeric IDs are session-local cache identities only: the provider
+populates `_lemma_id_to_ref`, `_sense_id_to_ref`,
+`_sense_id_to_lemma_ref` from rows it legitimately observes through
+lookup hits, senses-for-ref reads, and entry-shard materialization. A
+cold unknown numeric ID yields documented cache-miss semantics
+(`None` / `()`) without any 256-bucket remote scan. Builder
+validation in `_validate_sense_route_partitions` proves every
+authoritative `sense_ref` lands in exactly one sense-route bucket and
+points to its real parent `lemma_ref`. The inflight-dict bookkeeping
+bug in `ShardCache.lease` (which overwrote the dict on every
+identity) is also fixed as part of the cache refactor.
 
-- The exact bucket closure (`bucket256_v1(text)` union
-  `bucket256_v1(text.lower())` deduplicated).
-- Surface-form lookups bypass the Bloom filter (the filter only
-  covers authoritative lemma texts).
-- 32-new-lookup-download budget per top-level resolution operation;
-  a 33rd raises `ProviderBudgetExceededError` without mutating PART-B.
-- `asset_token` equality with the Local provider on the same logical
-  v2 dataset token (verified in the differential test suite).
-- The provider returns a stable ordering and deduplication of meanings,
-  matching the Local behavior.
+Regression tests (added to `tests/test_provider_differential.py`):
+- `test_sense_route_resolves_via_lookup_shard_only`
+- `test_sense_route_does_not_scan_all_entry_shards`
+- `test_cold_numeric_lemma_id_returns_documented_cache_miss`
 
-### routing
-`app/routing.py` exports the exact ADR-0009 functions:
+### R2 — compound sense lookup uses wrong entry bucket
 
-- `bucket256_v1(text) = SHA256(UTF-8 bytes).digest()[0]` — no
-  `hash()`, no `casefold`, no locale-dependent hashing, no Unicode
-  normalization inside the function.
-- `example_bucket(example_id) = example_id % 64`.
-- `lookup_buckets_for_text` and `lookup_buckets_for_builder_text`
-  expose the runtime / builder closure unions used by both providers
-  and the builder.
+The previous `_select_component_text(sense_ref)` opened an entry shard
+on `bucket256_v1(sense_ref)`. The repair routes it through
+`sense_route(sense_ref) -> lemma_ref` first (R1's lookup-shard index)
+and only then opens the entry shard on `bucket256_v1(lemma_ref)`. The
+differential test
+`test_compound_components_routes_sense_via_lookup_then_entry` asserts
+the compound path never requests `("entry", bucket256_v1(sense_ref))`
+and does request `("lookup", bucket256_v1(sense_ref))`.
 
-### manifest
-`app/online_manifest.py` defines the strict manifest contract:
+### R3 — example shards must be the actual example source
 
-- Logical dataset token (validated as a 64-char lowercase hex string).
-- Trusted `TrustedDistribution` (HTTPS only, no userinfo, no path,
-  `github_release_redirect_only` redirect policy).
-- `ManifestAsset` validates `family` ∈ {lookup, entry, example,
-  membership_filter}, `bucket` range, ASCII `name`, no-traversal
-  `path`, `byte_size`, 64-char hex `sha256`.
-- `_validate_assets` enforces exactly the fixed family sizes
-  (256 / 256 / 64 / 1 = 577 total).
-- `manifest_hash` produces a deterministic SHA-256 of the canonical
-  JSON projection.
-- `parse_manifest` / `load_manifest` fail closed on every malformed
-  payload category named in ADR-0009.
+The previous candidate duplicated the full example payload into the
+entry shard. The repair removes the entry shard's `example` table and
+the entry shard writer's example-payload inserts. Entry shards carry
+only `lemma / sense / sense_meaning / surface_form / example_lemma`;
+example rows live exclusively in the 64-shard example family keyed by
+`example.id % 64`. `OnlineDictionaryProvider.examples_for_lemma` now:
+1. fetches the `example_lemma` join from the entry shard;
+2. groups example IDs by `example_bucket(example_id) = id % 64`;
+3. acquires only the required example shards;
+4. reads the authoritative example records from the example family;
+5. materializes `ExampleRecord` from those rows.
 
-### Bloom filter
-`app/online_filter.py` builds a 512-bit deterministic filter
-(`to_bytes` / `from_bytes` round-trip) using two independent bit
-positions per inserted lemma. The closure rule inserts both
-`bucket256_v1(X)` and `bucket256_v1(sqlite_ascii_lower(X))` per
-authoritative lemma. `contains_query(Q)` probes both `Q` and
-`Q.lower()`; zero false negatives for authoritative fixtures are
-asserted by `test_bloom_filter_is_zero_false_negative_for_inserted_lemmas`.
+Regression tests (added to `tests/test_provider_differential.py`):
+- `test_entry_shard_does_not_carry_example_payload`
+- `test_example_shards_carry_full_example_payload`
+- `test_example_bucket_assignment_is_example_id_modulo_64`
+- `test_example_id_refs_point_to_existing_example_records`
 
-### cache / leases
-`app/online_cache.py` implements the ADR-0009 lifecycle:
+### R4 — Bloom filter is not production-scalable
 
-- `ABSENT -> DOWNLOADING -> VERIFIED -> IMMUTABLE LEASE`.
-- Single-flight per shard identity (an `Event` per identity with a
-  refcounted waiter set so concurrent callers each get their own
-  lease without re-downloading).
-- Download to private temporary path, byte-count, SHA-256,
-  SQLite/logical-structure validation, fsync, atomic
-  `os.replace`-install into the canonical `cache_dir/verified/<family>/<bucket>.sqlite`.
-- Cache hit re-validates before issuing the lease.
-- Corruption quarantines and refetches.
-- `clear()` is safe with in-flight leases (the `verified` directory
-  is moved aside and the canonical cache is recreated without
-  touching any active private snapshot).
-- Telemetry: hits, misses, refetches, corruptions, downloads,
-  clears, active leases.
+The previous Bloom filter hardcoded `size_bits = 512` and only had two
+SHA-256-derived bit positions per inserted text. The repair replaces
+this with a fully scalable filter using the standard Bloom formulas
+sized from the actual deduplicated closure-key count:
 
-### network trust
-The Online provider trusts only the committed manifest's
-`TrustedDistribution`. It enforces:
+    m = ceil(-n * ln(p) / (ln(2)^2))  rounded up to whole bytes
+    k = max(1, round((m / n) * ln(2)))
 
-- HTTPS-only base origin; HTTP is rejected before any retrieval.
-- No userinfo; no arbitrary path; no caller-supplied Product URL.
-- `dictionary-v2` is reached through the pinned GitHub release
-  redirect policy; redirects are validated before follow-through.
-- The provider cannot be configured by the browser / API; only the
-  committed manifest drives Online retrieval.
+with target `p = 0.01`. Hash positions use deterministic SHA-256
+double-hashing `(h1 + i * h2) % m` for `i = 0..k-1` (no `hash()`). The
+serialized payload carries a self-describing header
+(`WFBL` magic + version + hash_count + size_bits) followed by the
+bit payload; the loader reads the actual parameters and never assumes
+a 512-bit production size. For the production-scale closure-key count
+`n = 1_477_819` the test
+`test_bloom_size_bits_for_production_corpus_evidence` asserts the
+filter sizes into the ADR-0009 evidence band (~1.69 MiB, `k ≈ 7`).
+Malformed, truncated, wrong-magic, and zero-hash-count payloads are
+rejected fail-closed. FPR remains statistical only (no deterministic
+percentage claim).
 
-These are exercised by `tests/test_provider_differential.py`,
-`tests/test_online_cache.py`, and `tests/test_online_manifest.py`.
+Regression tests (added to `tests/test_routing_equivalence.py`):
+- `test_bloom_size_bits_matches_standard_formula`
+- `test_bloom_size_bits_byte_aligned`
+- `test_bloom_size_bits_grows_with_item_count`
+- `test_bloom_hash_count_uses_optimal_k_formula`
+- `test_bloom_hash_count_at_least_one`
+- `test_bloom_size_bits_for_production_corpus_evidence`
+- `test_bloom_filter_size_grows_with_inserted_keys`
+- `test_bloom_filter_self_describing_payload`
+- `test_bloom_filter_loaded_reads_recorded_size`
+- `test_bloom_filter_rejects_truncated_payload`
+- `test_bloom_filter_rejects_wrong_magic`
+- `test_bloom_filter_rejects_zero_hash_count`
+- `test_bloom_filter_large_synthetic_does_not_saturate`
+- `test_bloom_filter_fpr_is_statistical_no_deterministic_claim`
 
-### budget
-`MAX_NEW_LOOKUP_DOWNLOADS = 32` (ADR-0009). Entry-shard and
-example-shard acquisitions do not consume budget; only new lookup
-identities do. Cached reads are free; duplicate references to one
-identity count once. Exceeding the limit raises
-`ProviderBudgetExceededError` and the Slice 11 acceptance suite
-explicitly asserts the 33rd rejection, the 32-accepted case, and the
-no-PART-B-mutation invariant.
+### R5 — Product HTTP transport is missing
 
-### builder
-`tools/build_online_dictionary.py` is deterministic:
+The previous ShardCache accepted `transport: Callable[[ShardRequest], bytes]`
+but no production Product transport existed. The repair adds
+`app/online_transport.py` with the trusted GitHub Release transport:
 
-- Validates the source Local asset against the v2 dataset token.
-- Partitions lemmas into 256 lookup buckets using the closure
-  rule, senses/meanings/surface_forms/example_lemma/examples into
-  256 entry buckets keyed by `bucket256_v1(lemma_semantic_ref)`,
-  examples into 64 buckets keyed by `example_bucket(example_id)`.
-- Emits a 577-asset manifest and the membership filter.
-- Atomic file replacement of every shard.
-- `write_manifest` produces canonical JSON; `manifest_hash` is
-  bit-exact across runs.
-- Production execution is gated to Slice 13; the Slice 11 tests use
-  the deterministic in-memory partitioning helpers against tiny
-  fixture inputs.
+- URL is built internally from `TrustedDistribution.base_origin`
+  (`https://github.com`), the `release_tag`, and the committed
+  Wortlaut repo `sabers13/wortlaut`; the caller never supplies a URL,
+  host, manifest URL, or redirect target.
+- HTTPS-only; userinfo rejected; unexpected ports rejected; arbitrary
+  hosts rejected; plain HTTP rejected.
+- Every redirect is validated before follow-through against a small
+  explicit allowlist (`github.com`, `objects.githubusercontent.com`,
+  `githubusercontent.com`); redirect loop / excessive redirects are
+  rejected.
+- Network / DNS / SSL failures raise `ProviderNetworkError` and never
+  become a dictionary miss.
+- An injectable low-level opener seam drives every redirect case so
+  tests never reach the public GitHub network.
+- Constructor seams: `create_product_shard_cache` and
+  `create_product_online_provider` install the trusted Product
+  transport automatically. Slice 12 does not have to know about
+  redirect policy or construct a transport callable.
 
-## Contract-coverage map
+Regression tests (added to `tests/test_online_transport.py`, 15 tests):
+- `test_initial_url_is_exact_github_release_form`
+- `test_approved_release_redirect_is_accepted`
+- `test_arbitrary_host_redirect_is_rejected`
+- `test_plain_http_redirect_is_rejected`
+- `test_userinfo_redirect_is_rejected`
+- `test_unexpected_port_redirect_is_rejected`
+- `test_redirect_loop_is_rejected`
+- `test_non_2xx_response_is_rejected`
+- `test_connection_failure_is_a_network_error`
+- `test_ssl_failure_is_a_network_error`
+- `test_url_error_is_a_network_error`
+- `test_successful_payload_is_returned`
+- `test_caller_cannot_supply_arbitrary_product_source`
+- `test_create_product_shard_cache_uses_trusted_transport`
+- `test_create_product_online_provider_uses_trusted_transport`
 
-Slice 11's provider contract covers **every** current dictionary
-read in `app/api.py`, `app/deck.py`, and `app/resolve.py`. The
-mapping below names each consumed operation, the provider
-replacement, and the migration status. `app/api.py` is unchanged in
-this slice; Slice 12 owns its migration.
+### R6 — budget must count real new remote lookup downloads
 
-| Current consumer | Current operation | Provider replacement | Migration status |
-| --- | --- | --- | --- |
-| `app/resolve.py:LookupProtocol.lookup_exact` (used by `resolve_token` and `resolve_word`) | resolver-seam exact lookup | `DictionaryProvider.lookup_exact` returning `Sequence[LemmaHit]` | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
-| `app/resolve.py:LookupProtocol.lookup_surface_form` | resolver-seam surface-form lookup | `DictionaryProvider.lookup_surface_form` returning `Sequence[LemmaHit]` | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
-| `app/resolve.py:LookupProtocol.lookup_senses` | resolver-seam senses-by-id lookup | `DictionaryProvider.lookup_senses` returning `Sequence[SenseHit]` | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
-| `app/api.py:_Connection._._ConnectionLookupOracle.lookup_exact` (used by `_materialize_candidate_from_ref` via `_resolve_token`/`_resolve_word`) | direct exact-lemma read for picker | `DictionaryProvider.lookup_exact` | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
-| `app/api.py:_Connection._._ConnectionLookupOracle.lookup_surface_form` | direct surface-form read | `DictionaryProvider.lookup_surface_form` | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
-| `app/api.py:_Connection._._ConnectionLookupOracle.lookup_senses` | direct senses-by-id read | `DictionaryProvider.lookup_senses` | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
-| `app/api.py:_materialize_candidate_from_ref` (used by `POST /vocab/highlight`) | raw `dict_conn.execute(...)` SELECTs on `lemma` / `sense` / `sense_meaning` / `example` / `example_lemma` / `surface_form` for the candidate picker payload | `DictionaryProvider.entry_for_ref` + `candidate_lookup` + `sense_route` | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
-| `app/api.py:POST /vocab/highlight` `_resolve_word` / `_resolve_token` | `resolve_token` and `resolve_word` calls against the resolver seam | unchanged — those calls already accept a `LookupProtocol`; Slice 12 swaps `_ConnectionLookupOracle` for the Online provider | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
-| `app/api.py:POST /vocab/import/csv` `resolve_word` calls | `resolve_word` against the resolver seam | unchanged — same as above | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
-| `app/api.py:POST /vocab/cards` `runtime.reading()` snapshot usage (`snapshot.lemma_ids`, `snapshot.sense_ids`) | asset-token + durable-ref validation against `active_dictionary_metadata` | handled by `DictionaryProvider.asset_token` plus the explicit `sense_route` / `lemma_for_ref` mapping; the ReadingSnapshot seam stays in `DictionaryRuntime` until Slice 12 migrates `/vocab/cards` to validate refs against the provider | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
-| `app/deck.py:DictionaryRuntime.materialize_lookup` | `dict_conn.execute(...)` on `lemma` / `sense` / `sense_meaning` / `example` for `materialize_lookup` | `DictionaryProvider.candidate_lookup` (returning `Sequence[CandidateLookup]`) plus `entry_for_ref` if materialization needs full records | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
-| `app/deck.py:DictionaryRuntime.materialize_card_render_payload` (uses `_materialize_lemma_under_gen`) | direct SELECT on `lemma` / `sense` / `sense_meaning` / `example_lemma` / `example` for card render | `DictionaryProvider.entry_for_ref(lemma_semantic_ref)` plus `examples_for_lemma` for the example table | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
-| `app/deck.py:DictionaryRuntime.materialize_compound_components` | direct SELECT on `lemma.lemma`, `sense_meaning.text` per component for D46 component decomposition | `DictionaryProvider.compound_components(component_refs)` returning one `CompoundComponent` per ordered `(lemma_ref, sense_ref)` pair with `meanings_by_language` | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
-| `app/deck.py:DictionaryRuntime._observe_card_render_internal` / `_observe_export_payload_internal` | raw `reader_conn.execute(...)` to materialise card / export payloads | `DictionaryProvider.entry_for_ref` for the lemma payload and `compound_components` for derived compounds | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
-| `app/deck.py:DictionaryRuntime.activate_dictionary` | atomic activation, relink PART-B, swap generations | the cache + manifest handles asset acquisition; `DictionaryRuntime` keeps ownership of the PART-B activation transaction. Slice 12 will route Online acquisitions through the cache before activation; today Local activations already satisfy this contract by reusing the same validated asset snapshot | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
-| `app/resolve.py:resolve_token` / `resolve_word` / `generate_candidates` / `split_compound` | resolution ladder against the `LookupProtocol` | unchanged: `LookupProtocol` is the seam; the Slice 11 provider classes implement it | **PROVIDER AVAILABLE — CONSUMER MIGRATION OWNED BY SLICE 12** |
+The previous `_lease_with_budget` charged the budget iff the
+canonical pathname did not exist before the call, so a corrupt cached
+artifact that required a remote refetch was not charged. The repair
+moves the charge decision to the cache layer: `ShardLease` now carries
+a `was_downloaded` boolean set by the cache, and
+`OnlineDictionaryProvider._lease_with_budget` charges the budget iff
+`lease.was_downloaded is True`. Entry / example shards remain free of
+charge. Verified cached reads, single-flight waiters, and clear-cache
+rebuilds are all accounted for correctly. Duplicate identities inside
+one operation count once.
 
-Every read the served product performs today has an exact provider
-replacement; no current read requires a new shard route or family.
-The Slice 11 contract therefore proves the ADR-0009 closure.
+Regression tests (added to `tests/test_provider_differential.py`):
+- `test_budget_does_not_charge_for_verified_cached_reads`
+- `test_budget_charges_for_each_new_download_identity`
+- `test_budget_rejects_on_33rd_real_download`
+- `test_lease_was_downloaded_flag_tracks_real_downloads`
+- `test_corrupt_refetch_counts_as_new_download`
 
-## Fixture architecture
+### R7 — top-level operation budget continuity
 
-- The Slice 11 acceptance suite is fully offline. No public network,
-  no GitHub, no Release, no Product download.
-- The Online corpus is built in-test from a tiny Local dictionary
-  using `tools/build_online_dictionary._partition_*` helpers +
-  `_write_*_shard` writers. The corpus lives under `tmp_path` and is
-  discarded at the end of the test module.
-- The provider-side transport is a `ShardCache` transport callable
-  that returns the on-disk shard bytes for the requested identity;
-  there is no urllib, no requests, no real socket.
-- The membership filter is built deterministically from the
-  authoritative lemmas of the fixture via
-  `BloomFilter.from_authoritative_lemmas`.
-- `tests/test_provider_differential.py` uses a **module-scoped**
-  fixture so the corpus is built once per test module. The fixture
-  captures `(online, manifest, local, filter_bytes)` once; every
-  test in the module then exercises the contract against the
-  pre-built corpus. This keeps the run time under six minutes for
-  the 19 differential tests.
-- `release/dictionary-online-manifest-v2.json` is a fixture-shape
-  schema-only manifest (byte_size / sha256 = zero placeholders,
-  fixed 577 assets) used by `tests/test_online_manifest.py` to
-  parse the contract shape. It is **not** a production asset
-  manifest and not a Release publication.
+The previous candidate's `lookup_exact`, `lookup_surface_form`, and
+`candidate_lookup` each created a fresh `_Budget` per call, so a
+compound / resolver sequence could bypass the 32 limit by accidentally
+resetting the budget at every nested call. The repair adds
+`OnlineDictionaryProvider.operation()` — a context manager that binds
+one `_Budget` to a `contextvars.ContextVar`. Nested reads consult the
+active operation budget; reads outside any `operation()` block fall
+back to a fresh throwaway budget (preserving back-compat). The
+ContextVar is task-local, not process-global.
 
-## Tests
-
-Focuseded commands and results (run after the final `make gate`):
-
-```
-.venv/bin/pytest -q tests/test_routing_equivalence.py
-  16 passed in 0.04s
-
-.venv/bin/pytest -q tests/test_online_manifest.py
-  22 passed in 0.09s
-
-.venv/bin/pytest -q tests/test_online_cache.py
-  11 passed in 1.15s
-
-.venv/bin/pytest -q tests/test_build_online_dictionary.py
-  6 passed in 0.43s
-
-.venv/bin/pytest -q tests/test_provider_differential.py
-  19 passed in 347.07s
-```
-
-The differential suite covers: exact lookup, exact lookup
-(capitalised), surface-form lookup, senses-for-lemma,
-meanings-for-sense, examples-for-lemma, entry-for-ref,
-sense-route, candidate lookup, miss, unknown inputs, decomposed
-Unicode parity, surface-form lookup (capitalised), budget exceeded
-at 33rd identity, deduplicated budget charging, cached-read
-free-charging, provider rejection of mismatched manifest dataset
-token, and lookup-failure does not mutate PART-B.
+Regression tests (added to `tests/test_provider_differential.py`):
+- `test_operation_context_shares_one_budget_across_nested_calls`
+- `test_operation_does_not_reset_budget_on_nested_method`
+- `test_top_level_compound_like_sequence_cumulative_budget`
+- `test_operation_budget_is_not_process_global`
 
 ## Final validation
 
 - `git diff --check` -> clean (no whitespace errors)
 - `.venv/bin/ruff check .` -> All checks passed!
-- `.venv/bin/mypy --strict .` -> Success: no issues found in 58 source files
-- `.venv/bin/pytest -q` -> 895 passed, 120 warnings in 732.04s (full gate)
+- `.venv/bin/mypy --strict .` -> Success: no issues found in 60 source files
+- `.venv/bin/pytest -q` -> 941 passed, 120 warnings in 380.84s
+  - added 1 new focused test module (`tests/test_online_transport.py`,
+    15 tests) and additional regression tests in
+    `tests/test_routing_equivalence.py` and
+    `tests/test_provider_differential.py`
 - `.venv/bin/python tools/check_agents.py` -> AGENTS checks passed:
   R1, R3, R6, R7, R12, R13
 - `.venv/bin/python tools/check_modules.py` -> MODULES validation
   passed: 22 modules
 - `make gate` final result: PASS
+
+### Focused-test counts after repair
+- `tests/test_routing_equivalence.py` -> 30 passed (was 16; added
+  R4 regression coverage).
+- `tests/test_online_manifest.py` -> 22 passed (unchanged).
+- `tests/test_online_cache.py` -> 11 passed (unchanged).
+- `tests/test_build_online_dictionary.py` -> 6 passed (unchanged;
+  one signature update).
+- `tests/test_online_transport.py` -> 15 passed (new).
+- `tests/test_provider_differential.py` -> 36 passed (was 19; added
+  R1/R2/R3/R6/R7 regression coverage; three tests were updated to
+  follow the documented `lookup_exact -> numeric-ID` flow).
 
 ## Security/integrity
 
@@ -253,22 +234,28 @@ token, and lookup-failure does not mutate PART-B.
   path, path traversal, invalid family, invalid bucket, missing
   family bucket, HTTP origin, userinfo origin, non-root origin
   path, and unsupported redirect policy.
+- **Trust-negative Product transport tests:**
+  `tests/test_online_transport.py` asserts the policy fails closed
+  on HTTP redirect, userinfo redirect, unexpected port redirect,
+  arbitrary-host redirect, redirect loop, non-2xx response,
+  connection failure, SSL failure, and URL error — and asserts the
+  initial request URL is exactly the committed GitHub Release form.
 - **Cache corruption:** `test_corrupt_canonical_artifact_is_quarantined_and_refetched`
   writes garbage into the canonical artifact and proves the cache
-  quarantines it and refetches.
-- **Redirect validation:** the Online provider never follows an
-  HTTP redirect to a non-https / userinfo / unknown host. This is
-  documented in `app/provider_online.py` and exercised by
-  manifest + cache tests.
-- **No browser/caller source override:** the Online provider's
+  quarantines it and refetches. `test_corrupt_refetch_counts_as_new_download`
+  proves the corruption refetch is charged as a new download.
+- **No browser/caller source override:** the Product transport's
   trusted distribution is fixed at construction; the API cannot pass
-  a custom URL.
+  a custom URL. `test_caller_cannot_supply_arbitrary_product_source`
+  asserts the transport does not expose any host/URL/manifest
+  parameter.
 - **No PART-B mutation on provider failure:**
   `test_lookup_failure_does_not_mutate_part_b` proves that a
   provider integrity failure does not write any row to the user DB.
-- **Network trust:** `tests/test_provider_differential.py` exercises
-  the entire provider against a deterministic, local-only transport
-  fixture; no real network is touched.
+- **Network trust:** the focused differential tests exercise the
+  entire provider against a deterministic, local-only transport
+  fixture; the Product transport tests inject a low-level opener
+  seam that drives every redirect case; no real network is touched.
 
 ## Production state
 
@@ -285,42 +272,82 @@ to parse the manifest contract; its `byte_size` / `sha256` fields
 are zero placeholders. No Online assets, no corpus, and no Release
 were produced by this slice; that is Slice 13's responsibility.
 
-## Changed files
+## Scope
 
-Added:
-
-- `app/provider.py`
-- `app/provider_local.py`
-- `app/provider_online.py`
-- `app/online_manifest.py`
-- `app/online_cache.py`
-- `app/online_filter.py`
-- `app/routing.py`
-- `tools/build_online_dictionary.py`
-- `release/dictionary-online-manifest-v2.json` (fixture)
-- `tests/test_routing_equivalence.py`
-- `tests/test_online_manifest.py`
-- `tests/test_online_cache.py`
-- `tests/test_build_online_dictionary.py`
-- `tests/test_provider_differential.py`
-- `tasks/slice-11.report.md`
+### Changed paths
 
 Modified (within the Slice 11 allowlist):
 
-- `MODULES.toml` (registered new modules: provider, online_manifest,
-  online_cache, build_online_dictionary)
-- `release/README.md` (documented the new manifest fixture)
-- `tests/test_check_modules.py` (updated the asserted module count
-  from 18 to 22)
+- `app/online_cache.py` — `ShardLease.was_downloaded`, inflight
+  bookkeeping fix, dedicated download path.
+- `app/online_filter.py` — scalable Bloom sizing, double-hashing,
+  self-describing serialization (`WFBL` magic + version +
+  size_bits + hash_count).
+- `app/provider_online.py` — lookup-shard sense_route, compound
+  routing via sense_route, example payload from example family,
+  session-local numeric ID cache maps, `operation()` context
+  manager, `_lease_with_budget` driven by `lease.was_downloaded`.
+- `app/online_transport.py` (new) — trusted Product HTTP transport
+  with redirect validation, network-error mapping, and the
+  Slice-12-ready `create_product_shard_cache` /
+  `create_product_online_provider` constructors.
+- `tools/build_online_dictionary.py` — `sense_route` partitioning
+  and writer integration, builder validation
+  (`_validate_sense_route_partitions`), removal of example payload
+  from the entry shard writer, dynamic Bloom closure-key sizing.
+- `MODULES.toml` — `app/online_transport.py` and the new
+  `tests/test_online_transport.py` are owned by the existing
+  `online_cache` module (no new module added).
+- `tests/test_provider_differential.py` — fixture now uses the
+  new partitioner signatures; R1/R2/R3/R6/R7 regression tests
+  added; three parity tests updated to the documented
+  `lookup_exact -> numeric-ID` flow.
+- `tests/test_routing_equivalence.py` — R4 scalable-Bloom
+  regression tests added; one signature update for the new
+  `from_bytes(payload)` (no `size_bits` argument).
+- `tests/test_build_online_dictionary.py` — one signature update
+  for the new `_partition_lookup_shards` return value.
+- `tests/test_online_transport.py` (new) — 15 R5 transport trust
+  tests.
+- `release/README.md` — added a short paragraph noting the
+  sense_route table, the example-family separation, the dynamic
+  Bloom filter, and the trusted Product transport.
+- `tasks/slice-11.report.md` — this update.
+
+Not modified:
+
+- `app/provider.py`, `app/provider_local.py`, `app/routing.py`,
+  `app/online_manifest.py`, `app/dictionary.py`, `app/deck.py`,
+  `app/api.py` (unchanged).
+- `release/dictionary-online-manifest-v2.json` (fixture schema
+  unchanged).
+- The committed corpus files (`release/*.sqlite`) — none exist
+  for the Online corpus.
+
+### `tests/test_check_modules.py` authorization
+
+The previous candidate changed `tests/test_check_modules.py` from
+the hard-coded expected module count `18 -> 22` because Slice 11
+legitimately registered new modules in `MODULES.toml`. The primary
+orchestrator explicitly authorized this exact mechanical co-change
+during pre-review repair dispatch:
+
+> The original brief did not list this test path. The PRIMARY
+> ORCHESTRATOR NOW EXPLICITLY AUTHORIZES that exact mechanical
+> co-change. It is not a blocker and does not require another
+> governance session.
+
+This authorization is recorded here for traceability. No further
+broadening of `tests/test_check_modules.py` was made.
 
 ## Commit
 
-- candidate SHA: see `git rev-parse HEAD` on `slice/11` after the
+- starting candidate: `5c37768b7865ab2e8a7c42ba59facd9a1f206b78`
+- repaired SHA: see `git rev-parse HEAD` on `slice/11` after the
   commit below.
-- subject: feat(dictionary): add online provider infrastructure
-- branch: slice/11
-- origin equality: `origin/slice/11` will be pushed to equal the
-  candidate SHA.
+- subject: `fix(dictionary): close online provider routing gaps`
+- branch: `slice/11`
+- origin/slice/11: pushed to equal the repaired SHA.
 - origin/main: still `491a8083094eaf3f011ba393d68a71aceaee4778`
   (unchanged).
 - clean worktree: `git status --short --untracked-files=all` empty
