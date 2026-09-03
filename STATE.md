@@ -13,15 +13,16 @@ Updated only at session CLOSE from repository/gate evidence.
   `tasks/slice-10.md` remain immutable historical evidence; no review #4 or
   implementation dispatch is permitted.
 
-* **ADR-0009 successor lineage is open, pending cold review #1.** It
-  supersedes ADR-0008 for the Online/Offline product scope through a materially
-  simpler session-only model: no persisted dictionary mode; explicit CLI/custom
-  manifest precedence plus current local facts determine startup; first-run
-  Online is chosen only for the current process; a valid full Offline asset
-  defaults Offline. `tasks/slice-11.md`, `tasks/slice-12.md`, and
-  `tasks/slice-13.md` split provider infrastructure, session/UI behavior, and
-  production publication. They are blocked until ADR-0009 approval (with the
-  stated inter-slice dependencies).
+* **ADR-0009 successor lineage is open, pending focused cold review #2.**
+  Cold review #1 broadly challenged the session-scoped successor and filed
+  O1-O5. The bounded revision at
+  `4f563c8b64f0bfcb9b93ec3be4a3ff79ad28ff50` resolves example routing,
+  exact lookup-bucket closure/normalization parity, Offline-removal
+  metadata semantics, the Slice-12 E2E harness scope, and complete
+  provider-read migration sequencing. ADR-0009 remains `NEEDS COLD REVIEW`;
+  no production Online-dictionary code, shards, or release has been
+  created. `tasks/slice-11.md`, `tasks/slice-12.md`, and
+  `tasks/slice-13.md` remain blocked under their existing dependencies.
 
 * **slice-0 through slice-6 are accepted, merged and closed.**
   slice-0 governance/gate; slice-1 resolver/dictionary boundary; slice-2 Gate 1;
@@ -134,6 +135,11 @@ Updated only at session CLOSE from repository/gate evidence.
 
 ## Gate
 
+* ADR-0009 O1-O5 revision candidate
+  `4f563c8b64f0bfcb9b93ec3be4a3ff79ad28ff50`: PASS — ruff clean;
+  mypy --strict clean on 45 source files; 821 pytest passed;
+  executable AGENTS R1/R3/R6/R7/R12/R13 PASS; MODULES validation
+  PASS for 18 modules.
 * ADR-0008 terminal branch gate at `0a6c0c22`: PASS — ruff clean, mypy strict
   clean, pytest passed, and the executable AGENTS checks passed before the
   authorized fast-forward to `main`.
@@ -174,9 +180,11 @@ Updated only at session CLOSE from repository/gate evidence.
 
 ## Blocked
 
-* ADR-0009 cold review #1 must approve and freeze the successor before any
-  Slice-11, Slice-12, or Slice-13 implementation dispatch. ADR-0008/Slice-10
-  remain terminal historical evidence, not an alternative next action.
+* ADR-0009 focused cold review #2 must verify the O1-O5 remedies and
+  approve/freeze the successor before any Slice-11, Slice-12, or Slice-13
+  implementation dispatch. Review #3 is not dispatched merely because the
+  cap permits it; it exists only if review #2 returns a qualifying blocker.
+  ADR-0008/Slice-10 remain terminal historical evidence.
 
 * Compose integration blocked by lecture-app Phase-4 decomposition (slice-9)
   and the missing donor-evidence file `tasks/adr-0002-donor-notes.md`.
@@ -185,12 +193,16 @@ Updated only at session CLOSE from repository/gate evidence.
 
 ## Next three actions
 
-1. Dispatch a fresh cold reviewer for ADR-0009 review #1 under WORKFLOW §7 /
-   AGENTS G7; it must assess material simplification, no persisted mode,
-   deterministic startup/custom-manifest behavior, zero pre-choice network,
-   existing-user Offline startup, integrity, and executable phase split.
-2. If approved, freeze ADR-0009 and dispatch Slice-11 only; do not dispatch
-   Slice-12 or Slice-13 early and do not touch ADR-0008/Slice-10.
+1. Dispatch a fresh T3 cold reviewer for ADR-0009 review #2 against the
+   current ADR branch HEAD. Scope is focused O1-O5 remedy verification and
+   direct knock-on contradictions under WORKFLOW §7 / AGENTS G7, not
+   another broad architecture redesign.
+2. If review #2 approves, freeze ADR-0009, administratively unblock
+   Slice-11 only, and complete the accepted ADR branch closure into `main`
+   before Slice-11 implementation dispatch. Keep Slice-12 blocked on
+   accepted Slice-11 and Slice-13 blocked on accepted Slices 11 and 12.
+   If review #2 finds a qualifying blocker, use one bounded revision and
+   final cold review #3 under the existing convergence rule.
 3. Independently, before any Slice-9 implementation/review dispatch, amend
    `tasks/slice-9.md` with `Required reading:`, complete its donor/lecture-app
    blockers, then use normal fresh-startup and required risk-review workflow.
