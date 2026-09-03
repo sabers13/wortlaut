@@ -5,6 +5,24 @@ Updated only at session CLOSE from repository/gate evidence.
 
 ## What landed
 
+* **ADR-0008 is terminally BLOCKED and permanently closed on `main`.** Its
+  three cold reviews are exhausted; F1 found that persisted Online preference
+  semantics conflict with explicit Offline Developer/Recovery custom-manifest
+  startup. `main` was fast-forwarded and pushed at
+  `0a6c0c22f18bc8f761e21a75f6a8616df48699dd`. ADR-0008 and blocked
+  `tasks/slice-10.md` remain immutable historical evidence; no review #4 or
+  implementation dispatch is permitted.
+
+* **ADR-0009 successor lineage is open, pending cold review #1.** It
+  supersedes ADR-0008 for the Online/Offline product scope through a materially
+  simpler session-only model: no persisted dictionary mode; explicit CLI/custom
+  manifest precedence plus current local facts determine startup; first-run
+  Online is chosen only for the current process; a valid full Offline asset
+  defaults Offline. `tasks/slice-11.md`, `tasks/slice-12.md`, and
+  `tasks/slice-13.md` split provider infrastructure, session/UI behavior, and
+  production publication. They are blocked until ADR-0009 approval (with the
+  stated inter-slice dependencies).
+
 * **slice-0 through slice-6 are accepted, merged and closed.**
   slice-0 governance/gate; slice-1 resolver/dictionary boundary; slice-2 Gate 1;
   slice-3 Stage-01 + ADR-0004 PART-A alignment; slice-4 Gate 2 (99.00% CONTINUE);
@@ -116,6 +134,10 @@ Updated only at session CLOSE from repository/gate evidence.
 
 ## Gate
 
+* ADR-0008 terminal branch gate at `0a6c0c22`: PASS — ruff clean, mypy strict
+  clean, pytest passed, and the executable AGENTS checks passed before the
+  authorized fast-forward to `main`.
+
 * Agent-efficiency exact candidate `c136a2e`: PASS — ruff clean;
   mypy --strict clean on 39 source files; 731 pytest passed;
   AGENTS R1/R3/R6/R7/R12/R13 PASS; MODULES validation passed
@@ -152,6 +174,10 @@ Updated only at session CLOSE from repository/gate evidence.
 
 ## Blocked
 
+* ADR-0009 cold review #1 must approve and freeze the successor before any
+  Slice-11, Slice-12, or Slice-13 implementation dispatch. ADR-0008/Slice-10
+  remain terminal historical evidence, not an alternative next action.
+
 * Compose integration blocked by lecture-app Phase-4 decomposition (slice-9)
   and the missing donor-evidence file `tasks/adr-0002-donor-notes.md`.
 * ADR-0002 D27 / ADR-0003 D27 identifier collision remains naming debt only.
@@ -159,12 +185,12 @@ Updated only at session CLOSE from repository/gate evidence.
 
 ## Next three actions
 
-1. Before any Slice-9 implementation/review dispatch, amend the existing
-   `tasks/slice-9.md` brief with its required `Required reading:` field under
-   WORKFLOW §2; do not retroactively rewrite closed slice briefs.
-2. Complete the Slice-9 pre-dispatch blockers: read-only donor inspection and
-   `tasks/adr-0002-donor-notes.md`, plus confirmation that lecture-app Phase-4
-   decomposition is closed on the lecture side. Slice 9 remains NOT STARTED.
-3. Only after both blockers are closed, open the fresh Slice-9 orchestrator,
-   run normal startup verification, and proceed with the ADR-0002 §7
-   loopback/HTTP compose boundary and its mandatory T3 risk review.
+1. Dispatch a fresh cold reviewer for ADR-0009 review #1 under WORKFLOW §7 /
+   AGENTS G7; it must assess material simplification, no persisted mode,
+   deterministic startup/custom-manifest behavior, zero pre-choice network,
+   existing-user Offline startup, integrity, and executable phase split.
+2. If approved, freeze ADR-0009 and dispatch Slice-11 only; do not dispatch
+   Slice-12 or Slice-13 early and do not touch ADR-0008/Slice-10.
+3. Independently, before any Slice-9 implementation/review dispatch, amend
+   `tasks/slice-9.md` with `Required reading:`, complete its donor/lecture-app
+   blockers, then use normal fresh-startup and required risk-review workflow.
