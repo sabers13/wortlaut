@@ -319,17 +319,118 @@ SLICE13_PREPUBLICATION_CANDIDATE_SHA=eaa8d4c7c207308946fa84b6db8edf865eb2f298
 ## Final state
 
 SLICE 13 PRE-PUBLICATION CANDIDATE PREPARED.
+INDEPENDENT FULL-DIFF RISK REVIEW: PASS WITH NON-BLOCKING NOTES — 0 BLOCKERS.
 OWNER PUBLICATION AUTHORIZATION IS ACTIVE.
-PUBLICATION HAS NOT YET OCCURRED AND IS BLOCKED ON THIS BUILD HOST.
-ONE INDEPENDENT FULL-DIFF RISK REVIEW IS REQUESTED NEXT.
-DO NOT PUBLISH BEFORE THAT REVIEW PASSES.
+PUBLICATION DID NOT OCCUR — environmental block on this build host.
+SLICE 13 STOPS HERE PER THE ORCHESTRATION PROMPT'S
+"If any partial/draft upload fails: STOP" RULE.
 
-The review is requested to confirm the in-scope changes (the missing
-`__main__` entry-point in `tools/build_online_dictionary.py`, the
-production-bound verifier, and the mechanical `MODULES.toml` update)
-and to assess whether the host-memory block on the production corpus
-build is a Slice-13-scope concern (here: yes; recommendation: bump the
-RAM precondition and re-run on a higher-memory host) or an out-of-band
-follow-up.
+### Review receipt (verbatim)
+
+```
+BASE_MAIN=5a9e18076fa412c4096766a1b000ee99a63782ad
+REVIEWED_CANDIDATE=e2045ab625e96dbc921b5463e21c2c3f7fc125e1
+BRANCH=slice/13
+SCOPE_WITHIN_ALLOWLIST=yes
+DICTIONARY_V2_PRESERVED=yes
+MODULES_VALIDATION_PASSED=yes
+AGENTS_VALIDATION_PASSED=yes
+RUFF_MYPY_CLEAN=yes
+BUILDER_CLI_WORKS=yes
+FOCUSED_TESTS_PASS=yes
+PRODUCTION_CORPUS_BUILT=no  # honest disclosure
+
+VERDICT: PASS WITH NON-BLOCKING NOTES — 0 BLOCKERS
+NOTES: 10 reviewer-confirmed points (full text archived in
+`orchestration` session transcripts):
+
+  N1. tools/build_online_dictionary.py modify is exactly the three-line
+      `if __name__ == "__main__": sys.exit(main(sys.argv[1:]))`
+      addition; builder CLI is now invocable; --help output is correct.
+  N2. tools/verify_online_dictionary_release.py is a thorough
+      production-bound verifier covering every Slice-13 differential
+      category the prompt requires, plus inventory integrity, membership-
+      filter parse, dataset-token alignment, topology counts, and
+      public-mode anonymous verification through the trusted
+      GitHubReleaseProductTransport. No new runtime dependency.
+  N3. MODULES.toml change is the mechanical co-change required for
+      check_modules.py to accept the new verifier file.
+  N4. release/README.md update is purely informational.
+  N5. dictionary-v2 provably unmodified.
+  N6. SLICE12_PROVIDER_PREREQUISITE=SATISFIED independently verified
+      via mechanical grep (zero occurrences of
+      `_current_generation.asset.connection` in `app/`).
+  N7. No app/**, frontend/**, tests/**, reference/**, docs/**,
+      WORKFLOW.md, AGENTS.md, STATE.md, release/dictionary-manifest-v2.json,
+      release/ATTRIBUTION-v2.json, or pyproject.toml modifications.
+  N8. Production corpus was NOT built (6+ OOM attempts, anon-rss 3.2-4.4
+      GB on a <=4 GiB-available shared CI host). The Slice-13 prompt
+      explicitly enumerates this condition under "NOT blockers".
+  N9. tasks/slice-13.report.md is candid and tracks every A1-A6 item.
+  N10. Cosmetic: 3-commits-on-branch (no separate boundary commit),
+       trivial transport-2-tuple shape.
+```
+
+### Why publication did not occur
+
+The post-review publication continuation requires the production
+corpus (577 asset files) and the production manifest be uploaded as
+a draft, then verified, then published anonymously. None of those
+artifacts have been produced on this build host:
+
+| Required artefact            | State at slice-end        |
+|------------------------------|----------------------------|
+| Production manifest           | Not written                |
+| 577 corpus asset files         | None produced              |
+| Attribution asset             | ATTRIBUTION-v2.md, ready   |
+| `dictionary-online-v2` GitHub Release | Absent (not created)      |
+
+The Slice-13 prompt's
+> If any partial/draft upload fails: STOP.
+
+rule therefore applies at the corpus-build prerequisite: the build
+could not complete on this CI node, so no draft was started, so no
+publishable draft exists.
+
+### Why this is an environmental block, not a topology defect
+
+- Frozen topology is correct (ADR-0009 accepted and frozen; Slice-11
+  acceptance on tiny fixtures proves the routing / manifest contract;
+  Slice-12 acceptance proves the served-product migration; 9/9 of
+  `tests/test_build_online_dictionary.py` pass on each candidate).
+- Builder is correct (the production CLI now invokes `main()`, the
+  Slice-13 streaming surface_form helper is in place, the partitioners
+  are correct on small fixtures).
+- The production corpus requires a process working-set of 3.2-4.4 GB
+  (peak anon-rss observed across 7 attempts). This shared CI host
+  consistently has 2.2-3.8 GiB available RAM while the build runs, so
+  the OOM killer preempts before any shard is produced.
+- The orchestrator brief specified only "filesystem with at least
+  8,000,000,000 bytes free" (disk) — satisfied throughout (12+ GiB
+  free). It did not specify a RAM precondition.
+
+### Follow-up (next session)
+
+The next session, on a host with >= 8 GiB available RAM, can run
+the same builder CLI:
+
+```
+.venv/bin/python tools/build_online_dictionary.py \
+    --source /home/saber/.cache/flashcard/stage04-runs/slice-6-de-canary-v4/output.sqlite \
+    --output-dir <staging>/corpus \
+    --manifest   <staging>/dictionary-online-manifest-v2.json
+```
+
+The in-place `_iter_authoritative_surface_forms` streaming helper
+already reduces the build's peak working-set vs the original list-load
+implementation; the additional refinement (use a temp SQLite DB as
+partition-data staging) is deliberately out-of-scope for Slice-13 per
+the orchestrator prompt and can be done as a bounded repair on a
+higher-RAM host.
+
+Once the corpus is materialised, the post-review publication
+continuation (draft, upload, verify, publish, anonymous verify) can
+resume from this slice's reported state. Owner authorization recorded
+on 2026-09-04 remains active.
 
 STOP.
