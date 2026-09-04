@@ -47,7 +47,7 @@ def _reexec_into_venv() -> "object | int":
     Returns ``None`` to signal that the caller should continue under the
     current interpreter; never raises. When ``.venv/bin/python`` is
     absent the script continues under the current interpreter (system
-    Python) so the rest of ``main`` can surface a clear error message
+    Python) so the rest of ``main`` can produce a clear error message
     telling the user exactly which command to run first.
 
     Detection of "already in the repository venv" compares the active
@@ -126,8 +126,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--manifest",
         type=Path,
         default=None,
-        help="Path to the dictionary release manifest (defaults to "
-        "release/dictionary-manifest-v2.json).",
+        help="Path to the Offline release manifest (defaults to "
+        "release/dictionary-manifest-v2.json). Offline Developer/Recovery "
+        "use only.",
     )
     parser.add_argument(
         "--dictionary-mode",
@@ -136,22 +137,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Session-scoped dictionary mode (Slice 12 / ADR-0009). "
         "When omitted, default auto-selection prefers a valid full "
         "canonical Offline dictionary; otherwise the runtime chooser is shown.",
-    )
-    parser.add_argument(
-        "--online-manifest",
-        type=Path,
-        default=None,
-        help="Path to the trusted Online manifest (defaults to "
-        "release/dictionary-online-manifest-v2.json). Required for explicit "
-        "--dictionary-mode online.",
-    )
-    parser.add_argument(
-        "--online-cache-dir",
-        type=Path,
-        default=None,
-        help="Directory used by the Online shard cache. Defaults to "
-        "<data-dir>/online-cache. Required for explicit "
-        "--dictionary-mode online.",
     )
     return parser.parse_args(argv)
 
@@ -278,41 +263,40 @@ def _reject_online_conflicts(args: argparse.Namespace) -> None:
         raise SystemExit(2)
 
 
-def _build_online_provider_factory(args: argparse.Namespace, paths: Any) -> tuple[
-    Callable[[Any, str], tuple[Any, Any]],
-    str,
-    Path,
-]:
-    """Construct the Online-mode provider-factory used by the app.
+def _build_online_factory(
+    *,
+    paths: Any,
+    expected_version: str,
+    expected_bytes: int,
+    expected_sha: str,
+) -> Any:
+    """Build the Online-mode provider factory used by the app.
 
-    Returns ``(factory, dataset_token, cache_dir)``. The factory accepts
-    ``(managed_dir, manifest_filename)`` so callers can build a fresh
-    provider after a state swap.
+    The returned callable matches
+    ``Callable[[], tuple[DictionaryProvider, OnlineSessionInfo]]`` and
+    builds a fresh ``OnlineDictionaryProvider`` only on each invocation.
+    The factory NEVER constructs a provider eagerly — its first
+    invocation must wait until the user picks ``Use Online`` in the
+    chooser, so the chooser startup path performs zero Online
+    construction and zero Online transport.
+
+    The Product Online manifest is loaded ONLY from the committed
+    ``release/dictionary-online-manifest-v2.json``. The browser / API
+    caller cannot substitute a different manifest, URL, repository, or
+    host — that surface is intentionally absent from the Product.
     """
-    from app.online_transport import (
-        DEFAULT_GITHUB_REPO,  # noqa: PLC0415
-    )
+    from app.dictionary_mode import OfflineInstallTriple  # noqa: PLC0415
+    from app.online_manifest import load_manifest  # noqa: PLC0415
+    from app.online_transport import create_product_online_provider  # noqa: PLC0415
+    from app.dictionary_session import OnlineSessionInfo  # noqa: PLC0415
 
     online_manifest_path = (
-        args.online_manifest
-        if args.online_manifest is not None
-        else (REPO_ROOT / "release" / "dictionary-online-manifest-v2.json")
+        REPO_ROOT / "release" / "dictionary-online-manifest-v2.json"
     )
-    cache_dir = (
-        args.online_cache_dir
-        if args.online_cache_dir is not None
-        else paths.data_dir / "online-cache"
-    )
+    cache_dir = paths.data_dir / "online-cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def factory():  # pragma: no cover - heavy network path
-        from app.online_manifest import load_manifest  # noqa: PLC0415
-        from app.online_transport import (  # noqa: PLC0415
-            build_seam_transport,
-            create_product_online_provider,
-        )
-        from app.dictionary_session import OnlineSessionInfo  # noqa: PLC0415
-
+    def factory() -> Any:
         manifest = load_manifest(online_manifest_path)
         provider = create_product_online_provider(manifest, cache_dir)
         info = OnlineSessionInfo(
@@ -320,9 +304,33 @@ def _build_online_provider_factory(args: argparse.Namespace, paths: Any) -> tupl
             asset_token=str(provider.asset_token),
             cache_dir=str(cache_dir),
         )
-        return provider, info, DEFAULT_GITHUB_REPO
+        return provider, info
 
-    return factory, "", cache_dir
+    return factory
+
+
+def _build_offline_install_triple(
+    *, manifest: "DictionaryManifest | None", manifest_path: Path
+) -> Any:
+    """Build the server-owned ``OfflineInstallTriple`` for the API.
+
+    The triple is loaded from the committed trusted Offline manifest and
+    carries the canonical filename, exact byte count, exact SHA-256, and
+    trusted download URL. The browser / API caller cannot override any
+    of those fields.
+    """
+    from app.dictionary_mode import OfflineInstallTriple  # noqa: PLC0415
+
+    if manifest is None:
+        return None
+    return OfflineInstallTriple(
+        version=str(manifest.version),
+        filename=str(manifest.filename),
+        sha256=str(manifest.sha256),
+        bytes=int(manifest.bytes),
+        download_url=str(manifest.download_url) if manifest.download_url else "",
+        manifest_path=manifest_path,
+    )
 
 
 def _decide_mode(args: argparse.Namespace, paths: Any, manifest: Any) -> str:
@@ -461,7 +469,7 @@ def main(argv: list[str] | None = None) -> int:
                 # SystemExit on a missing file.
                 _log(
                     "default chooser path: skipping canonical identity "
-                    "verification (no Offline asset present yet)"
+                    "verification (no offline asset present yet)"
                 )
             else:
                 _verify_canonical_dictionary(
@@ -493,95 +501,68 @@ def main(argv: list[str] | None = None) -> int:
 
     from app.deck import DictionaryRuntimeError  # noqa: PLC0415
 
-    # Branch construction by effective mode.
+    offline_triple = _build_offline_install_triple(
+        manifest=manifest,
+        manifest_path=manifest_path,
+    )
+
+    # The Online factory is constructed eagerly ONLY in the Online
+    # startup branch (or in tests / E2E state B). In all other startup
+    # branches, the factory is the bound provider-build callback used
+    # by ``POST /vocab/settings/dictionary/use-online`` to construct the
+    # Online provider on demand — never eagerly.
     if effective_mode == "online":
-        from app.online_transport import (  # noqa: PLC0415
-            build_seam_transport,
-            create_product_online_provider,
-        )
-        from app.online_manifest import load_manifest  # noqa: PLC0415
-        from app.dictionary_session import OnlineSessionInfo  # noqa: PLC0415
+        from app.api import create_app as _create_app  # noqa: PLC0415
 
-        online_manifest_path = (
-            args.online_manifest
-            if args.online_manifest is not None
-            else (REPO_ROOT / "release" / "dictionary-online-manifest-v2.json")
+        online_factory = _build_online_factory(
+            paths=paths,
+            expected_version=str(manifest.version if manifest is not None else "v2"),
+            expected_bytes=int(manifest.bytes) if manifest is not None else 0,
+            expected_sha=str(manifest.sha256) if manifest is not None else "",
         )
-        cache_dir = (
-            args.online_cache_dir
-            if args.online_cache_dir is not None
-            else paths.data_dir / "online-cache"
-        )
-        cache_dir.mkdir(parents=True, exist_ok=True)
         try:
-            online_manifest = load_manifest(online_manifest_path)
-        except Exception as exc:  # noqa: BLE001
-            sys.stderr.write(
-                f"online manifest load failed for {online_manifest_path}: {exc}\n"
-            )
-            return 2
-        try:
-            online_provider = create_product_online_provider(
-                online_manifest, cache_dir
-            )
-        except Exception as exc:  # noqa: BLE001
-            sys.stderr.write(f"online provider activation failed: {exc}\n")
-            return 2
-        online_info = OnlineSessionInfo(
-            dataset_token=str(online_manifest.dataset_token),
-            asset_token=str(online_provider.asset_token),
-            cache_dir=str(cache_dir),
-        )
-        expected_sha = manifest.sha256 if manifest is not None else None
-        expected_version = manifest.version if manifest is not None else "v2"
-
-        def online_factory():
-            nonlocal online_provider, online_info
-            try:
-                online_provider.close()
-            except Exception:
-                pass
-            online_provider = create_product_online_provider(
-                online_manifest, cache_dir
-            )
-            online_info = OnlineSessionInfo(
-                dataset_token=str(online_manifest.dataset_token),
-                asset_token=str(online_provider.asset_token),
-                cache_dir=str(cache_dir),
-            )
-            return online_provider, online_info
-
-        try:
-            app = build_standalone_app(
-                data_dir=paths.data_dir,
+            app = _create_app(
                 dict_path=None,
                 user_db_path=paths.user_db_path,
-                media_dir=paths.media_dir,
-                cache_dir=paths.cache_dir,
                 cors_origins=(
                     f"http://{bind_host}:{args.port}",
                     f"http://localhost:{args.port}",
                 ),
-                port=args.port,
-                expected_dictionary_sha256=expected_sha,
-                expected_dictionary_version=expected_version,
+                service_port=args.port,
+                expected_dictionary_sha256=(
+                    str(manifest.sha256) if manifest is not None else None
+                ),
+                expected_dictionary_version=(
+                    str(manifest.version) if manifest is not None else "v2"
+                ),
+                expected_dictionary_bytes=(
+                    int(manifest.bytes) if manifest is not None else None
+                ),
                 runtime=None,
-                online_provider=online_provider,
-                online_session_info=online_info,
-                online_provider_factory=online_factory,
-                manifest_filename=str(manifest.filename if manifest else "dictionary.sqlite"),
                 managed_dictionary_dir=paths.dictionary_dir,
+                manifest_filename=str(
+                    manifest.filename if manifest is not None else "dictionary.sqlite"
+                ),
+                offline_install_triple=offline_triple,
+                online_provider_factory=online_factory,
             )
         except (DictionaryRuntimeError, StandaloneError) as exc:
             sys.stderr.write(f"online dictionary activation failed: {exc}\n")
             return 2
     elif effective_mode == "unconfigured":
-        # Slice 12 default chooser state. No dictionary provider is bound
-        # at startup; the runtime Settings endpoint rebuilds the session
-        # once the user picks a mode. The chooser UI's HTTP endpoints
-        # surface a stable ``code: dictionary_unconfigured`` response.
-        from app.api import create_app as _create  # noqa: PLC0415
-        app = _create(
+        # Slice 12 default chooser state. No dictionary provider is
+        # constructed at startup; the chooser is shown and the user
+        # picks Online (factory builds provider on demand) or
+        # Download for Offline use.
+        from app.api import create_app as _create_app  # noqa: PLC0415
+
+        online_factory = _build_online_factory(
+            paths=paths,
+            expected_version=str(manifest.version if manifest is not None else "v2"),
+            expected_bytes=int(manifest.bytes) if manifest is not None else 0,
+            expected_sha=str(manifest.sha256) if manifest is not None else "",
+        )
+        app = _create_app(
             dict_path=None,
             user_db_path=paths.user_db_path,
             cors_origins=(
@@ -589,20 +570,30 @@ def main(argv: list[str] | None = None) -> int:
                 f"http://localhost:{args.port}",
             ),
             service_port=args.port,
-            online_provider=None,
-            managed_dictionary_dir=paths.dictionary_dir,
-            manifest_filename=(
-                str(manifest.filename) if manifest is not None else "dictionary.sqlite"
+            expected_dictionary_sha256=(
+                str(manifest.sha256) if manifest is not None else None
             ),
+            expected_dictionary_version=(
+                str(manifest.version) if manifest is not None else "v2"
+            ),
+            expected_dictionary_bytes=(
+                int(manifest.bytes) if manifest is not None else None
+            ),
+            runtime=None,
+            managed_dictionary_dir=paths.dictionary_dir,
+            manifest_filename=str(
+                manifest.filename if manifest is not None else "dictionary.sqlite"
+            ),
+            offline_install_triple=offline_triple,
+            online_provider_factory=online_factory,
         )
-        # Override the chooser startup state explicitly.
-        app.state.dictionary_mode = "unconfigured"
-        _log("chooser: app started without a dictionary; user must choose a mode")
+        _log(
+            "chooser: app started without a dictionary; user must choose a mode"
+        )
     else:
         try:
             from app.deck import DictionaryRuntime  # noqa: PLC0415
             from app.api import create_app  # noqa: PLC0415
-            from app.dictionary_session import DictionarySession  # noqa: PLC0415
 
             runtime = DictionaryRuntime(
                 paths.dictionary_path,
@@ -614,6 +605,12 @@ def main(argv: list[str] | None = None) -> int:
                     manifest.version if manifest is not None else "v2"
                 ),
             )
+            online_factory = _build_online_factory(
+                paths=paths,
+                expected_version=str(manifest.version if manifest is not None else "v2"),
+                expected_bytes=int(manifest.bytes) if manifest is not None else 0,
+                expected_sha=str(manifest.sha256) if manifest is not None else "",
+            )
             app = create_app(
                 dict_path=None,
                 user_db_path=paths.user_db_path,
@@ -622,67 +619,26 @@ def main(argv: list[str] | None = None) -> int:
                     f"http://localhost:{args.port}",
                 ),
                 service_port=args.port,
+                expected_dictionary_sha256=(
+                    str(manifest.sha256) if manifest is not None else None
+                ),
+                expected_dictionary_version=(
+                    str(manifest.version) if manifest is not None else "v2"
+                ),
+                expected_dictionary_bytes=(
+                    int(manifest.bytes) if manifest is not None else None
+                ),
                 runtime=runtime,
-                online_provider=None,
                 managed_dictionary_dir=paths.dictionary_dir,
-                manifest_filename=(
-                    str(manifest.filename) if manifest is not None else "dictionary.sqlite"
+                manifest_filename=str(
+                    manifest.filename if manifest is not None else "dictionary.sqlite"
                 ),
-                online_provider_factory=(
-                    (lambda: (None, None)) if False else None
-                ),
+                offline_install_triple=offline_triple,
+                online_provider_factory=online_factory,
             )
         except (DictionaryRuntimeError, StandaloneError) as exc:
             sys.stderr.write(f"dictionary activation failed: {exc}\n")
             return 2
-    # provider_factory registered above for Online mode.
-
-    # Bridge mode == online builder's online_provider_factory in case we
-    # need to swap at runtime. When the runtime was created locally we
-    # expose a factory that can rebuild it from the canonical path.
-    if effective_mode != "online":
-
-        def _rebuild_offline_runtime():
-            from app.deck import DictionaryRuntime  # noqa: PLC0415
-            from app.dictionary_session import DictionarySession  # noqa: PLC0415
-
-            target = (
-                Path(app.state.managed_dictionary_dir)
-                / str(app.state.manifest_filename)
-            )
-            rt = DictionaryRuntime(
-                target,
-                Path(app.state.user_db_path),
-                expected_sha256=str(
-                    app.state.expected_dictionary_sha256
-                    or (manifest.sha256.lower() if manifest is not None else "")
-                ),
-                expected_version=str(app.state.expected_dictionary_version),
-            )
-            return rt, DictionarySession(runtime=rt)
-
-        try:
-            app.state.online_provider_factory = (  # type: ignore[attr-defined]
-                lambda: _rebuild_offline_runtime()[1]
-            )
-        except Exception:
-            pass
-    try:
-        app
-    except UnboundLocalError:
-        sys.stderr.write("internal: app failed to construct\n")
-        return 2
-
-    if not args.no_browser:
-        try:
-            webbrowser.open(url)
-        except Exception:  # pragma: no cover - defensive only
-            pass
-
-    import uvicorn  # noqa: PLC0415
-
-    uvicorn.run(app, host=bind_host, port=args.port, log_level="info")
-    return 0
 
     if not args.no_browser:
         try:

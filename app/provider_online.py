@@ -158,6 +158,16 @@ class OnlineDictionaryProvider(DictionaryProvider):
         """Idempotently close the provider. Active leases are still released."""
         self._closed = True
 
+    def clear_cache(self) -> None:
+        """Clear the Online provider's immutable shard cache directory.
+
+        Delegates to :meth:`ShardCache.clear`, which serializes cache
+        mutation against new acquisitions and active leases. The
+        Settings ``Clear Online cache`` action uses this method so the
+        Product trust boundary and the cache lifecycle stay aligned.
+        """
+        self._cache.clear()
+
     @contextmanager
     def operation(self) -> Iterator[_Budget]:
         """Bind one operation budget across nested provider reads.

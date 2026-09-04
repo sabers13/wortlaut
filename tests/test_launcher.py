@@ -1216,3 +1216,50 @@ def test_cli_offline_with_missing_canonical_fails_closed(
             "--no-browser",
         ])
     assert exc_info.value.code in (1, 2)
+
+
+def test_launcher_help_exposes_no_online_manifest_or_source_selection(
+    tmp_path: Path,
+) -> None:
+    """Slice 12 C3: Product Online loads ONLY the committed trusted manifest.
+    ``--help`` must expose no custom Online manifest/source selection.
+    """
+    proc = _run_launcher("--help", cwd=tmp_path)
+    assert proc.returncode == 0
+    assert "--online-manifest" not in proc.stdout
+    assert "--online-cache-dir" not in proc.stdout
+    assert "--online-manifest" not in proc.stderr
+    assert "--online-cache-dir" not in proc.stderr
+    # Custom --manifest remains the Offline Developer/Recovery feature.
+    assert "--manifest" in proc.stdout
+    assert "--dictionary-mode" in proc.stdout
+
+
+def test_launcher_rejects_online_manifest_flag(tmp_path: Path) -> None:
+    """Slice 12 C3: ``--online-manifest`` is not a Product flag."""
+    proc = _run_launcher(
+        "--online-manifest",
+        "whatever.json",
+        "--data-dir",
+        str(tmp_path / "data"),
+        "--no-browser",
+        cwd=tmp_path,
+        timeout=10,
+    )
+    assert proc.returncode != 0
+    assert "unrecognized arguments" in proc.stderr or "unrecognized argument" in proc.stderr
+
+
+def test_launcher_rejects_online_cache_dir_flag(tmp_path: Path) -> None:
+    """Slice 12 C3: ``--online-cache-dir`` is not a Product flag."""
+    proc = _run_launcher(
+        "--online-cache-dir",
+        str(tmp_path / "cache"),
+        "--data-dir",
+        str(tmp_path / "data"),
+        "--no-browser",
+        cwd=tmp_path,
+        timeout=10,
+    )
+    assert proc.returncode != 0
+    assert "unrecognized arguments" in proc.stderr or "unrecognized argument" in proc.stderr

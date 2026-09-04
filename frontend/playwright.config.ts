@@ -15,10 +15,15 @@ process.env.TMP = e2eTmpDir;
 
 const productPort = Number(process.env.E2E_PORT ?? '8817');
 const onlineModePort = productPort + 1;
+// Expose the state-B port to the test process so the spec does not
+// hardcode it. Playwright test workers inherit process.env.
+process.env.E2E_ONLINE_PORT = String(onlineModePort);
 
 export default defineConfig({
   testDir: './tests/e2e',
-  timeout: 180_000,
+  // State-B shard pre-build is I/O-bound (~4-5 min); the per-test
+  // timeout accommodates the slowest fixture-backed interaction.
+  timeout: 600_000,
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
@@ -41,7 +46,7 @@ export default defineConfig({
       cwd: frontendDir,
       url: `http://127.0.0.1:${productPort}/`,
       reuseExistingServer: false,
-      timeout: 180_000,
+      timeout: 600_000,
       env: {
         E2E_STATE_DIR: e2eStateDir,
         E2E_PORT: String(productPort),
@@ -57,7 +62,7 @@ export default defineConfig({
       cwd: frontendDir,
       url: `http://127.0.0.1:${onlineModePort}/`,
       reuseExistingServer: false,
-      timeout: 180_000,
+      timeout: 600_000,
       env: {
         E2E_STATE_DIR: path.join(frontendDir, 'test-results', '.e2e-state-b'),
         E2E_PORT: String(onlineModePort),

@@ -1608,11 +1608,14 @@ export class FlashcardApp extends LitElement {
       this.dictionaryMode = info.mode;
       this.dictionarySettingsStatus = 'ready';
       // The chooser is the runtime's unconfigured view; UI surfaces it
-      // when the server says so, and only then.
+      // when the server says so, and only then. On initial load with no
+      // valid Offline asset, switch to the chooser view automatically.
       if (info.mode === 'unconfigured' && this.view !== 'study' && this.view !== 'chooser') {
-        // Stay on decks unless the user was already in settings; the
-        // chooser banner is rendered inside renderSettings so it's
-        // reachable from anywhere.
+        this.view = 'chooser';
+      }
+      // When a mode becomes active, leave the chooser automatically.
+      if (info.mode !== 'unconfigured' && this.view === 'chooser') {
+        this.view = 'decks';
       }
     } catch (error) {
       this.dictionarySettingsStatus = 'error';
@@ -1629,7 +1632,8 @@ export class FlashcardApp extends LitElement {
     this.dictionaryActionError = '';
     try {
       await vocabClient.useOnline();
-      this.dictionaryActionMessage = 'Now using Online for this session.';
+      this.dictionaryActionMessage =
+        'Now using Online for this session. The canonical Offline dictionary will not be removed.';
       await this.loadDictionarySettings();
     } catch (error) {
       this.dictionaryActionError = this.messageFor(
@@ -1665,7 +1669,13 @@ export class FlashcardApp extends LitElement {
     this.dictionaryActionError = '';
     try {
       const result = await vocabClient.installOffline();
-      this.dictionaryActionMessage = `Installed full Offline dictionary (status: ${result.status}).`;
+      if (result.status === 'started') {
+        this.dictionaryActionMessage =
+          'Download started. Progress is shown below; the Settings view refreshes automatically.';
+        await this.pollInstallProgress();
+      } else {
+        this.dictionaryActionMessage = `Installed full Offline dictionary (status: ${result.status}).`;
+      }
       await this.loadDictionarySettings();
     } catch (error) {
       this.dictionaryActionError = this.messageFor(
@@ -1674,6 +1684,35 @@ export class FlashcardApp extends LitElement {
       );
     } finally {
       this.dictionaryAction = 'idle';
+    }
+  }
+
+  private async pollInstallProgress(): Promise<void> {
+    // Poll GET /vocab/settings/dictionary for live install progress.
+    // The server owns the progress state; the client only reads it.
+    for (let attempt = 0; attempt < 120; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      try {
+        const info = await vocabClient.getDictionarySettings();
+        this.dictionarySettings = info;
+        this.dictionaryMode = info.mode;
+        const progress = info.install_progress;
+        if (!progress || progress.status === 'idle') return;
+        if (progress.status === 'installed') {
+          this.dictionaryActionMessage = 'Installed full Offline dictionary.';
+          return;
+        }
+        if (progress.status === 'failed') {
+          this.dictionaryActionError = progress.error || 'Offline download failed.';
+          return;
+        }
+        const pct = progress.percent.toFixed(1);
+        const dl = progress.downloaded_bytes.toLocaleString();
+        const total = progress.total_bytes ? progress.total_bytes.toLocaleString() : 'unknown';
+        this.dictionaryActionMessage = `Downloading… ${dl} / ${total} bytes (${pct}%).`;
+      } catch {
+        return;
+      }
     }
   }
 
@@ -1701,8 +1740,8 @@ export class FlashcardApp extends LitElement {
     this.dictionaryActionMessage = '';
     this.dictionaryActionError = '';
     try {
-      const result = await vocabClient.clearOnlineCache();
-      this.dictionaryActionMessage = `Online cache cleared (${result.removed_count} entries).`;
+      await vocabClient.clearOnlineCache();
+      this.dictionaryActionMessage = 'Online cache cleared.';
       await this.loadDictionarySettings();
     } catch (error) {
       this.dictionaryActionError = this.messageFor(
@@ -1761,6 +1800,13 @@ export class FlashcardApp extends LitElement {
             <dt>Valid</dt><dd>${info.canonical_offline_valid ? 'yes' : 'no'}</dd>
             ${info.online_info ? html`
               <dt>Online dataset token</dt><dd><code>${info.online_info.dataset_token.slice(0, 16)}…</code></dd>
+            ` : nothing}
+            ${info.install_progress && info.install_progress.status !== 'idle' ? html`
+              <dt>Download progress</dt><dd data-testid="install-progress">
+                ${info.install_progress.downloaded_bytes.toLocaleString()} /
+                ${info.install_progress.total_bytes ? info.install_progress.total_bytes.toLocaleString() : 'unknown'} bytes
+                (${info.install_progress.percent.toFixed(1)}%) — ${info.install_progress.status}
+              </dd>
             ` : nothing}
           </dl>
         ` : nothing}

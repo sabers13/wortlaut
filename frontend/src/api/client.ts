@@ -412,7 +412,7 @@ export class VocabClient {
   async clearOnlineCache(): Promise<ClearOnlineCacheResponse> {
     return this.request<ClearOnlineCacheResponse>(
       '/vocab/settings/dictionary/clear-online-cache',
-      { method: 'POST' },
+      { method: 'POST', body: {} },
     );
   }
 
@@ -420,7 +420,7 @@ export class VocabClient {
   async useOnline(): Promise<UseOnlineResponse> {
     return this.request<UseOnlineResponse>(
       '/vocab/settings/dictionary/use-online',
-      { method: 'POST' },
+      { method: 'POST', body: {} },
     );
   }
 
@@ -428,7 +428,7 @@ export class VocabClient {
   async useOffline(): Promise<UseOfflineResponse> {
     return this.request<UseOfflineResponse>(
       '/vocab/settings/dictionary/use-offline',
-      { method: 'POST' },
+      { method: 'POST', body: {} },
     );
   }
 }

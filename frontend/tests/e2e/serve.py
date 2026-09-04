@@ -13,8 +13,13 @@ Slice 12 introduces two deterministic served-product harness states:
   fixture Online provider): the chooser state, exercised against the
   Slice-11 Online corpus fixture built from the same Local dictionary.
   The fixture Online corpus is reachable only through the backend
-  Product trust/test seam (the in-process ``e2e_online_provider``);
-  the browser never supplies a URL or manifest.
+  Product trust/test seam (the in-process ``e2e_online_factory``);
+  the browser never supplies a URL or manifest. The fixture Online
+  provider is constructed ONLY after the user clicks ``Use Online``;
+  startup-time zero Online construction is observed by the
+  ``e2e_factory_invocations`` / ``e2e_transport_invocations``
+  counters exposed via ``GET /__e2e/online-counters`` (E2E harness
+  only, never served in production).
 """
 
 from __future__ import annotations
@@ -72,6 +77,7 @@ def reset_state(state_dir: Path) -> None:
         "replacement.sqlite",
         "user.sqlite",
         "online-cache",
+        "online-shards",
     ):
         target = state_dir / filename
         if target.is_dir():
@@ -249,15 +255,46 @@ def build_user_db(path: Path) -> None:
         conn.close()
 
 
-def _build_online_provider(state_dir: Path) -> "object":
-    """Build a deterministic fixture-backed Online provider for state B.
+class _OnlineCounters:
+    """In-process counters exposed to the E2E harness for transport/factory assertions."""
 
-    This is the in-process equivalent of the Slice-11 Online corpus,
-    assembled once per serve from the same Local fixture used for
-    state A. It uses a static in-process transport that never reaches
-    GitHub and never accepts a browser-supplied URL.
+    def __init__(self) -> None:
+        self.factory_invocations = 0
+        self.transport_invocations = 0
+
+    def snapshot(self) -> dict[str, int]:
+        return {
+            "factory_invocations": int(self.factory_invocations),
+            "transport_invocations": int(self.transport_invocations),
+        }
+
+
+class _CountingTransport:
+    """In-process fixture transport that increments the E2E counter."""
+
+    def __init__(
+        self,
+        inner: Any,
+        counters: _OnlineCounters,
+    ) -> None:
+        self._inner = inner
+        self._counters = counters
+
+    def __call__(self, request: Any) -> bytes:
+        self._counters.transport_invocations += 1
+        result: bytes = self._inner(request)
+        return result
+
+
+def _prebuild_online_fixture(state_dir: Path) -> Any:
+    """Pre-build the static Online fixture shard files + manifest.
+
+    This is slow (576 SQLite files) and runs once at server startup.
+    It does NOT construct an ``OnlineDictionaryProvider``, a
+    ``ShardCache``, or invoke any transport — those happen only when
+    the user picks ``Use Online`` via the factory below. The returned
+    bundle is ``(manifest, filter_bytes, dataset_token)``.
     """
-    from app.online_cache import ShardCache, ShardRequest  # noqa: PLC0415
     from app.online_filter import BloomFilter  # noqa: PLC0415
     from app.online_manifest import (  # noqa: PLC0415
         ENTRY_FAMILY_SIZE,
@@ -269,8 +306,6 @@ def _build_online_provider(state_dir: Path) -> "object":
         OnlineManifest,
         TrustedDistribution,
     )
-    from app.provider import ProviderIntegrityError  # noqa: PLC0415
-    from app.provider_online import OnlineDictionaryProvider  # noqa: PLC0415
     from tools.build_online_dictionary import (  # noqa: PLC0415
         _partition_entry_shards,
         _partition_example_shards,
@@ -296,8 +331,6 @@ def _build_online_provider(state_dir: Path) -> "object":
     shard_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # Local fixture's authoritative sha gives us a single dataset token
-    # for both Local and Online (the Provider contract's invariant).
     actual_token = hashlib.sha256(local_fixture.read_bytes()).hexdigest()
 
     source_conn = sqlite3.connect(
@@ -426,16 +459,41 @@ def _build_online_provider(state_dir: Path) -> "object":
         assets=tuple(assets),
     )
 
+    return (manifest, filter_bytes, actual_token)
+
+
+def _build_online_provider_from_bundle(
+    state_dir: Path,
+    bundle: Any,
+    counters: _OnlineCounters,
+) -> Any:
+    """Construct the Online provider from a pre-built fixture bundle.
+
+    Fast (<1s): wraps the static shard files in a counting transport +
+    ShardCache and returns the provider. Called ONLY from the factory
+    after the user picks ``Use Online``.
+    """
+    from app.online_cache import ShardCache, ShardRequest  # noqa: PLC0415
+    from app.provider import ProviderIntegrityError  # noqa: PLC0415
+    from app.provider_online import OnlineDictionaryProvider  # noqa: PLC0415
+
+    manifest, filter_bytes, actual_token = bundle
+    shard_dir = state_dir / "online-shards"
+    cache_dir = state_dir / "online-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
     def transport(request: ShardRequest) -> bytes:
         for asset in manifest.assets:
             if (
                 asset.family == request.identity.family
                 and asset.bucket == request.identity.bucket
             ):
-                return (shard_dir / asset.name).read_bytes()
+                payload: bytes = (shard_dir / asset.name).read_bytes()
+                return payload
         raise ProviderIntegrityError("missing fixture shard")
 
-    cache = ShardCache(cache_dir, transport=transport)
+    counting_transport = _CountingTransport(transport, counters)
+    cache = ShardCache(cache_dir, transport=counting_transport)
     return OnlineDictionaryProvider(
         manifest=manifest,
         cache=cache,
@@ -467,61 +525,96 @@ def main() -> int:
     build_user_db(state_dir / "user.sqlite")
 
     state_a = args.state.upper() == "A"
+    counters = _OnlineCounters()
+
     if state_a:
+        # State A also needs a deferred Online factory so the
+        # Offline -> Online Settings switch can be exercised. The
+        # fixture bundle is pre-built from the same local dictionary;
+        # no provider exists until the user picks Online.
+        from app.dictionary_session import OnlineSessionInfo as _OSI  # noqa: PLC0415
+
+        fixture_bundle_a = _prebuild_online_fixture(state_dir)
+
+        def online_factory_a() -> Tuple[Any, Any]:
+            counters.factory_invocations += 1
+            provider_a = _build_online_provider_from_bundle(
+                state_dir, fixture_bundle_a, counters
+            )
+            info_a = _OSI(
+                dataset_token=str(getattr(provider_a, "_dataset_token", "online-fixture")),
+                asset_token=str(provider_a.asset_token),
+                cache_dir=str(state_dir / "online-cache"),
+            )
+            return provider_a, info_a
+
         app = create_app(
             state_dir / "dictionary.sqlite",
             state_dir / "user.sqlite",
             cors_origins=(f"http://127.0.0.1:{args.port}", f"http://localhost:{args.port}"),
             service_port=args.port,
+            online_provider_factory=online_factory_a,
         )
     else:
         # Slice 12 state B: no canonical full Offline asset. The chooser
-        # is shown in the UI and the Online provider serves the
-        # deterministic fixture corpus. The corpus and transport live
-        # entirely under the e2e state dir; the browser never receives a
-        # network endpoint to point at.
-        online_provider: Any = _build_online_provider(state_dir)
+        # is shown. The Online provider is constructed only when the user
+        # invokes ``POST /vocab/settings/dictionary/use-online`` (which
+        # calls the factory). The factory builds a provider backed by the
+        # in-process fixture corpus + counting transport.
+        from app.dictionary_mode import OfflineInstallTriple  # noqa: PLC0415
         from app.dictionary_session import OnlineSessionInfo  # noqa: PLC0415
-        info = OnlineSessionInfo(
-            dataset_token=str(getattr(online_provider, "_dataset_token", "online-fixture")),
-            asset_token=str(online_provider.asset_token),
-            cache_dir=str(state_dir / "online-cache"),
+
+        # Pre-build static shard files + manifest at startup (slow).
+        # No provider, cache, or transport exists yet.
+        fixture_bundle = _prebuild_online_fixture(state_dir)
+
+        def online_factory() -> Tuple[Any, Any]:
+            counters.factory_invocations += 1
+            provider = _build_online_provider_from_bundle(
+                state_dir, fixture_bundle, counters
+            )
+            info = OnlineSessionInfo(
+                dataset_token=str(getattr(provider, "_dataset_token", "online-fixture")),
+                asset_token=str(provider.asset_token),
+                cache_dir=str(state_dir / "online-cache"),
+            )
+            return provider, info
+
+        # The E2E fixture Offline installer uses a file:// URL pointing
+        # at the deterministic fixture dictionary. The triple carries
+        # the exact fixture SHA + bytes so the server-owned install
+        # path validates exactly like production.
+        import hashlib as _hashlib  # noqa: PLC0415
+
+        fixture_bytes = (state_dir / "dictionary.sqlite").read_bytes()
+        triple = OfflineInstallTriple(
+            version="v2",
+            filename="dictionary.sqlite",
+            sha256=_hashlib.sha256(fixture_bytes).hexdigest(),
+            bytes=len(fixture_bytes),
+            download_url=(state_dir / "dictionary.sqlite").as_uri(),
+            manifest_path=REPO_ROOT / "release" / "dictionary-manifest-v2.json",
         )
 
-        def offline_factory() -> Tuple[Any, Any]:
-            from app.deck import DictionaryRuntime  # noqa: PLC0415
-            from app.dictionary_session import DictionarySession  # noqa: PLC0415
-
-            rt = DictionaryRuntime(
-                state_dir / "dictionary.sqlite",
-                state_dir / "user.sqlite",
-            )
-            return rt, DictionarySession(runtime=rt)
-
-        # In state B the canonical offline slot is intentionally absent;
-        # the chooser endpoint rebuilds the session when the user picks
-        # either "Use Online" (already active) or "Download for Offline
-        # use" later.
         app = create_app(
             dict_path=None,
             user_db_path=state_dir / "user.sqlite",
             cors_origins=(f"http://127.0.0.1:{args.port}", f"http://localhost:{args.port}"),
             service_port=args.port,
-            online_provider=online_provider,
-            online_session_info=info,
-            online_provider_factory=(lambda: (offline_factory()[1])),
+            online_provider=None,
             managed_dictionary_dir=state_dir / "dictionary",
             manifest_filename="dictionary.sqlite",
+            offline_install_triple=triple,
+            online_provider_factory=online_factory,
         )
-        # Override the default "online" stamping: state B keeps the
-        # canonical asset slot intact and shows the chooser because
-        # there is no offline asset to validate against.
-        app.state.dictionary_mode = "unconfigured"
-        app.state.dict_path = None
-        # Do not overwrite app.state.session: the Online session stays
-        # bound so /vocab/lookup/highlight/import/csv accept the fixture
-        # corpus. The UI distinguishes chooser vs Online via
-        # app.state.dictionary_mode.
+        # State B: the chooser stays in unconfigured until the user picks
+        # a mode. We deliberately do NOT bind an Online provider here, and
+        # we do NOT build one until the user picks "Use Online".
+
+    # Expose the counters via app.state so the Settings endpoint
+    # embeds them (a dedicated /__e2e/* route would be shadowed by the
+    # frontend catch-all). Production never sets this attribute.
+    app.state.e2e_counters = counters.snapshot
 
     _get_nlp()
     import uvicorn

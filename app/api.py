@@ -1,7 +1,7 @@
 """Standalone HTTP application, API endpoints, and browser loopback security guards.
 
 Implements ADR-0001, ADR-0002 §4.1 / D24 / D25, ADR-0003, ADR-0004, ADR-0005,
-ADR-0007 D80, and AGENTS rules R4, R5, R6, R9, R10, R12, R13, C1, C2.
+ADR-0007 D80, ADR-0009, and AGENTS rules R4, R5, R6, R9, R10, R12, R13, C1, C2.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,10 +50,14 @@ from app.deck import (
     set_meaning_languages,
     set_user_meaning,
 )
+from app.dict_install import (
+    DictionaryManifest,
+    install_dictionary,
+)
 from app.dictionary import DictionaryAssetError, validate_candidate_dictionary
 from app.dictionary_mode import (
-    OFFLINE_INSTALL_DEFAULT_MANIFEST_BYTES,
     OfflineInstallRefused,
+    OfflineInstallTriple,
     preflight_offline_install,
     remove_canonical_offline,
     session_status,
@@ -78,6 +83,11 @@ from app.render import (
     validate_selected_languages,
 )
 from app.resolve import LemmaRecord, LookupProtocol, Ref, SenseRecord, resolve_token, resolve_word
+
+# Trusted product Offline release manifest (server-owned only — the browser / API
+# caller cannot supply a different manifest, URL, SHA, or filename). This is the
+# canonical source of truth for the Offline installer pipeline.
+_DEFAULT_OFFLINE_MANIFEST_FILENAME: str = "dictionary-manifest-v2.json"
 
 _NLP_MODEL: Any = None
 _NLP_INITIALIZED: bool = False
@@ -255,11 +265,6 @@ class _ProviderOracle(LookupProtocol):
         )
 
     def lookup_surface_form(self, form: str) -> Sequence[LemmaRecord]:
-        # CF2: surface-form lookup must preserve Local's surface-only
-        # semantics. We delegate to the provider's
-        # ``lookup_surface_form`` directly; Local and Online both probe
-        # ONLY the surface-form table (no implicit lemma-table
-        # pre-query that could suppress valid surface results).
         hits = self._provider.lookup_surface_form(form)
         return tuple(
             LemmaRecord(
@@ -294,11 +299,6 @@ def _materialize_candidate_from_ref(
     known_lemmas: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     if ref.status == "resolved":
-        # Slice 12 provider migration: the served-product materialization
-        # no longer opens a raw ``asset.connection`` or issues SQL. It
-        # routes through ``LookupProtocol.lookup_exact`` (provider-backed)
-        # to resolve the durable lemma ref, then asks the provider for a
-        # composite entry and examples through the Slice-11 contract.
         lemma_hits = provider.lookup_exact(
             ref.lemma, pos=ref.pos, gender=ref.gender
         )
@@ -784,24 +784,6 @@ def _piper_runner_if_available() -> Callable[[str, str], bytes] | None:
     return run_piper
 
 
-def _runtime_or_unconfigured(
-    app: FastAPI, runtime: "DictionaryRuntime | None"
-) -> "JSONResponse | DictionaryRuntime":
-    """Return the runtime or a 503 chooser-state response for Offline-only endpoints."""
-    if runtime is None:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "detail": (
-                    "Offline-only endpoint called while a non-Offline "
-                    "session is active or no provider is configured"
-                ),
-                "code": "offline_runtime_unavailable",
-            },
-        )
-    return runtime
-
-
 def _session_or_unconfigured(app: FastAPI) -> "JSONResponse | DictionarySession":
     """Return the bound ``DictionarySession`` or a 503 chooser-state response.
 
@@ -823,6 +805,127 @@ def _session_or_unconfigured(app: FastAPI) -> "JSONResponse | DictionarySession"
     return session  # type: ignore[no-any-return]
 
 
+# ---------------------------------------------------------------------------
+# Install progress state — server-owned
+# ---------------------------------------------------------------------------
+
+
+class _InstallProgress:
+    """Thread-safe observer of the latest Offline install attempt.
+
+    The product installer runs on a worker thread so the request handler
+    can return a 202 Accepted and the client can poll
+    ``/vocab/settings/dictionary/install-status``. The state records the
+    bytes downloaded so far, the declared total, the percentage, the
+    status string, and any terminal error message.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._state: dict[str, Any] = {
+            "status": "idle",
+            "downloaded_bytes": 0,
+            "total_bytes": None,
+            "percent": 0.0,
+            "started_at": None,
+            "finished_at": None,
+            "error": "",
+        }
+
+    def reset(self, total_bytes: int | None) -> None:
+        with self._lock:
+            self._state = {
+                "status": "running",
+                "downloaded_bytes": 0,
+                "total_bytes": int(total_bytes) if total_bytes is not None else None,
+                "percent": 0.0,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "finished_at": None,
+                "error": "",
+            }
+
+    def update(self, downloaded_bytes: int, total_bytes: int | None) -> None:
+        with self._lock:
+            self._state["downloaded_bytes"] = int(downloaded_bytes)
+            if total_bytes is not None:
+                self._state["total_bytes"] = int(total_bytes)
+            current_total = self._state.get("total_bytes")
+            if current_total and int(current_total) > 0:
+                self._state["percent"] = min(
+                    100.0, 100.0 * float(downloaded_bytes) / float(current_total)
+                )
+
+    def finish(self, *, ok: bool, error: str = "") -> None:
+        with self._lock:
+            self._state["status"] = "installed" if ok else "failed"
+            self._state["finished_at"] = datetime.now(timezone.utc).isoformat()
+            self._state["error"] = error
+            if ok:
+                self._state["percent"] = 100.0
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {k: v for k, v in self._state.items()}
+
+
+# ---------------------------------------------------------------------------
+# Trusted Offline install pipeline
+# ---------------------------------------------------------------------------
+
+
+def _load_trusted_offline_manifest(
+    manifest_path: Path,
+) -> tuple[OfflineInstallTriple, Path]:
+    """Load the trusted Offline install definition from a server-owned manifest.
+
+    The caller (launcher / E2E harness) supplies the path to the
+    committed ``dictionary-manifest-v2.json``. This helper produces a
+    fully-trusted triple the API uses directly, ignoring any
+    request-body value. Returned tuple is ``(triple, manifest_path)``.
+    """
+    from app.dict_install import load_manifest as _load
+
+    manifest = _load(manifest_path)
+    return (
+        OfflineInstallTriple(
+            version=str(manifest.version),
+            filename=str(manifest.filename),
+            sha256=str(manifest.sha256),
+            bytes=int(manifest.bytes),
+            download_url=str(manifest.download_url) if manifest.download_url else "",
+            manifest_path=manifest_path,
+        ),
+        manifest_path,
+    )
+
+
+def _default_offline_install_triple(
+    *, repo_root: Path
+) -> tuple[OfflineInstallTriple, Path]:
+    """Return the trusted Offline install triple from the committed manifest.
+
+    Always reads ``<repo_root>/release/dictionary-manifest-v2.json``.
+    """
+    manifest_path = repo_root / "release" / _DEFAULT_OFFLINE_MANIFEST_FILENAME
+    return _load_trusted_offline_manifest(manifest_path)
+
+
+def _build_offline_install_manifest(
+    triple: OfflineInstallTriple,
+) -> DictionaryManifest:
+    """Project a trusted triple into a ``DictionaryManifest`` for the installer."""
+    return DictionaryManifest(
+        version=triple.version,
+        filename=triple.filename,
+        sha256=triple.sha256,
+        bytes=triple.bytes,
+        classification="settings-pull-server-owned",
+        attribution="ATTRIBUTION-v2.md",
+        download_url=triple.download_url or None,
+        manifest_path=triple.manifest_path,
+    )
+
+
 def create_app(
     dict_path: Path | str | None = None,
     user_db_path: Path | str | None = None,
@@ -834,6 +937,7 @@ def create_app(
     service_port: int = 8000,
     expected_dictionary_sha256: str | None = None,
     expected_dictionary_version: str = "v1",
+    expected_dictionary_bytes: int | None = None,
     runtime: "DictionaryRuntime | None" = None,
     online_provider: "DictionaryProvider | None" = None,
     online_session_info: "OnlineSessionInfo | None" = None,
@@ -845,12 +949,13 @@ def create_app(
     human_audio_id_for_observation: Callable[[Mapping[str, object]], str | None] | None = None,
     human_audio_resolver: Callable[[str], tuple[bytes, HumanAudioProvenance]] | None = None,
     piper_runner: Callable[[str, str], bytes] | None = None,
+    offline_install_triple: "OfflineInstallTriple | None" = None,
 ) -> FastAPI:
     """Create and configure the standalone FastAPI vocabulary application.
 
     Zero module-level state; no environment reads at import time (AGENTS C1).
 
-    Two construction modes:
+    Three construction modes:
 
     1. ``dict_path`` is provided — the application builds a
        ``DictionaryRuntime`` from the canonical Offline dictionary. This
@@ -866,7 +971,13 @@ def create_app(
        state.
 
     The session-scoped chooser/preference state is held on ``app.state``
-    but never persisted.
+    but never persisted. ``online_provider_factory``, when set, is the
+    ONLY supported way to build a fresh ``OnlineDictionaryProvider``
+    after construction: it constructs the provider on demand, returns
+    the validated tuple, and is the single source of Online trust.
+
+    ``offline_install_triple`` is the server-owned Offline install
+    definition. The browser / API cannot supply any of its fields.
     """
     if user_db_path is None:
         raise ValueError("user_db_path is required")
@@ -902,15 +1013,7 @@ def create_app(
     resolved_cache_dir.mkdir(parents=True, exist_ok=True)
 
     if runtime is None and online_provider is None:
-        if dict_path is None:
-            # Slice 12 chooser state: no provider bound yet. The runtime
-            # Settings endpoint exposes
-            # ``/vocab/settings/dictionary/install-offline`` /
-            # ``use-online`` etc. which construct a session at runtime.
-            # The /vocab/lookup + dictionary reads in chooser state are
-            # themselves not used (the UI shows the chooser).
-            runtime = None
-        else:
+        if dict_path is not None:
             dict_p = Path(dict_path).resolve()
             runtime = DictionaryRuntime(
                 dict_p,
@@ -930,6 +1033,20 @@ def create_app(
         else user_db_p.parent / "dictionary"
     )
 
+    if offline_install_triple is None:
+        # Derive the trusted triple from the current expected_*
+        # fields when they form a complete record; otherwise leave it
+        # as None so the API caller can supply a server-owned triple.
+        if (
+            expected_dictionary_sha256
+            and expected_dictionary_bytes
+            and expected_dictionary_version
+        ):
+            # The trusted download_url is not derivable from
+            # expected_* — callers MUST pass it explicitly via
+            # ``offline_install_triple``.
+            offline_install_triple = None
+
     app = FastAPI(title="Wortlaut Vocabulary API", version="0.1.0")
 
     app.state.user_db_path = user_db_p
@@ -945,14 +1062,18 @@ def create_app(
     app.state.online_provider_factory = online_provider_factory
     app.state.expected_dictionary_sha256 = expected_dictionary_sha256
     app.state.expected_dictionary_version = expected_dictionary_version
+    app.state.expected_dictionary_bytes = expected_dictionary_bytes
+    app.state.offline_install_triple = offline_install_triple
+    app.state.install_progress = _InstallProgress()
 
     if runtime is not None:
         app.state.dict_path = runtime.managed_dir / "dictionary.sqlite"
         app.state.runtime = runtime
-        session = DictionarySession(runtime=runtime)
+        session = DictionarySession(runtime=runtime, user_db_path=user_db_p)
         app.state.session = session
         app.state.dictionary_mode = "offline"
         app.state.online_session_info = None
+        app.state.online_provider = None
     elif online_provider is not None:
         info = online_session_info or OnlineSessionInfo(
             dataset_token=str(getattr(online_provider, "_dataset_token", "online")),
@@ -961,7 +1082,11 @@ def create_app(
         )
         app.state.online_provider = online_provider
         app.state.dict_path = None
-        session = DictionarySession(provider=online_provider, online_info=info)
+        session = DictionarySession(
+            provider=online_provider,
+            online_info=info,
+            user_db_path=user_db_p,
+        )
         app.state.session = session
         app.state.dictionary_mode = "online"
         app.state.online_session_info = info
@@ -1113,9 +1238,6 @@ def create_app(
             return guard
         with guard.reading():
             token = guard.asset_token()
-            # Perform candidate resolution through the Slice-11
-            # provider contract; the served-product read path no longer
-            # opens the asset's raw SQLite connection.
             provider = guard.provider()
             oracle = _ProviderOracle(provider)
 
@@ -1264,6 +1386,11 @@ def create_app(
                             content={"detail": "selected_span out of bounds"},
                         )
 
+        # Reject pre-user-choice requests. The chooser must remain
+        # honest: no PART-B writes from a session that is None.
+        session = _session_or_unconfigured(app)
+        if isinstance(session, JSONResponse):
+            return session
         with session.reading() as snapshot:
             active_token = session.asset_token()
             if picker_token != active_token:
@@ -1711,8 +1838,6 @@ def create_app(
         if isinstance(guard, JSONResponse):
             return guard
         with guard.reading():
-            # Provider-backed oracle; the served-product read path no
-            # longer opens the asset's raw SQLite connection.
             provider = guard.provider()
             oracle = _ProviderOracle(provider)
 
@@ -1837,6 +1962,9 @@ def create_app(
         # 1. Stale picker token validation (ADR-0004 D47)
         picker_token = body.get("asset_token")
 
+        session = _session_or_unconfigured(app)
+        if isinstance(session, JSONResponse):
+            return session
         with session.reading() as snapshot:
             active_token = session.asset_token()
             if picker_token != active_token:
@@ -2081,10 +2209,14 @@ def create_app(
 
     @app.get("/vocab/cards/next")
     def next_card_endpoint(deck_id: int | None = None) -> JSONResponse:
-        guard = _runtime_or_unconfigured(app, runtime)
-        if isinstance(guard, JSONResponse):
-            return guard
-        card_obs = guard.observe_card_render(deck_id=deck_id)
+        # Card render now works in either provider mode through
+        # ``DictionarySession.observe_card_render``, which delegates to
+        # the bound runtime when Offline and to a deterministic
+        # session-backed materializer when Online.
+        session = _session_or_unconfigured(app)
+        if isinstance(session, JSONResponse):
+            return session
+        card_obs = session.observe_card_render(deck_id=deck_id)
         if card_obs is None:
             return JSONResponse(
                 status_code=status.HTTP_200_OK,
@@ -2474,17 +2606,34 @@ def create_app(
                 content={"detail": "version must be a non-blank string"},
             )
 
-        guard = _runtime_or_unconfigured(app, runtime)
-        if isinstance(guard, JSONResponse):
-            return guard
+        session = _session_or_unconfigured(app)
+        if isinstance(session, JSONResponse):
+            return session
+        if not isinstance(session, DictionarySession):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "detail": "dictionary activation requires an Offline session",
+                    "code": "offline_runtime_unavailable",
+                },
+            )
         try:
-            guard.activate_dictionary(path_val.strip(), version=version.strip())
+            runtime_obj = session._runtime
+            if runtime_obj is None:
+                return JSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content={
+                        "detail": "dictionary activation requires an Offline session",
+                        "code": "offline_runtime_unavailable",
+                    },
+                )
+            runtime_obj.activate_dictionary(path_val.strip(), version=version.strip())
             return JSONResponse(
                 status_code=status.HTTP_200_OK,
                 content={
                     "status": "activated",
                     "version": version.strip(),
-                    "asset_token": guard.asset_token,
+                    "asset_token": runtime_obj.asset_token,
                 },
             )
         except DictionaryClosedError as exc:
@@ -2598,10 +2747,10 @@ def create_app(
 
     @app.get("/vocab/export/anki")
     def export_anki_endpoint(deck_id: int | None = None) -> Response:
-        guard = _runtime_or_unconfigured(app, runtime)
-        if isinstance(guard, JSONResponse):
-            return guard
-        cards_obs = guard.observe_export_payload(deck_id=deck_id)
+        session = _session_or_unconfigured(app)
+        if isinstance(session, JSONResponse):
+            return session
+        cards_obs = session.observe_export_payload(deck_id=deck_id)
 
         tsv_lines: list[str] = [
             "#separator:tab",
@@ -2688,10 +2837,10 @@ def create_app(
             )
 
         deck_name = str(deck_row["name"])
-        guard = _runtime_or_unconfigured(app, runtime)
-        if isinstance(guard, JSONResponse):
-            return guard
-        observations = guard.observe_export_payload(deck_id=deck_id)
+        session = _session_or_unconfigured(app)
+        if isinstance(session, JSONResponse):
+            return session
+        observations = session.observe_export_payload(deck_id=deck_id)
         package_bytes = build_apkg(
             observations,
             deck_name=deck_name,
@@ -2707,6 +2856,10 @@ def create_app(
             headers={"Content-Disposition": f'attachment; filename="{safe_name}.apkg"'},
         )
 
+    # -----------------------------------------------------------------------
+    # Slice 12 Settings endpoints — chooser / install / removal / cache / use
+    # -----------------------------------------------------------------------
+
     @app.get("/vocab/settings/dictionary")
     def settings_dictionary_get() -> JSONResponse:
         """Return the chooser/runtime status for the Settings UI."""
@@ -2716,18 +2869,22 @@ def create_app(
         canonical = managed / manifest_filename
         present = canonical.is_file()
         valid = False
+        triple = getattr(app.state, "offline_install_triple", None)
+        expected_sha = str(triple.sha256) if triple is not None else None
+        expected_bytes_val = int(triple.bytes) if triple is not None else None
         if present:
             try:
                 asset = validate_candidate_dictionary(canonical)
                 try:
-                    valid = (
-                        asset.path.name == manifest_filename
-                        and asset.sha256.lower()
-                        == str(
-                            getattr(app.state, "expected_dictionary_sha256", "")
-                            or asset.sha256
-                        ).lower()
+                    sha_ok = (
+                        expected_sha is None
+                        or asset.sha256.lower() == expected_sha.lower()
                     )
+                    size_ok = (
+                        expected_bytes_val is None
+                        or asset.path.stat().st_size == expected_bytes_val
+                    )
+                    valid = asset.path.name == manifest_filename and sha_ok and size_ok
                 finally:
                     try:
                         asset.close()
@@ -2755,52 +2912,73 @@ def create_app(
                 "asset_token": info.asset_token,
                 "cache_dir": info.cache_dir,
             }
+        # Whether the server owns a trusted Offline install definition.
+        status_payload["server_owned_offline_install"] = triple is not None
+        # The current install progress snapshot for client polling.
+        progress_state = getattr(app.state, "install_progress", None)
+        if progress_state is not None:
+            status_payload["install_progress"] = progress_state.snapshot()
+        # E2E-only backend counters (never set in production). The
+        # dedicated /__e2e/* route would be shadowed by the frontend
+        # catch-all, so the harness reads counters from here instead.
+        e2e_counters = getattr(app.state, "e2e_counters", None)
+        if callable(e2e_counters):
+            try:
+                status_payload["e2e_counters"] = e2e_counters()
+            except Exception:
+                pass
         return JSONResponse(status_code=200, content=status_payload)
 
     @app.post("/vocab/settings/dictionary/install-offline")
     async def settings_install_offline(request: Request) -> JSONResponse:
-        """Run the hardened full Offline installer.
+        """Run the hardened full Offline installer from the server-owned triple.
 
-        The chooser/Online-active flows use this endpoint to populate
-        the managed canonical slot. The preflight is enforced before
-        any download begins: insufficient free space is rejected
-        immediately, no existing valid Offline dictionary is replaced,
-        and no user data is mutated.
+        The preflight is enforced before any download begins: insufficient
+        free space is rejected immediately, no existing valid Offline
+        dictionary is replaced, and no user data is mutated. The
+        request body is silently ignored for source selection — only the
+        server-owned ``OfflineInstallTriple`` is consulted.
         """
         try:
-            body = await request.json()
+            await request.json()
         except Exception:
-            body = {}
-        body = body if isinstance(body, dict) else {}
-        manifest_bytes_raw = body.get("manifest_bytes")
-        manifest_bytes: int | None
-        if (
-            isinstance(manifest_bytes_raw, int)
-            and not isinstance(manifest_bytes_raw, bool)
-            and manifest_bytes_raw > 0
-        ):
-            manifest_bytes = int(manifest_bytes_raw)
-        else:
-            manifest_bytes = OFFLINE_INSTALL_DEFAULT_MANIFEST_BYTES
+            pass
+
+        triple = getattr(app.state, "offline_install_triple", None)
+        if triple is None:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": (
+                        "server does not own a trusted Offline install "
+                        "manifest; product Online corpus is built and "
+                        "validated by Slice 13, not Slice 12"
+                    ),
+                    "code": "offline_install_unconfigured",
+                },
+            )
 
         managed = Path(app.state.managed_dictionary_dir)
-        install_path = managed / str(app.state.manifest_filename)
+        install_path = managed / str(triple.filename)
         # Refuse early when the canonical file is already a valid asset.
-        # The installer's contract refuses to overwrite a validated file;
-        # this matches AGENTS R9 / ADR-0001 §12.
         if install_path.is_file():
             try:
                 asset = validate_candidate_dictionary(install_path)
                 try:
-                    return JSONResponse(
-                        status_code=200,
-                        content={
-                            "status": "already_present",
-                            "canonical_offline_path": str(install_path),
-                            "sha256": asset.sha256,
-                            "byte_size": install_path.stat().st_size,
-                        },
-                    )
+                    if (
+                        asset.path.name == str(triple.filename)
+                        and asset.sha256.lower() == str(triple.sha256).lower()
+                        and asset.path.stat().st_size == int(triple.bytes)
+                    ):
+                        return JSONResponse(
+                            status_code=200,
+                            content={
+                                "status": "already_present",
+                                "canonical_offline_path": str(install_path),
+                                "sha256": asset.sha256,
+                                "byte_size": install_path.stat().st_size,
+                            },
+                        )
                 finally:
                     try:
                         asset.close()
@@ -2810,9 +2988,11 @@ def create_app(
                 # existing file is unusable; fall through to a fresh install
                 pass
 
+        # ALWAYS use the trusted byte count from the server-owned triple.
+        trusted_bytes = int(triple.bytes)
         try:
             peak = preflight_offline_install(
-                manifest_bytes=manifest_bytes, install_dir=managed
+                manifest_bytes=trusted_bytes, install_dir=managed
             )
         except OfflineInstallRefused as exc:
             return JSONResponse(
@@ -2825,66 +3005,43 @@ def create_app(
                 },
             )
 
-        try:
-            from app.dict_install import (  # noqa: PLC0415  # noqa: PLC0415
-                DictionaryInstallerError,
-                DictionaryManifest,
-                install_dictionary,
-                parse_manifest_payload,
-            )
+        # Mark progress running and run the blocking installer in a
+        # worker thread. The handler returns 202 immediately; the UI
+        # polls /vocab/settings/dictionary for live progress and final
+        # status.
+        progress = getattr(app.state, "install_progress", None)
+        if progress is not None:
+            progress.reset(trusted_bytes)
 
-            manifest_payload = {
-                "version": "v2",
-                "filename": str(app.state.manifest_filename),
-                "sha256": str(app.state.expected_dictionary_sha256 or ""),
-                "bytes": int(manifest_bytes),
-                "classification": "settings-pull",
-                "attribution": "ATTRIBUTION-v2.md",
-                "download_url": body.get("download_url"),
-            }
-            manifest = parse_manifest_payload(
-                manifest_payload, manifest_path=managed / "manifest.json"
-            )
-            assert isinstance(manifest, DictionaryManifest)
-            install_dictionary(manifest, target_dir=managed)
-        except DictionaryInstallerError as exc:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "detail": str(exc),
-                    "code": "offline_install_failed",
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "detail": f"install failed: {exc}",
-                    "code": "offline_install_exception",
-                },
-            )
+        def _progress_callback(written: int, total: int | None) -> None:
+            if progress is not None:
+                progress.update(written, total)
 
-        # Successful install — record the canonical path/identity on app state.
-        try:
-            asset = validate_candidate_dictionary(install_path)
+        def _worker() -> None:
             try:
-                app.state.dict_path = install_path
-                app.state.expected_dictionary_sha256 = asset.sha256
-            finally:
-                try:
-                    asset.close()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                manifest = _build_offline_install_manifest(triple)
+                install_dictionary(
+                    manifest,
+                    target_dir=managed,
+                    progress=_progress_callback,
+                )
+                if progress is not None:
+                    progress.finish(ok=True)
+            except Exception as exc:  # noqa: BLE001
+                if progress is not None:
+                    progress.finish(ok=False, error=str(exc))
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
 
         return JSONResponse(
-            status_code=200,
+            status_code=202,
             content={
-                "status": "installed",
+                "status": "started",
                 "canonical_offline_path": str(install_path),
                 "measured_bytes": peak.measured_bytes,
                 "safety_threshold_bytes": peak.safety_threshold_bytes,
+                "trusted_bytes": trusted_bytes,
             },
         )
 
@@ -2899,23 +3056,23 @@ def create_app(
           ``active_dictionary_metadata`` unchanged; zero user-data
           mutation.
         * Online ACTIVE: the canonical file is removed after verifying
-          it is the managed canonical asset; the Online cache and the
-          ``active_dictionary_metadata`` row stay untouched; zero
-          user-data mutation.
+          it is exactly the managed canonical asset; the Online cache
+          and the ``active_dictionary_metadata`` row stay untouched;
+          zero user-data mutation. ``expected_dictionary_sha256`` is
+          preserved so the same logical v2 release can be reinstalled
+          via the normal metadata-match path.
 
-        Across both branches, user data (notes, cards, ``review_log``,
-        user/audio/sense refs) never changes.
+        The target file is ALWAYS the trusted filename derived from
+        the server-owned install triple; the request body cannot alter
+        it.
         """
         try:
-            body = await request.json()
+            await request.json()
         except Exception:
-            body = {}
-        body = body if isinstance(body, dict) else {}
+            pass
+
         mode = str(getattr(app.state, "dictionary_mode", ""))
         if mode != "online":
-            # Per ADR-0009, Offline-active removal is rejected with a
-            # structured conflict. The user is told to switch to Online
-            # for this session first.
             return JSONResponse(
                 status_code=409,
                 content={
@@ -2929,33 +3086,38 @@ def create_app(
                 },
             )
 
+        triple = getattr(app.state, "offline_install_triple", None)
+        if triple is None:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": (
+                        "no server-owned Offline install definition; "
+                        "removal target is undefined"
+                    ),
+                    "code": "offline_removal_unconfigured",
+                },
+            )
+
         managed = Path(app.state.managed_dictionary_dir)
-        target_filename = str(
-            body.get("filename") or app.state.manifest_filename
-        )
-        expected_sha = (
-            str(app.state.expected_dictionary_sha256)
-            if app.state.expected_dictionary_sha256
-            else None
-        )
-        expected_bytes = (
-            int(app.state.expected_dictionary_bytes)
-            if getattr(app.state, "expected_dictionary_bytes", None)
-            else None
-        )
+        target_filename = str(triple.filename)
+        expected_sha = str(triple.sha256)
+        expected_bytes_val = int(triple.bytes)
         removed, detail = remove_canonical_offline(
             managed_dir=managed,
             target_filename=target_filename,
             expected_sha256=expected_sha,
-            expected_bytes=expected_bytes,
+            expected_bytes=expected_bytes_val,
         )
         if not removed:
             return JSONResponse(
                 status_code=409,
                 content={"detail": detail, "code": "offline_removal_failed"},
             )
+        # C7: do NOT erase the trusted release identity. After removal
+        # the metadata stays so the same logical release can be
+        # re-detected via the normal metadata-match path.
         app.state.dict_path = None
-        app.state.expected_dictionary_sha256 = None
         return JSONResponse(
             status_code=200,
             content={
@@ -2966,38 +3128,50 @@ def create_app(
         )
 
     @app.post("/vocab/settings/dictionary/clear-online-cache")
-    def settings_clear_online_cache() -> JSONResponse:
+    async def settings_clear_online_cache(request: Request) -> JSONResponse:
         """Clear the Online provider's immutable shard cache directory.
 
-        The Online provider must already be bound, and this only removes
-        Online shard artifacts — user data, the dictionary asset path,
-        and ``active_dictionary_metadata`` are untouched.
+        The Online provider must already be bound; this delegates to the
+        provider's lifecycle method, which serializes cache mutation
+        against new acquisitions and active leases. User data and the
+        canonical Offline asset are untouched.
         """
-        info = getattr(app.state, "online_session_info", None)
-        cache_dir = Path(info.cache_dir) if info is not None else None
-        if cache_dir is None or not cache_dir.exists():
+        try:
+            await request.json()
+        except Exception:
+            pass
+
+        provider = getattr(app.state, "online_provider", None)
+        if provider is None:
             return JSONResponse(
                 status_code=409,
                 content={
-                    "detail": "online cache is not configured",
+                    "detail": "Online provider is not bound for this session",
                     "code": "online_cache_not_configured",
                 },
             )
-        removed_count = 0
-        for entry in cache_dir.iterdir():
-            try:
-                if entry.is_dir():
-                    import shutil
-
-                    shutil.rmtree(entry)
-                else:
-                    entry.unlink()
-                removed_count += 1
-            except OSError:
-                pass
+        clear_method = getattr(provider, "clear_cache", None)
+        if not callable(clear_method):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": "Online provider does not expose clear_cache",
+                    "code": "online_cache_clear_unavailable",
+                },
+            )
+        try:
+            clear_method()
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "detail": f"failed to clear Online cache: {exc}",
+                    "code": "online_cache_clear_failed",
+                },
+            )
         return JSONResponse(
             status_code=200,
-            content={"status": "cleared", "removed_count": int(removed_count)},
+            content={"status": "cleared"},
         )
 
     @app.post("/vocab/settings/dictionary/use-online")
@@ -3005,11 +3179,17 @@ def create_app(
         """Switch the session provider to Online for this process.
 
         Reuses the ``online_provider_factory`` set on ``app.state``. The
-        canonical Offline dictionary file is preserved; only the
-        dictionary source for the running session changes. The
-        ``active_dictionary_metadata`` row and all user data remain
-        intact.
+        factory MUST construct the provider on demand and return
+        ``(provider, online_info)``. The canonical Offline dictionary
+        file is preserved; only the dictionary source for the running
+        session changes. The ``active_dictionary_metadata`` row and
+        all user data remain intact.
         """
+        try:
+            await request.json()
+        except Exception:
+            pass
+
         factory = getattr(app.state, "online_provider_factory", None)
         if factory is None:
             return JSONResponse(
@@ -3019,6 +3199,7 @@ def create_app(
                     "code": "online_provider_unavailable",
                 },
             )
+
         try:
             provider, info = factory()
         except Exception as exc:  # noqa: BLE001
@@ -3030,22 +3211,29 @@ def create_app(
                 },
             )
 
-        # Tear down the previous runtime, if any.
+        # Construct/validate succeeded; only now replace the session.
         previous_runtime = getattr(app.state, "runtime", None)
         if previous_runtime is not None and not previous_runtime.is_closed:
             try:
                 previous_runtime.close()
             except Exception:
                 pass
-
         previous_session = getattr(app.state, "session", None)
         if previous_session is not None:
             try:
                 previous_session.close()
             except Exception:
                 pass
+        previous_provider = getattr(app.state, "online_provider", None)
+        if previous_provider is not None and previous_provider is not provider:
+            try:
+                previous_provider.close()
+            except Exception:
+                pass
 
-        new_session = DictionarySession(provider=provider, online_info=info)
+        new_session = DictionarySession(
+            provider=provider, online_info=info, user_db_path=user_db_p
+        )
         app.state.session = new_session
         app.state.online_provider = provider
         app.state.online_session_info = info
@@ -3073,12 +3261,15 @@ def create_app(
         first).
         """
         try:
-            body = await request.json()
+            await request.json()
         except Exception:
-            body = {}
-        body = body if isinstance(body, dict) else {}
+            pass
+
+        triple = getattr(app.state, "offline_install_triple", None)
         managed = Path(app.state.managed_dictionary_dir)
-        install_path = managed / str(app.state.manifest_filename)
+        install_path = managed / str(
+            triple.filename if triple is not None else app.state.manifest_filename
+        )
         if not install_path.is_file():
             return JSONResponse(
                 status_code=409,
@@ -3088,7 +3279,44 @@ def create_app(
                     "canonical_offline_path": str(install_path),
                 },
             )
-        # Validate the asset before swapping the session.
+        # C8: verify exact release identity (filename + bytes + SHA).
+        if triple is not None:
+            try:
+                from app.dict_install import compute_sha256
+
+                actual_bytes = install_path.stat().st_size
+                if actual_bytes != int(triple.bytes):
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "detail": (
+                                f"canonical Offline byte size mismatch: "
+                                f"got {actual_bytes}, expected {int(triple.bytes)}"
+                            ),
+                            "code": "offline_unavailable",
+                        },
+                    )
+                actual_sha = compute_sha256(install_path)
+                if actual_sha.lower() != str(triple.sha256).lower():
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "detail": (
+                                "canonical Offline SHA-256 mismatch with the "
+                                "trusted release identity"
+                            ),
+                            "code": "offline_unavailable",
+                        },
+                    )
+            except OSError as exc:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "detail": f"failed to verify canonical Offline asset: {exc}",
+                        "code": "offline_unavailable",
+                    },
+                )
+
         try:
             asset = validate_candidate_dictionary(install_path)
         except Exception as exc:
@@ -3105,7 +3333,10 @@ def create_app(
                 install_path,
                 Path(app.state.user_db_path),
                 expected_sha256=asset_sha,
-                expected_version=str(app.state.expected_dictionary_version),
+                expected_version=str(
+                    triple.version if triple is not None
+                    else app.state.expected_dictionary_version
+                ),
             )
         except Exception as exc:
             try:
@@ -3137,7 +3368,7 @@ def create_app(
             except Exception:
                 pass
 
-        new_session = DictionarySession(runtime=new_runtime)
+        new_session = DictionarySession(runtime=new_runtime, user_db_path=user_db_p)
         app.state.session = new_session
         app.state.runtime = new_runtime
         app.state.dictionary_mode = "offline"
@@ -3179,9 +3410,17 @@ def create_app(
 
 def create_production_app() -> FastAPI:
     """Container entry point with separate disposable and persistent mounts."""
+    from pathlib import Path as _Path
+
+    # Trusted server-owned Offline install definition. The Docker
+    # compose image ships the canonical ``dictionary-manifest-v2.json``
+    # under ``/wortlaut/release/dictionary-manifest-v2.json``.
+    repo_root = _Path(__file__).resolve().parent.parent
+    triple, _ = _default_offline_install_triple(repo_root=repo_root)
     return create_app(
         dict_path="/dictionary/dictionary.sqlite",
         user_db_path="/data/flashcards.sqlite",
         cors_origins=("http://127.0.0.1:8000", "http://localhost:8000"),
         service_port=8000,
+        offline_install_triple=triple,
     )

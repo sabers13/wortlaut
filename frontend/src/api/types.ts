@@ -344,11 +344,24 @@ export interface DictionarySettingsInfo {
     asset_token: string;
     cache_dir: string;
   };
+  server_owned_offline_install?: boolean;
+  install_progress?: {
+    status: string;
+    downloaded_bytes: number;
+    total_bytes: number | null;
+    percent: number;
+    started_at: string | null;
+    finished_at: string | null;
+    error: string;
+  };
 }
 
 export interface InstallOfflineRequest {
-  manifest_bytes?: number;
-  download_url?: string;
+  // The browser never supplies a source. The server uses its trusted
+  // Offline install triple (version, filename, SHA-256, bytes,
+  // download_url) derived from release/dictionary-manifest-v2.json.
+  // This interface is intentionally empty.
+  [key: string]: never;
 }
 
 export interface InstallOfflineResponse {
@@ -361,7 +374,10 @@ export interface InstallOfflineResponse {
 }
 
 export interface RemoveOfflineRequest {
-  filename?: string;
+  // The browser never supplies a filename. The server removes exactly
+  // the managed canonical asset derived from its trusted triple.
+  // This interface is intentionally empty.
+  [key: string]: never;
 }
 
 export interface RemoveOfflineResponse {
@@ -372,7 +388,6 @@ export interface RemoveOfflineResponse {
 
 export interface ClearOnlineCacheResponse {
   status: string;
-  removed_count: number;
 }
 
 export interface UseOnlineResponse {

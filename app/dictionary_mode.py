@@ -67,6 +67,27 @@ _OFFLINE_INSTALL_MIN_THRESHOLD_BYTES: int = int(
 
 
 @dataclass(frozen=True)
+class OfflineInstallTriple:
+    """Server-owned trusted Offline install definition.
+
+    Derived from ``release/dictionary-manifest-v2.json`` at launcher
+    / API construction time. The browser / API caller cannot supply
+    any of its fields; the ``install-offline`` endpoint, the
+    ``remove-offline`` endpoint, and the ``use-offline`` endpoint all
+    read this triple directly. ``download_url`` is the trusted URL
+    on the committed Wortlaut GitHub Release; ``manifest_path`` is
+    the source the launcher / E2E harness used to build the triple.
+    """
+
+    version: str
+    filename: str
+    sha256: str
+    bytes: int
+    download_url: str
+    manifest_path: Path
+
+
+@dataclass(frozen=True)
 class StartupModeDecision:
     """The startup mode decision derived from explicit / canonical state.
 
@@ -445,6 +466,7 @@ __all__ = [
     "DictionaryModeName",
     "OfflineInstallPeak",
     "OfflineInstallRefused",
+    "OfflineInstallTriple",
     "StartupModeDecision",
     "decide_startup_mode",
     "measure_offline_install_peak",
