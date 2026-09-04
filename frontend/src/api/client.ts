@@ -16,6 +16,7 @@ import type {
   ActivateDictionaryResponse,
   CaptureCardsRequest,
   CaptureCardsResponse,
+  ClearOnlineCacheResponse,
   CreateDeckRequest,
   CreateDeckResponse,
   CreateNoteRequest,
@@ -23,17 +24,24 @@ import type {
   DeckSummary,
   DeleteDeckResponse,
   DeleteGlossResponse,
+  DictionarySettingsInfo,
   HighlightRequest,
   HighlightResponse,
   ImportCsvRequest,
   ImportCsvResponse,
+  InstallOfflineRequest,
+  InstallOfflineResponse,
   LookupResponse,
   MeaningLanguage,
   NextCardResponse,
+  RemoveOfflineRequest,
+  RemoveOfflineResponse,
   RevertAudioResponse,
   ReviewCardResponse,
   SetGlossResponse,
   UploadAudioResponse,
+  UseOfflineResponse,
+  UseOnlineResponse,
 } from './types.ts';
 
 export interface VocabClientOptions {
@@ -367,6 +375,61 @@ export class VocabClient {
       params: { deck_id: deckId },
       responseType: 'blob',
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Dictionary Mode (Slice 12 / ADR-0009)
+  // -------------------------------------------------------------------------
+
+  /** Read the chooser / runtime Settings status (GET /vocab/settings/dictionary). */
+  async getDictionarySettings(): Promise<DictionarySettingsInfo> {
+    return this.request<DictionarySettingsInfo>('/vocab/settings/dictionary', {
+      method: 'GET',
+    });
+  }
+
+  /** Run the hardened full Offline installer (POST /vocab/settings/dictionary/install-offline). */
+  async installOffline(
+    request: InstallOfflineRequest = {},
+  ): Promise<InstallOfflineResponse> {
+    return this.request<InstallOfflineResponse>(
+      '/vocab/settings/dictionary/install-offline',
+      { method: 'POST', body: request },
+    );
+  }
+
+  /** Remove the managed canonical full Offline asset (POST /vocab/settings/dictionary/remove-offline). */
+  async removeOffline(
+    request: RemoveOfflineRequest = {},
+  ): Promise<RemoveOfflineResponse> {
+    return this.request<RemoveOfflineResponse>(
+      '/vocab/settings/dictionary/remove-offline',
+      { method: 'POST', body: request },
+    );
+  }
+
+  /** Clear the Online provider's immutable shard cache (POST /vocab/settings/dictionary/clear-online-cache). */
+  async clearOnlineCache(): Promise<ClearOnlineCacheResponse> {
+    return this.request<ClearOnlineCacheResponse>(
+      '/vocab/settings/dictionary/clear-online-cache',
+      { method: 'POST', body: {} },
+    );
+  }
+
+  /** Switch the session to Online for this process (POST /vocab/settings/dictionary/use-online). */
+  async useOnline(): Promise<UseOnlineResponse> {
+    return this.request<UseOnlineResponse>(
+      '/vocab/settings/dictionary/use-online',
+      { method: 'POST', body: {} },
+    );
+  }
+
+  /** Switch the session to Offline for this process (POST /vocab/settings/dictionary/use-offline). */
+  async useOffline(): Promise<UseOfflineResponse> {
+    return this.request<UseOfflineResponse>(
+      '/vocab/settings/dictionary/use-offline',
+      { method: 'POST', body: {} },
+    );
   }
 }
 

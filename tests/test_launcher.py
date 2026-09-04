@@ -328,24 +328,35 @@ def test_launcher_rejects_lan_host(tmp_path: Path) -> None:
     assert "unrecognized argument" in proc.stderr
 
 
-def test_launcher_fails_closed_when_dictionary_missing(tmp_path: Path) -> None:
-    env = {"HOME": str(tmp_path), "XDG_DATA_HOME": str(tmp_path / "xdg")}
-    proc = _run_launcher(
-        "--data-dir",
-        str(tmp_path / "data"),
-        "--no-browser",
-        cwd=tmp_path,
-        env=env,
-        timeout=10,
+def test_launcher_chooser_state_when_dictionary_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slice 12: missing dictionary in default startup reaches the
+    unconfigured-chooser state (no early exit, app starts in chooser).
+    The legacy ``missing dictionary -> launcher exits`` behavior is
+    intentionally superseded by ADR-0009 §6.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    module = _load_launcher_module()
+    monkeypatch.setitem(sys.modules, "uvicorn", _fake_uvicorn())
+    rc = module.main(
+        [
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--no-browser",
+        ],
     )
-    assert proc.returncode != 0
-    assert "dictionary asset is missing" in proc.stderr
+    assert rc == 0
 
 
 def test_launcher_fails_closed_on_dictionary_verify_error(
     tmp_path: Path, synthetic_dict: Path
 ) -> None:
-    # Write a non-dictionary file at the expected slot
+    """Slice 12: explicit ``--dict-path`` still fails closed on a
+    non-dictionary file; only the *default* (no-mode, no-path) startup
+    is allowed to fall into the chooser state.
+    """
     fake = synthetic_dict.parent / "dictionary.sqlite"
     fake.write_bytes(b"NOT A SQLITE FILE")
     env = {"HOME": str(tmp_path), "XDG_DATA_HOME": str(tmp_path / "xdg")}
@@ -363,24 +374,25 @@ def test_launcher_fails_closed_on_dictionary_verify_error(
     assert "verification failed" in proc.stderr or "PART-A" in proc.stderr
 
 
-def test_launcher_fails_closed_with_exit_code_on_missing_dict(
-    tmp_path: Path,
+def test_launcher_chooser_state_when_default_offline_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Missing dictionary must fail closed with a clear exit code, not
-    silently start a half-configured server.
+    """Slice 12: default + canonical offline MISSING falls into the
+    unconfigured chooser. The chooser stays in-process until the user
+    chooses; tests run in-process with a fake uvicorn.
     """
-    env = {"HOME": str(tmp_path), "XDG_DATA_HOME": str(tmp_path / "xdg")}
-    data_dir = tmp_path / "data"
-    proc = _run_launcher(
-        "--data-dir",
-        str(data_dir),
-        "--no-browser",
-        cwd=tmp_path,
-        env=env,
-        timeout=5,
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    module = _load_launcher_module()
+    monkeypatch.setitem(sys.modules, "uvicorn", _fake_uvicorn())
+    rc = module.main(
+        [
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--no-browser",
+        ],
     )
-    assert proc.returncode != 0
-    assert "dictionary asset is missing" in proc.stderr
+    assert rc == 0
 
 
 def _write_manifest(
@@ -632,7 +644,15 @@ def test_runtime_validation_reached_after_valid_canonical_identity(
 def test_canonical_runtime_rejects_replacement_after_identity_precheck(
     tmp_path: Path, synthetic_dict: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The manifest identity is checked again against the runtime snapshot."""
+    """Slice 12: ``--manifest CUSTOM`` is Developer/Recovery. Identity
+    mismatch on canonical startup remains a fail-closed exit 2 — the
+    custom-manifest integrity contract is preserved.
+
+    The missing-default-dictionary fallback to the chooser does NOT
+    apply here because the user explicitly supplied a custom manifest.
+    That path proves the unique stale-metadata bypass protection remains
+    binding.
+    """
     module = _load_launcher_module()
     monkeypatch.setitem(sys.modules, "uvicorn", _fake_uvicorn())
     data_dir = tmp_path / "data"
@@ -1106,3 +1126,140 @@ def test_flashcard_alias_fails_closed_without_venv(tmp_path: Path) -> None:
     )
     assert proc.returncode != 0
     assert "repository virtualenv is missing" in proc.stderr
+
+
+def test_cli_online_with_custom_manifest_exits_2(
+    tmp_path: Path, synthetic_dict: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slice 12 / ADR-0009: ``--dictionary-mode online --manifest CUSTOM``
+    is a contradictory combination. The launcher must exit 2 BEFORE
+    network, provider activation, Offline install, or PART-B mutation.
+    """
+    monkeypatch.setitem(sys.modules, "uvicorn", _fake_uvicorn())
+    module = _load_launcher_module()
+    data_dir = tmp_path / "data"
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, filename="dictionary.sqlite", dictionary=synthetic_dict)
+    with pytest.raises(SystemExit) as exc_info:
+        module.main([
+            "--data-dir",
+            str(data_dir),
+            "--dictionary-mode",
+            "online",
+            "--manifest",
+            str(manifest_path),
+            "--no-browser",
+        ])
+    assert exc_info.value.code == 2
+
+
+def test_cli_online_with_dict_path_exits_2(
+    tmp_path: Path, synthetic_dict: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slice 12 / ADR-0009: ``--dictionary-mode online --dict-path PATH``
+    is a contradictory combination; launcher exits 2 BEFORE any
+    network or provider action.
+    """
+    monkeypatch.setitem(sys.modules, "uvicorn", _fake_uvicorn())
+    module = _load_launcher_module()
+    data_dir = tmp_path / "data"
+    with pytest.raises(SystemExit) as exc_info:
+        module.main([
+            "--data-dir",
+            str(data_dir),
+            "--dictionary-mode",
+            "online",
+            "--dict-path",
+            str(synthetic_dict),
+            "--no-browser",
+        ])
+    assert exc_info.value.code == 2
+
+
+def test_cli_online_with_install_dictionary_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slice 12 / ADR-0009: ``--dictionary-mode online --install-dictionary``
+    is a contradictory combination; launcher exits 2 BEFORE any
+    network or provider action.
+    """
+    monkeypatch.setitem(sys.modules, "uvicorn", _fake_uvicorn())
+    module = _load_launcher_module()
+    data_dir = tmp_path / "data"
+    with pytest.raises(SystemExit) as exc_info:
+        module.main([
+            "--data-dir",
+            str(data_dir),
+            "--dictionary-mode",
+            "online",
+            "--install-dictionary",
+            "--no-browser",
+        ])
+    assert exc_info.value.code == 2
+
+
+def test_cli_offline_with_missing_canonical_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit ``--dictionary-mode offline`` with no canonical asset
+    fails closed (it never falls back to Online).
+    """
+    monkeypatch.setitem(sys.modules, "uvicorn", _fake_uvicorn())
+    module = _load_launcher_module()
+    data_dir = tmp_path / "data"
+    with pytest.raises(SystemExit) as exc_info:
+        module.main([
+            "--data-dir",
+            str(data_dir),
+            "--dictionary-mode",
+            "offline",
+            "--no-browser",
+        ])
+    assert exc_info.value.code in (1, 2)
+
+
+def test_launcher_help_exposes_no_online_manifest_or_source_selection(
+    tmp_path: Path,
+) -> None:
+    """Slice 12 C3: Product Online loads ONLY the committed trusted manifest.
+    ``--help`` must expose no custom Online manifest/source selection.
+    """
+    proc = _run_launcher("--help", cwd=tmp_path)
+    assert proc.returncode == 0
+    assert "--online-manifest" not in proc.stdout
+    assert "--online-cache-dir" not in proc.stdout
+    assert "--online-manifest" not in proc.stderr
+    assert "--online-cache-dir" not in proc.stderr
+    # Custom --manifest remains the Offline Developer/Recovery feature.
+    assert "--manifest" in proc.stdout
+    assert "--dictionary-mode" in proc.stdout
+
+
+def test_launcher_rejects_online_manifest_flag(tmp_path: Path) -> None:
+    """Slice 12 C3: ``--online-manifest`` is not a Product flag."""
+    proc = _run_launcher(
+        "--online-manifest",
+        "whatever.json",
+        "--data-dir",
+        str(tmp_path / "data"),
+        "--no-browser",
+        cwd=tmp_path,
+        timeout=10,
+    )
+    assert proc.returncode != 0
+    assert "unrecognized arguments" in proc.stderr or "unrecognized argument" in proc.stderr
+
+
+def test_launcher_rejects_online_cache_dir_flag(tmp_path: Path) -> None:
+    """Slice 12 C3: ``--online-cache-dir`` is not a Product flag."""
+    proc = _run_launcher(
+        "--online-cache-dir",
+        str(tmp_path / "cache"),
+        "--data-dir",
+        str(tmp_path / "data"),
+        "--no-browser",
+        cwd=tmp_path,
+        timeout=10,
+    )
+    assert proc.returncode != 0
+    assert "unrecognized arguments" in proc.stderr or "unrecognized argument" in proc.stderr

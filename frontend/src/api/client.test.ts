@@ -617,4 +617,162 @@ describe('VocabClient', () => {
       );
     });
   });
+
+  describe('Dictionary Settings endpoints (Slice 12 / ADR-0009)', () => {
+    it('executes GET /vocab/settings/dictionary without custom headers', async () => {
+      const captured: CapturedRequest[] = [];
+      const mockFetch = createMockFetch(
+        () => ({
+          status: 200,
+          body: {
+            mode: 'unconfigured',
+            canonical_offline_path: '/data/dictionary/dictionary.sqlite',
+            canonical_offline_present: false,
+            canonical_offline_valid: false,
+            online_active: false,
+          },
+        }),
+        captured,
+      );
+      const client = new VocabClient({ fetch: mockFetch });
+
+      const res = await client.getDictionarySettings();
+
+      assert.strictEqual(res.mode, 'unconfigured');
+      assert.strictEqual(captured[0]?.method, 'GET');
+      assert.strictEqual(captured[0]?.url, '/vocab/settings/dictionary');
+      assert.strictEqual(captured[0]?.headers['X-Flashcards-Request'], undefined);
+    });
+
+    it('executes POST /vocab/settings/dictionary/install-offline with empty body and no source fields', async () => {
+      const captured: CapturedRequest[] = [];
+      const mockFetch = createMockFetch(
+        () => ({
+          status: 202,
+          body: {
+            status: 'started',
+            canonical_offline_path: '/data/dictionary/dictionary.sqlite',
+            trusted_bytes: 945418240,
+          },
+        }),
+        captured,
+      );
+      const client = new VocabClient({ fetch: mockFetch });
+
+      const res = await client.installOffline();
+
+      assert.strictEqual(res.status, 'started');
+      assert.strictEqual(captured[0]?.method, 'POST');
+      assert.strictEqual(captured[0]?.url, '/vocab/settings/dictionary/install-offline');
+      assert.strictEqual(captured[0]?.headers['X-Flashcards-Request'], '1');
+      assert.strictEqual(captured[0]?.headers['Content-Type'], 'application/json');
+      // The browser never supplies a source: no URL, manifest, SHA, or filename.
+      const body = captured[0]?.body as Record<string, unknown>;
+      assert.ok(!('download_url' in body));
+      assert.ok(!('manifest_bytes' in body));
+      assert.ok(!('filename' in body));
+      assert.ok(!('sha256' in body));
+    });
+
+    it('executes POST /vocab/settings/dictionary/remove-offline with empty body and no filename', async () => {
+      const captured: CapturedRequest[] = [];
+      const mockFetch = createMockFetch(
+        () => ({
+          status: 200,
+          body: {
+            status: 'removed',
+            detail: 'offline_removal_succeeded',
+            canonical_offline_path: '/data/dictionary/dictionary.sqlite',
+          },
+        }),
+        captured,
+      );
+      const client = new VocabClient({ fetch: mockFetch });
+
+      const res = await client.removeOffline();
+
+      assert.strictEqual(res.status, 'removed');
+      assert.strictEqual(captured[0]?.method, 'POST');
+      assert.strictEqual(captured[0]?.url, '/vocab/settings/dictionary/remove-offline');
+      assert.strictEqual(captured[0]?.headers['X-Flashcards-Request'], '1');
+      assert.strictEqual(captured[0]?.headers['Content-Type'], 'application/json');
+      const body = captured[0]?.body as Record<string, unknown>;
+      assert.ok(!('filename' in body));
+      assert.ok(!('path' in body));
+    });
+
+    it('executes POST /vocab/settings/dictionary/clear-online-cache', async () => {
+      const captured: CapturedRequest[] = [];
+      const mockFetch = createMockFetch(
+        () => ({ status: 200, body: { status: 'cleared' } }),
+        captured,
+      );
+      const client = new VocabClient({ fetch: mockFetch });
+
+      const res = await client.clearOnlineCache();
+
+      assert.strictEqual(res.status, 'cleared');
+      assert.strictEqual(captured[0]?.method, 'POST');
+      assert.strictEqual(captured[0]?.url, '/vocab/settings/dictionary/clear-online-cache');
+      assert.strictEqual(captured[0]?.headers['X-Flashcards-Request'], '1');
+      assert.strictEqual(captured[0]?.headers['Content-Type'], 'application/json');
+    });
+
+    it('executes POST /vocab/settings/dictionary/use-online', async () => {
+      const captured: CapturedRequest[] = [];
+      const mockFetch = createMockFetch(
+        () => ({
+          status: 200,
+          body: {
+            status: 'online',
+            online_info: {
+              dataset_token: 'tok',
+              asset_token: 'asset',
+              cache_dir: '/data/online-cache',
+            },
+          },
+        }),
+        captured,
+      );
+      const client = new VocabClient({ fetch: mockFetch });
+
+      const res = await client.useOnline();
+
+      assert.strictEqual(res.status, 'online');
+      assert.strictEqual(captured[0]?.method, 'POST');
+      assert.strictEqual(captured[0]?.url, '/vocab/settings/dictionary/use-online');
+      assert.strictEqual(captured[0]?.headers['X-Flashcards-Request'], '1');
+      assert.strictEqual(captured[0]?.headers['Content-Type'], 'application/json');
+      // The browser never configures an Online source: no manifest, URL, or host.
+      const body = captured[0]?.body as Record<string, unknown>;
+      assert.ok(!('manifest' in body));
+      assert.ok(!('download_url' in body));
+      assert.ok(!('url' in body));
+      assert.ok(!('host' in body));
+    });
+
+    it('executes POST /vocab/settings/dictionary/use-offline', async () => {
+      const captured: CapturedRequest[] = [];
+      const mockFetch = createMockFetch(
+        () => ({
+          status: 200,
+          body: {
+            status: 'offline',
+            asset_token: 'tok',
+            canonical_offline_path: '/data/dictionary/dictionary.sqlite',
+          },
+        }),
+        captured,
+      );
+      const client = new VocabClient({ fetch: mockFetch });
+
+      const res = await client.useOffline();
+
+      assert.strictEqual(res.status, 'offline');
+      assert.strictEqual(captured[0]?.method, 'POST');
+      assert.strictEqual(captured[0]?.url, '/vocab/settings/dictionary/use-offline');
+      assert.strictEqual(captured[0]?.headers['X-Flashcards-Request'], '1');
+      assert.strictEqual(captured[0]?.headers['Content-Type'], 'application/json');
+    });
+  });
 });

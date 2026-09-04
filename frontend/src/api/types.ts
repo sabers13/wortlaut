@@ -330,3 +330,77 @@ export interface DeleteDeckResponse {
   id: number;
   deleted: boolean;
 }
+
+export type DictionaryMode = 'offline' | 'online' | 'unconfigured';
+
+export interface DictionarySettingsInfo {
+  mode: DictionaryMode;
+  canonical_offline_path: string;
+  canonical_offline_present: boolean;
+  canonical_offline_valid: boolean;
+  online_active: boolean;
+  online_info?: {
+    dataset_token: string;
+    asset_token: string;
+    cache_dir: string;
+  };
+  server_owned_offline_install?: boolean;
+  install_progress?: {
+    status: string;
+    downloaded_bytes: number;
+    total_bytes: number | null;
+    percent: number;
+    started_at: string | null;
+    finished_at: string | null;
+    error: string;
+  };
+}
+
+export interface InstallOfflineRequest {
+  // The browser never supplies a source. The server uses its trusted
+  // Offline install triple (version, filename, SHA-256, bytes,
+  // download_url) derived from release/dictionary-manifest-v2.json.
+  // This interface is intentionally empty.
+  [key: string]: never;
+}
+
+export interface InstallOfflineResponse {
+  status: string;
+  canonical_offline_path?: string;
+  sha256?: string;
+  byte_size?: number;
+  measured_bytes?: number;
+  safety_threshold_bytes?: number;
+}
+
+export interface RemoveOfflineRequest {
+  // The browser never supplies a filename. The server removes exactly
+  // the managed canonical asset derived from its trusted triple.
+  // This interface is intentionally empty.
+  [key: string]: never;
+}
+
+export interface RemoveOfflineResponse {
+  status: string;
+  detail: string;
+  canonical_offline_path?: string;
+}
+
+export interface ClearOnlineCacheResponse {
+  status: string;
+}
+
+export interface UseOnlineResponse {
+  status: 'online';
+  online_info: {
+    dataset_token: string;
+    asset_token: string;
+    cache_dir: string;
+  };
+}
+
+export interface UseOfflineResponse {
+  status: 'offline';
+  asset_token?: string;
+  canonical_offline_path?: string;
+}
