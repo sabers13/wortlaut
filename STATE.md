@@ -11,92 +11,89 @@ Updated only at session CLOSE from repository/gate evidence.
   (945418240 bytes). The existing `dictionary-v2` Release remains unchanged.
 
 * **ADR-0008 remains terminally NON-CONVERGENT / BLOCKED.**
-  Its three-review lineage is permanently closed. `tasks/slice-10.md` is
+  Its three-review lineage is permanently closed. `tasks/slice-10.md` remains
   immutable historical evidence. No review #4 is permitted.
 
-* **ADR-0009 is ACCEPTED / FROZEN.**
-  Cold review #2 approved the materially simpler session-scoped Online
-  dictionary architecture. No ADR-0009 cold review #3 is required.
+* **ADR-0009 remains ACCEPTED / FROZEN.**
+  Cold review #2 approved the session-scoped Online/Offline dictionary
+  architecture. No ADR-0009 cold review #3 is required.
 
-* **slice-0 through slice-8 are accepted, merged and closed.**
-  They established the repository/gates, dictionary and build pipeline,
-  standalone runtime/API, browser product, capture/import/export flows,
-  user-state safety, rendering/audio/review behavior, and agent-efficiency
-  module infrastructure.
+* **slice-0 through slice-8 remain accepted, merged and closed.**
 
-* **Slice 11 is ACCEPTED, INDEPENDENTLY REVIEWED, MERGED AND CLOSED.**
+* **Slice 11 remains ACCEPTED, INDEPENDENTLY REVIEWED, MERGED AND CLOSED.**
+  It provides the Online dictionary provider infrastructure, deterministic
+  routing/shards, fixed Product GitHub Release trust boundary, verified cache
+  leases, operation budget, builder and Local/Online differential contract.
+
+* **Slice 12 is ACCEPTED, INDEPENDENTLY REVIEWED, MERGED AND CLOSED.**
   Reviewed code candidate:
-  `ad5d05330a2196d35c33858cf234896cba831247`.
+  `34d627912562a15e3c7852abc46fdd1aa4a98956`.
 
-  Slice 11 adds the ADR-0009 provider-level Online dictionary infrastructure:
-  `DictionaryProvider`, Local and Online providers, exact deterministic
-  lookup/entry/example routing, manifest validation, scalable Bloom membership
-  filtering, trusted fixed-repository GitHub Release transport, verified
-  immutable shard cache leases, single-flight failure propagation, clear-cache
-  coordination, the 32-new-remote-lookup-shard operation budget, deterministic
-  256 lookup / 256 entry / 64 example / 1 membership-filter builder topology,
-  and Local-vs-Online differential evidence.
+  Slice 12 adds the complete session-scoped dictionary product:
+  explicit Online/Offline CLI selection; true no-dictionary chooser state;
+  trusted Product Online activation only on user choice; Settings switching;
+  hardened full Offline install with conservative free-space preflight and real
+  progress; exact managed Offline removal; concurrency-safe Online-cache clear;
+  restart-after-removal behavior; and full served-product migration onto the
+  accepted `DictionaryProvider` contract.
 
-  No startup chooser, Settings product behavior, persisted dictionary-mode
-  preference, production Online corpus, or Online GitHub Release was created.
+  Online mode now covers lookup, highlight, CSV import, candidate
+  materialization, card creation, card rendering/study and export paths without
+  a full local dictionary. Browser/API callers cannot configure dictionary
+  source URLs, manifests, repositories, hosts, hashes or paths.
+
+  Dictionary mode remains process/session-only. No `online`, `offline` or
+  `unconfigured` application preference is persisted.
 
   Required independent full-diff risk review:
   **PASS WITH NON-BLOCKING NOTES — 0 BLOCKERS**.
   `HISTORY_ACCEPTABLE`; `PROPORTIONATE`.
-  There is no additional Slice-11 review.
+  No second broad Slice-12 review is required.
 
-* **Slice-11 review carry-forward is NON-BLOCKING.**
-  Slice 12 should account for the two implementation-adjacent observations while
-  performing its already-required provider migration:
-  (1) project provider hit types use `lemma_id` while resolver records use `id`,
-  so use a mechanical adapter;
-  (2) make Online surface lookup follow Local surface-only semantics rather than
-  allowing the lemma-table pre-query to suppress a valid surface fallback.
-  The remaining reviewer observations are optional test/documentation/cache
-  refinements and are not blockers.
+  Reviewer notes about dead `_ConnectionLookupOracle` code, repeated mini-corpus
+  test construction, and the 120-second progress polling ceiling are explicitly
+  NON-BLOCKING and require no Slice-12 follow-up.
+
+  No production Online corpus or `dictionary-online-v2` Release was created by
+  Slice 12. The existing `dictionary-v2` Release remains unchanged.
 
 ## Gate
 
-* Slice-11 exact reviewed code candidate
-  `ad5d05330a2196d35c33858cf234896cba831247`:
-  PASS — `ruff` clean; `mypy --strict` clean on 60 source files;
-  971 pytest passed; AGENTS R1/R3/R6/R7/R12/R13 PASS;
-  MODULES validation PASS for 22 modules.
+* Slice-12 reviewed code candidate
+  `34d627912562a15e3c7852abc46fdd1aa4a98956`:
+  PASS — frontend unit tests 47 passed; Playwright 25 passed, 0 failed;
+  `ruff` clean; `mypy --strict` clean on 63 source files;
+  1002 pytest passed; AGENTS R1/R3/R6/R7/R12/R13 PASS;
+  MODULES validation PASS for 23 modules; final `make gate` exited 0.
 
-* Focused Slice-11 final evidence:
-  transport 32 passed; cache 15 passed; differential 42 passed;
-  builder 9 passed; manifest 22 passed; routing 30 passed.
+* Mechanical provider-bypass check on the reviewed candidate:
+  `app/api.py` contains zero
+  `_current_generation.asset.connection` product dictionary-read uses.
 
-* Independent reviewer reruns:
-  routing + manifest 52 passed; builder + cache 24 passed;
-  exact/folded lookup closure spot-check PASS.
-
-* Final merged-main gate after the Slice-11 merge and this STATE commit:
+* Final merged-main gate after the Slice-12 merge and this STATE commit:
   see `handoff/main-gate.txt`.
 
 ## Escalation status
 
 * none active.
-* Slice 11 used one implementation lineage followed by bounded
-  orchestrator-directed corrections before its single required independent
-  risk review. The independent review passed with zero blockers; no additional
-  review/repair cycle is open.
+* Slice 12 used one implementation lineage with bounded
+  orchestrator-directed pre-review corrections and validation-blocker repairs,
+  followed by exactly one independent full-diff risk review.
+  That review passed with zero blockers. No further Slice-12 review or repair
+  cycle is open.
 
 ## Sessions since last audit
 
-* 3
+* 4
 
 ## Blocked
 
-* **Slice 12 is no longer blocked by Slice 11.**
-  Its declared dependencies — ADR-0009 accepted/frozen and Slice 11
-  accepted/merged — are satisfied after this closure. It is the next feature
-  slice.
+* **Slice 13's dependency on Slice 12 is satisfied after this closure.**
+  Slice 13 is the publication-only production corpus/release stage.
+  Its implementation may not publish anything until the owner explicitly
+  authorizes the consequential production publication action.
 
-* **Slice 13 remains blocked on accepted and merged Slice 12.**
-  Slice 13 is publication-only. Production Online shard generation and GitHub
-  Release publication remain prohibited until Slice 12 is accepted/closed and
-  publication is explicitly authorized.
+* The existing `dictionary-v2` Release must not be modified by Slice 13.
 
 * ADR-0008 / Slice-10 remain terminal historical evidence.
 
@@ -107,15 +104,17 @@ Updated only at session CLOSE from repository/gate evidence.
 
 ## Next three actions
 
-1. Open a fresh Slice-12 orchestration session against the final pushed `main`.
-   Do not perform another Slice-11 review. Slice 12 owns session-only
-   Online/Offline startup, chooser/Settings, full `app/api.py` provider
-   migration, deterministic Online-fixture E2E, and the two relevant
-   non-blocking Slice-11 carry-forward items recorded above.
+1. Open a fresh Slice-13 orchestration session against the final pushed `main`.
+   Do not perform another Slice-12 review. Verify normal startup state,
+   dependencies and audit triggers.
 
-2. After Slice 12 is accepted and mechanically closed, Slice 13 may be prepared
-   as the publication-only production corpus/release stage. Production
-   publication remains a separate consequential authorization.
+2. Before any production build/upload/release action, obtain explicit owner
+   authorization for Slice 13 publication. Then execute only
+   `tasks/slice-13.md`: build and validate the production 577-asset Online
+   corpus from the verified v2 dictionary, enforce the release-asset ceiling,
+   publish the separate `dictionary-online-v2` Release, and anonymously verify
+   the Product trust path. Never modify `dictionary-v2`.
 
-3. Slice 9 / compose integration remains independent and should resume only
-   after its existing lecture-app/donor prerequisites are satisfied.
+3. After successful Slice-13 publication and final real end-user Online +
+   Offline verification, declare the standalone Online/Offline Wortlaut product
+   complete. Lecture-app compose integration remains a separate later project.
