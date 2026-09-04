@@ -295,11 +295,14 @@ git diff --check                                          (clean)
 .venv/bin/pytest tests/test_build_online_dictionary.py -q  (9 passed)
 ```
 
-Final candidate SHA (will be filled by the commit):
+Final candidate SHA (committed and pushed):
 
 ```
-SLICE13_PREPUBLICATION_CANDIDATE_SHA=<pending>
+SLICE13_PREPUBLICATION_CANDIDATE_SHA=eaa8d4c7c207308946fa84b6db8edf865eb2f298
 ```
+
+`origin/slice/13` points at the same SHA (push-verified).
+`origin/main` is unchanged (`5a9e18076fa412c4096766a1b000ee99a63782ad`).
 
 ## Final state
 
