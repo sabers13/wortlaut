@@ -78,8 +78,8 @@ from app.online_manifest import (
     LOOKUP_FAMILY_SIZE,
     SHARD_FAMILY_FILTER,
     OnlineManifest,
-    load_manifest,
     manifest_hash,
+    parse_manifest,
 )
 from app.provider import (
     DictionaryProvider,
@@ -887,7 +887,7 @@ def run_local_verification(
         report = DiffReport(mode="local", started_at=started)
 
     manifest_text = manifest_path.read_text()
-    manifest = load_manifest(manifest_text)
+    manifest = parse_manifest(manifest_text)
     if cache_dir is None:
         cache_dir = Path(tempfile.mkdtemp(prefix="wortlaut-verify-cache-"))
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1404,7 +1404,7 @@ def run_public_verification(
         )
     )
 
-    manifest = load_manifest(manifest_path.read_text())
+    manifest = parse_manifest(manifest_path.read_text())
     report.add(
         CaseResult(
             name="manifest_dataset_token",

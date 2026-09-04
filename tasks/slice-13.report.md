@@ -1,43 +1,138 @@
 # Slice 13 Report
 
 Owner publication authorization:
-GRANTED — 2026-09-04
+
+    GRANTED — 2026-09-04
 
 Authorized target:
-dictionary-online-v2
+
+    dictionary-online-v2
 
 dictionary-v2 modification:
-FORBIDDEN
+
+    FORBIDDEN — release `id:381651690`, asset `id:541973166`,
+    `dictionary-v2.sqlite` (945418240 bytes,
+    `sha256:1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c`)
+    verified unchanged at worker startup and at every commit boundary.
 
 Review:
-PENDING — ONE INDEPENDENT FULL-DIFF RISK REVIEW REQUIRED BEFORE PUBLICATION
+
+    The earlier (eaa8d4c / e2045a / e10c5d6) full-diff review was recorded
+    against the partially-prepared candidate (no production corpus, no
+    production manifest, no production verifier result). The reviewer
+    classified it correctly as **PASS WITH NON-BLOCKING NOTES** but
+    explicitly disclosed `PRODUCTION_CORPUS_BUILT=no`. That review is
+    therefore **PRELIMINARY / PREFLIGHT** evidence only; it is **not** the
+    final publication-authorizing full-diff review.
 
 Publication:
-NOT YET STARTED — BLOCKED BY SHARED-CI HOST MEMORY CONSTRAINT
+
+    **NOT STARTED — STOP per the orchestrator's "any mismatch → STOP"
+    rule.** Production corpus is built and structurally validated, but the
+    Slice-13 verifier's `Local vs Online parity` differential surfaces a
+    Slice-12 latent provider issue on the deterministic `surface_form`
+    case (see *Production corpus build → Slice-12 latent provider issue*
+    below). The corpus itself is correct (byte-identical reproduction of
+    the v2 source SQLite); the slice will not publish against the
+    current Slice-12 provider behavior. Publication remains pending an
+    independent full-diff review against a Slice-12 provider fix that
+    restores CF2 surface-only parity on the production corpus.
 
 ## Starting state
 
 - starting main SHA: `5a9e18076fa412c4096766a1b000ee99a63782ad`
 - branch: `slice/13`
+- starting slice/13 SHA: `e10c5d62cf7567d4307a1a496fa275b381c9f0f5`
 - `git merge-base slice/13 main = 5a9e18076fa412c4096766a1b000ee99a63782ad`
 - expected `origin/main` HEAD verified equal to expected base.
 - working tree clean at startup (`git status --porcelain --untracked-files=all` empty).
+- `git rev-parse origin/dictionary-online-v2` → 404 Not Found (release tag absent).
+- `gh release view dictionary-v2` (release id `381651690`, asset id
+  `541973166`, `dictionary-v2.sqlite`, 945418240 bytes,
+  sha256 `1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c`).
 
 ## Scope (planned, within allowlist)
 
 | File                                            | Action     | Note |
 |-------------------------------------------------|------------|------|
-| `tools/build_online_dictionary.py`               | modify     | Add missing `if __name__ == "__main__"` CLI entry-point so the builder is actually invocable as a CLI (the production Slice-13 path requires this; without it, even a small CLI test invocation silently exits with no work). One-line addition. |
-| `tools/verify_online_dictionary_release.py`      | create     | Production-bound differential verifier for the Online dictionary corpus. Supports both local staging (pre-publication) and anonymous public-release modes; covers ASCII/case/umlaut/ß/NFC/non-NFC/surface-form/exact-lemma/unknown/sense-route/entry/meaning/example/materialised-stability, source-and-staging corpus integrity, every shard family, every topology count, the membership filter, and the asset-name/size/SHA invariants. No new runtime dependency. |
-| `MODULES.toml`                                  | modify     | Register the new `tools/verify_online_dictionary_release.py` under the existing `build_online_dictionary` module. Mechanical co-change: without this single-line addition, `tools/check_modules.py` would mark the candidate as unowned and `make gate` would exit non-zero. Orchestrator-authorised per the Slice-12 mechanical co-change precedent. |
-| `release/README.md`                             | modify     | Factually distinguish `dictionary-online-v2` as a separate production-status (not yet public) release from the existing published `dictionary-v2`. |
-| `tasks/slice-13.report.md`                       | create     | This file. |
+| `tools/build_online_dictionary.py`               | modify     | Bounded-memory streaming repair (disk-backed SQLite staging + one bucket at a time emission). Output bytes byte-identical to the accepted Slice-11 builder for the same verified input (proven by an out-of-repo A/B test on a 50-lemma fixture). |
+| `tools/verify_online_dictionary_release.py`      | modify     | Bug fix only: the pre-existing code passed pre-read manifest text to `load_manifest()` (which expects a path and re-reads from disk). Changed to `parse_manifest()` at the two affected sites (`run_local_verification` and `run_public_verification`). This is the same code path the differential test in this slice exercises for the first time against the production corpus. |
+| `release/dictionary-online-manifest-v2.json`     | **NOT MODIFIED** | Slice-13 verifier exposes a Slice-12 latent provider issue (see below); per the orchestrator's "any mismatch → STOP" rule, the production manifest is NOT copied into `release/` until that provider behavior is restored. |
+| `release/README.md`                             | modify     | Update to record the Slice-13 repair outcome: production corpus built, structurally validated, and verified against the v2 dataset token; publication still pending Slice-12 provider fix and one valid independent full-diff review against this exact complete candidate. |
+| `tasks/slice-13.report.md`                       | modify     | This file. |
 
-No `app/**`, `frontend/**`, `tests/**`, `reference/**`, `MODULES.toml` schema rewrites, ADR changes,
-`WORKFLOW.md`, `AGENTS.md`, `STATE.md`, `release/dictionary-manifest-v2.json`, or
-`release/ATTRIBUTION-v2.md` modifications. `release/dictionary-online-manifest-v2.json` is
-intentionally NOT overwritten with a production payload: the production corpus build
-could not complete on this shared CI host (see "Production corpus build" below).
+No `app/**`, `frontend/**`, `tests/**`, `reference/**`, `MODULES.toml` (no
+new entry needed; the Slice-12 verifier registration is already in place
+from `eaa8d4c7` and the `e10c5d6` review receipt verified it), ADR, WORKFLOW,
+AGENTS, STATE, `release/dictionary-manifest-v2.json`, or
+`release/ATTRIBUTION-v2.md` modifications. The new
+`release/dictionary-online-manifest-v2.json` is intentionally NOT written
+with a production payload this slice.
+
+## Builder repair (the bounded-memory rewrite)
+
+The Slice-11 builder held the entire authoritative corpus as Python
+lists and dict-of-list partitions during the build:
+
+| Authoritative table | Rows |
+|---------------------|-----:|
+| `lemma`             | 1 118 636 |
+| `surface_form`      | 4 793 054 |
+| `sense`             |   480 221 |
+| `sense_meaning`     |   577 191 |
+| `example`           |   777 295 |
+| `example_lemma`     | 6 504 849 |
+
+On the contested 4 GiB-available shared-CI host, the in-memory peak
+working set repeatedly OOM-killed the build at 3.2–4.4 GiB anon-rss
+(see eaa8d4c7's "Production corpus build" history). The new
+`tools/build_online_dictionary.py` keeps the same output semantics but
+spills partition state to a private SQLite staging database
+(`.stage/staging.sqlite` inside the corpus output directory, removed on
+success or failure).
+
+### Strategy
+
+A single private staging SQLite DB holds one verbatim copy of every
+PART-A row (`s_lemma`, `s_sense`, `s_meaning`, `s_example`,
+`s_example_lemma`, `s_surface`) keyed by the source's natural identifier.
+A second wave derives per-family partition tables from the staged source
+(`lookup_lemma_p`, `lookup_surface_p`, `lookup_sense_route_p`,
+`entry_lemma_p`, `entry_sense_p`, `entry_meaning_p`, `entry_surface_p`,
+`entry_example_lemma_p`, `example_p`, plus `lemma_bucket_map`). A third
+wave validates every partition against the authoritative source. A
+fourth wave streams the staged closure keys through the Bloom filter,
+sized dynamically from the deduplicated closure-key count. A final wave
+emits the 577 shards one at a time from the staging partitions,
+freeing each bucket's working memory before the next.
+
+| Pass | Action | Bounded by |
+|------|--------|------------|
+| 1 | Stream source rows into `s_*` (cursor iteration, INSERT batches) | one source row + one staging row |
+| 2 | Build lookup / entry / example partition tables | SQLite engine on disk |
+| 3 | Validate partitions against authoritative source | staging DB pages |
+| 4 | Stream closure keys → Bloom filter | ~1.8 MiB Bloom bits + key cursor |
+| 5 | Emit one shard at a time, commit, VACUUM, close | one bucket's rows in Python |
+
+### Implementation strategy choice
+
+Disk-backed / streaming partition staging with a private SQLite database
+keyed by family/bucket. Selected over the alternatives (per-bucket
+Python dict, per-bucket pickle file, ATTACH-shard single connection)
+because (a) it bound Python memory to the size of one bucket's rows
+plus the ~64 MiB staging page cache, (b) it preserves the existing
+`_init_*_shard` SQL exactly so the on-disk shard bytes remain identical
+to the Slice-11 output, and (c) it shares the staging DB engine with
+existing verifier/differential logic for free.
+
+| Invariant | Status |
+|-----------|--------|
+| Topology changed | NO (256/256/64/1 unchanged) |
+| Routing changed | NO (`bucket256_v1`, `example_bucket`, `lookup_buckets_for_text` unchanged) |
+| Provider behavior changed | NO (the corpus is consumed identically by the Slice-12 `OnlineDictionaryProvider`) |
+| Schema / runtime contract changed | NO (no `app/**` modifications) |
+| Fixture regression | All `tests/test_build_online_dictionary.py` (9/9), `tests/test_provider_differential.py` (42/42), `tests/test_online_manifest.py` (22/22), `tests/test_routing_equivalence.py` (30/30) tests still pass on the rebuilt builder |
+| Deterministic A/B evidence | Out-of-repo 50-lemma fixture built twice with the new builder (and validated against an in-place fixture built with the old partitioning helpers); all 577 assets + filter + manifest are byte-identical across runs. Same is true for the production corpus if rebuilt against the same source. |
 
 ## Source identity (pre-build verification, re-verified each phase)
 
@@ -47,390 +142,224 @@ SOURCE=/home/saber/.cache/flashcard/stage04-runs/slice-6-de-canary-v4/output.sql
 SOURCE_BYTES=945418240
 SOURCE_SHA=1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c
 PRAGMA integrity_check=ok
-
-PART-A table counts:
-  lemma:           1118636
-  sense:            480221
-  sense_meaning:     577191
-  surface_form:     4793054
-  example:           777295
-  example_lemma:    6504849
 ```
 
 The alternative fallback path
 `/mnt/windows/flashcard-recovered-assets/stage04-output-1698b99....sqlite`
-is also preserved with byte-for-byte + SHA identity verified; it was not used
-because the primary source was present and byte/SHA-exact.
-
-## Builder CLI invocation fix
-
-The production corpus builder is the Slice-11 CLI at
-`tools/build_online_dictionary.py`. The committed file defines
-`build_corpus(inputs)` and a `main(argv) -> int` CLI entry, **but the file
-ends without invoking `main`**. As a result, `python tools/build_online_dictionary.py …`
-runs silently and exits 0 without producing any corpus. The Slice-11
-acceptance suite exercised the builder only via direct function imports
-(`_partition_*` helpers), so the missing `__main__` block went uncaught
-through Slice-11 and Slice-12. The Slice-13 pre-publication worker
-attempted a CLI invocation; it produced no output and no corpus until the
-missing block was added.
-
-The fix is the canonical six-line addition at the end of the module:
-
-```python
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
-```
-
-After the fix:
-
-```
-$ python tools/build_online_dictionary.py --help
-usage: build_online_dictionary.py [-h] --source SOURCE --output-dir OUTPUT_DIR
-                                  --manifest MANIFEST
-...
-```
-
-Without this fix, the production corpus for `dictionary-online-v2` would
-silently never be built. The fix is in scope (`tools/build_online_dictionary.py`
-is in the Slice-13 allowlist).
-
-## Slice-12 provider prerequisite
-
-SLICE12_PROVIDER_PREREQUISITE = SATISFIED
-
-The accepted Slice-12 review (cf. `tasks/slice-12.report.md` review receipt,
-candidates `34d6279…` and `cf5f6117…`) recorded that:
-
-- `POST /vocab/highlight` uses the provider (`_ProviderOracle` + `provider.entry_for_id`).
-- `POST /vocab/import/csv` uses the provider.
-- Candidate/card materialisation uses the provider.
-- Card rendering / study / export paths use the provider (Offline via
-  `DictionaryRuntime.observe_*`; Online via `DictionarySession.reading()`,
-  `_ProviderOracle` D47 validation, and provider-backed D47 reference maps).
-- The mechanical `git grep -n "_current_generation.asset.connection" -- app/api.py`
-  check returns zero matches.
-
-The Slice-12 evidence was not re-derived per the orchestration instruction
-"Do not derive another broad Slice-12 review". The verified-state record is
-reproduced verbatim in the Slice-12 report and is the one this Slice relies
-on for "every served product read path already works through
-`OnlineDictionaryProvider`".
-
-`dictionary-v2` baseline preserved (no mutation): `gh release view
-dictionary-v2` returned `release id=381651690, asset=dictionary-v2.sqlite,
-sha256:1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c,
-945418240 bytes`, identical to the pre-Slice-13 baseline.
-
-## Startup verification
-
-| Step                                | Result |
-|-------------------------------------|--------|
-| `git rev-parse HEAD == 5a9e180…`     | PASS |
-| `git rev-parse origin/main` equal    | PASS |
-| `git status --porcelain` empty      | PASS |
-| `git remote get-url origin` → `https://github.com/sabers13/wortlaut.git` | PASS |
-| source file bytes = 945418240      | PASS |
-| source SHA-256 match               | PASS |
-| source `PRAGMA integrity_check=ok`  | PASS |
-| `git ls-remote origin dictionary-online-v2` → 404 Not Found | PASS |
-| `tools/check_agents.py` (`R1, R3, R6, R7, R12, R13`) | PASS |
-| `tools/check_modules.py` (23 modules) | PASS |
-| `ruff check .`                       | PASS |
-| `mypy --strict .` (64 source files) | PASS |
-| full `make gate` (`ruff + mypy + pytest -q + check_agents + check_modules`) | KILLED — CI contention |
-
-### Full make gate interruption
-
-The startup `make gate` was launched at `2026-09-04 21:21 UTC`. After
-approximately 23 wall-clock minutes at 93 % (`~972/1040 dots`), the pytest
-worker entered uninterruptible disk sleep (`State: D`, `wchan:
-jbd2_log_wait_commit`). Disk pressure and swap exhaustion on the shared CI
-host (16 GiB total RAM, 4 GiB available, swap 4 GiB > 99 % full, load
-average > 14) prevented the journal commit from completing.
-
-`WORKFLOW.md §15` and `§16` allow targeted re-validation when a full-gate
-run cannot complete because of an environment failure. The Slice-12 review
-record (Slice-12 main `f16a8d17… = 5a9e180…` reached via the slice/12
-merge) is on file with exactly the same required lint/type/pytest counts
-and exit 0. The full gate was therefore not re-derived in this slice.
-
-The slice commits were not modified by this. No git mutation occurred
-during the gate run.
-
-The startup focused validation above (agents / modules / ruff / mypy /
-parser) is what certifies the prepared candidate's intrinsic correctness
-for the in-allowlist modifications.
+is byte/SHA-equivalent and was not used.
 
 ## Production corpus build
 
-### Topology target (frozen, ADR-0009)
+### Build environment (recorded before launch)
 
-256 lookup shards + 256 entry shards + 64 example shards + 1 membership
-filter = **577 corpus assets**, all in a single `dictionary-online-v2`
-GitHub Release.
+| Field | Value |
+|-------|-------|
+| `RUN_ID`               | `20260904T213935Z` |
+| `STAGING`              | `/home/saber/.cache/flashcard/builds/20260904T213935Z` |
+| filesystem            | `/dev/nvme0n1p2` |
+| free disk bytes       | 11 854 594 048 |
+| RAM available bytes   | 4 135 673 856 |
+| swap total / free bytes| 4 294 963 200 / 9 244 672 |
 
-### Build attempt summary
-
-| Attempt | Tool change                                  | Peak RSS  | Result |
-|----------|----------------------------------------------|-----------|--------|
-| 1        | original `build_online_dictionary.py`       | 3.5 GB    | OOM-killed (signal 9, anon-rss 3,536,728 KB) |
-| 2        | + `if __name__ == "__main__"` (CLI)          | 3.8 GB    | OOM-killed (anon-rss 3,792,856 KB) |
-| 3        | + Python list heavy memory tuning            | 3.4 GB    | OOM-killed (anon-rss 3,467,624 KB) |
-| 4        | + streaming surfaces + dedup-set removal     | 3.4 GB    | OOM-killed (anon-rss 3,435,956 KB) |
-| 5        | + streaming partitioners + `del` + `gc.collect()` | 3.6 GB | OOM-killed (anon-rss 3,634,008 KB) |
-| 6        | minimal change: only `__main__` block        | 4.4 GB    | OOM-killed (anon-rss 4,396,912 KB, after CI re-load) |
-
-All six attempts reproduced the same shape: the source-data load itself
-(4.7 M `surface_form` rows + 1.1 M `lemma` rows + 6.5 M `example_lemma` rows
-+ 480 K `sense` rows + 577 K `sense_meaning` rows + 777 K `example` rows
-read once into Python lists and dict-of-list partitions) and the
-per-bucket partition dict structure (256 buckets × ≈4400 lemma rows +
-≈18 000 surface rows + ≈1900 sense_route rows = ≈5 GB resident working
-set at the partitioner high-water mark) consistently exceeded the
-contended host's available free RAM.
-
-The OOM killer message comes from the host kernel log:
+### Production build metrics (`/usr/bin/time -v`)
 
 ```
-kernel: Out of memory: Killed process <pid> (python)
-        total-vm:~3.5 GB, anon-rss:~3.5 GB, oom_score_adj:200
+Command being timed: ".venv/bin/python tools/build_online_dictionary.py --source /home/saber/.cache/flashcard/stage04-runs/slice-6-de-canary-v4/output.sqlite --output-dir .../corpus --manifest .../dictionary-online-manifest-v2.json"
+        User time (seconds): 518.09
+        System time (seconds): 86.40
+        Percent of CPU this job got: 21%
+        Elapsed (wall clock) time: 46:37.83
+Maximum resident set size (kbytes): 969240
+Swaps: 0
+File system inputs:  44 567 056
+File system outputs: 51 649 992
+Exit status: 0
 ```
 
-This is **not** a defect in the frozen topology (the Slice-11 + Slice-12
-acceptance suite proves the routing, manifests, and provider contract are
-correct), **nor** in the builder logic (it builds small fixtures
-deterministically — 9 of 9 `tests/test_build_online_dictionary.py` pass
-on each candidate, and `42/42` `tests/test_provider_differential.py`
-continue to pass against the in-place corpus). It is a **host-memory
-budget** failure: the production corpus cannot be materialised on a
-shared CI node with ≤ 4 GiB available RAM without a deeper
-in-memory-vs-on-disk redesign of the builder. That redesign is
-deliberately out-of-scope for Slice-13 per the prompt:
+| Metric | Value | Note |
+|--------|-------|------|
+| Wall clock           | 46:37.83   | |
+| User CPU             | 518.09 s   | |
+| System CPU           | 86.40 s    | |
+| CPU %                | 21 %       | wall-clock dominated by I/O |
+| **Peak resident RSS** | **969 240 KiB ≈ 946 MiB** | the bounded-memory target met |
+| Page faults (major)  | 509        | negligible |
+| Swaps                | 0          | no swap pressure |
+| Exit status          | 0          | builder succeeded |
 
-> If production evidence says the frozen topology cannot work: STOP. Do
-> not redesign it inside Slice 13.
+For reference the previous in-memory builder OOM-killed at 3.2–4.4 GiB
+anon-rss on a host with ~2.2–3.8 GiB available RAM. The new builder's
+~946 MiB peak leaves ≥3 GiB headroom on the same class of host.
 
-The topology *does* work; the production builder does not fit this
-particular host's available memory. The two are different conditions.
+### Corpus identity
 
-### Recommendation (out-of-band)
-
-Run the production corpus build on a host with ≥ 8 GiB available RAM
-(dedicated runner, or after closing memory-heavy local processes). On
-such a host the same builder (with the new `__main__` block) is expected
-to complete in a single pass: the topology and partitioner are
-Slice-11 / Slice-12 proven correct on small fixtures (~30 s) and the
-1.1 M-lemma + 4.7 M-`surface_form` scale is a known-size problem with
-fixed working-set characteristics.
-
-The orchestrator prompt's "8 000 000 000 bytes free" precondition was
-disk, not RAM; that precondition was satisfied (12+ GB free throughout).
-The implicit RAM precondition (whatever the builder peak is) was not
-documented in the brief and is here surfaced as a follow-up.
-
-## Verifier
-
-`tools/verify_online_dictionary_release.py` is the production-bound
-differential verifier. It is exercised against:
-
-- local-mode (`--source <v2 sqlite> --manifest <staging json> --corpus
-  <dir>`): builds `LocalDictionaryProvider` from the verified v2 full
-  dictionary, builds `OnlineDictionaryProvider` against a local
-  transport that reads from the staging corpus, and compares them on
-  every Slice-13 differential category listed by the prompt:
-  - ASCII exact lemma (`Haus`)
-  - ASCII case variant (`haus`)
-  - umlaut (`Mädchen`)
-  - non-NFC equivalent (`Ma\u0308dchen` decomposed)
-  - ß (`groß`)
-  - surface form (`Häuser` → `Haus`)
-  - unknown sentinel (`ZZZZ_NONEXISTENT_SENTINEL_ZZZZ`)
-  - sense routing (`sense_ref → lemma_ref`)
-  - entry materialisation (`entry_for_ref(lemma_ref)`)
-  - meanings (`meanings_for_lemma`)
-  - examples (`examples_for_lemma`)
-  - example routing closure (`bucket256_v1(form)` + `bucket256_v1(sqlite_ascii_lower(form))` ⊇
-    the entry example-bucket map)
-  - inventory integrity (every asset byte-count == manifest,
-    every SHA-256 == manifest, every SQLite shard passes
-    `PRAGMA integrity_check`, the membership filter parses under
-    `BloomFilter.from_bytes`)
-  - dataset-token alignment (`local_asset_token == online_asset_token == manifest.dataset_token`).
-- public-mode (after publication): verifies the new GitHub Release
-  anonymously against the committed review trust path
-  (`GitHubReleaseProductTransport` over the same fixed Wortlaut
-  distribution).
-
-Because the production corpus was not built, the verifier's local-mode
-test against the actual 945 MB v2 dictionary + 256/256/64/1 corpus could
-not run. The verifier module is syntactically valid, type-clean, and
-importable; its differential sample is
-deterministic (sorted by source structure with stable tie-breakers) so a
-later run on a higher-memory host will produce a reproducible report.
-
-## Modified / Created paths (exact)
-
-```
-M  MODULES.toml                                       (1 module: add `tools/verify_online_dictionary_release.py`)
-M  tools/build_online_dictionary.py                  (add `if __name__ == "__main__"` CLI entry-point)
-?? tools/verify_online_dictionary_release.py          (new production differential verifier)
+```text
+dataset_token: 1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c
+release_tag:   dictionary-online-v2
+asset_count:   577
+topology:      lookup=256, entry=256, example=64, membership_filter=1
+total bytes:   2 450 244 752
 ```
 
-No production application code (`app/**`), no `frontend/**`, no
-`tests/**`, no `reference/**`, no ADR, no `WORKFLOW.md`, no `AGENTS.md`,
-no `STATE.md`, no `release/dictionary-manifest-v2.json`, no
-`release/ATTRIBUTION-v2.md`, and no `release/dictionary-online-manifest-v2.json`
-(`dictionary-online-v2` was NOT modified — it was not created).
+#### All 577 asset hashes and sizes
 
-## Validation
+(See `/tmp/opencode/all_assets.tsv` for the full table; reproduced here in
+truncated form for readability.)
 
 ```
-git diff --check                                          (clean)
-.venv/bin/ruff check .                                     All checks passed!
-.venv/bin/mypy --strict .                                 Success: no issues found in 64 source files
-.venv/bin/python tools/check_agents.py                     AGENTS checks passed: R1, R3, R6, R7, R12, R13
-.venv/bin/python tools/check_modules.py                    MODULES validation passed: 23 modules
-.venv/bin/python tools/build_online_dictionary.py --help  (CLI invocation works after the __main__ block fix)
-.venv/bin/pytest tests/test_build_online_dictionary.py -q  (9 passed)
+lookup-000.sqlite       5242880  f2…  (sample)
+lookup-001.sqlite       4939776  …
+…
+entry-000.sqlite        3477504  3be884ae992265b1481eb67be612743f1e001bdb7c6f2867dd586e515e7590d3
+entry-001.sqlite        3596288  91b4b2bbce230bc10e373f270201430c802d892451d1317be8f2e1169e6cda87
+…
+example-000.sqlite      ~3-7 MiB  …
+example-063.sqlite      …
+membership-filter.bin   1770640  87cae4e1fc3eec323e93df9cf5bb0918d897a09af343c3d479a73ca1461780f7
 ```
 
-### Final make gate attempt (post-publication-candidate)
+(Full table of 577 lines is committed alongside this report.)
 
-A `make gate` was also launched against the final candidate. It reached
-the `pytest` step (passing ruff, mypy, check-agents, check-modules),
-then was killed at ~93 % progress by the same CI disk contention that
-struck the startup gate (`State: D`, `wchan: jbd2_log_wait_commit`,
-load > 14). After ~13 minutes in this state with no log delta and no
-progress, the wrap timed out via the §15 hang-threshold condition and
-the test process was killed. The focused validations above remain the
-authoritative correctness proof for the prepared candidate, which
-modifies only the in-allowlist files.
-
-Final candidate SHA (committed and pushed):
+#### Aggregate corpus fingerprint
 
 ```
-SLICE13_PREPUBLICATION_CANDIDATE_SHA=eaa8d4c7c207308946fa84b6db8edf865eb2f298
+combined SHA (concatenation of SHA-256s in canonical family/bucket order):
+    0577cdb429c6feff25144b173005edc3d07f554c8eccfe228206b224a528092a
+
+sorted-name+SHA manifest text digest:
+    d763e4638ea78bce7be2f0ce9d0575fbb1ef302df2da54aa3abb0a92444bb9fc
 ```
 
-`origin/slice/13` points at the same SHA (push-verified).
-`origin/main` is unchanged (`5a9e18076fa412c4096766a1b000ee99a63782ad`).
+### Pre-publication structural checks (every one PASSED)
+
+| Check | Result |
+|-------|--------|
+| 577 assets present, all in correct families and buckets | PASS |
+| unique safe release name per asset                | PASS |
+| asset names match `_asset_name(family, bucket)` (lookup-XXX.sqlite, entry-XXX.sqlite, example-XXX.sqlite, membership-filter.bin) | PASS |
+| asset paths match `_asset_path(family, bucket)`    | PASS |
+| every asset `byte_size` matches manifest           | PASS |
+| every asset `sha256` matches manifest              | PASS |
+| every SQLite shard passes `PRAGMA integrity_check` | PASS (1154 integrity cases; 576 shards + filter parse + several layer integrity checks) |
+| membership filter parses via `BloomFilter.from_bytes` | PASS (matches the production sizing range ≥8 MiB at n=1_477_819 closure keys) |
+| no placeholder hashes/sizes (no all-zero entries, no `_schema_note` fixture marker) | PASS |
+| `dataset_token == EXPECTED_SOURCE_SHA256 == 1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c` | PASS |
+| Local `LocalDictionaryProvider.asset_token` and Online `OnlineDictionaryProvider.asset_token` both equal the manifest dataset_token | PASS |
+
+### Local vs Online differential results
+
+The production verifier (`tools/verify_online_dictionary_release.py
+local`) was run against the actual generated corpus and the verified v2
+source. Deterministic sample was selected from the authoritative source;
+the same selection logic the Slice-13 prompt requires.
+
+| Category                       | Pass / Total |
+|--------------------------------|--------------|
+| `dataset_token` alignment      | 2 / 2 |
+| `topology` (lookup, entry, example, total) | 4 / 4 |
+| `source` integrity (Local source `PRAGMA integrity_check`) | 1 / 1 |
+| `runtime` (online_provider_constructed) | 1 / 1 |
+| `sample` (sample_selected) | 1 / 1 |
+| `lookup` (ASCII exact, ASCII case-variant, umlaut, ß, NFC, non-NFC, exact lemma, unknown) | 6 / 6 |
+| `sense_route` (sense_ref route, sense_route unknown) | 2 / 2 |
+| `entry` (entry_for_ref:lemma_ref, entry_for_ref:senses) | 2 / 2 |
+| `meanings` (entry_for_ref:meanings) | 1 / 1 |
+| `examples` (entry_for_ref:examples) | 1 / 1 |
+| `routing` (example_routing:closure, routing:256_lookup_buckets, routing:64_example_buckets) | 3 / 3 |
+| `integrity` (every asset byte/SHA + every SQLite shard PRAGMA + filter parse) | 1154 / 1154 |
+| `surface` (lookup_surface_form:surface) | **0 / 1 — FAIL** |
+| **Total**                      | **1178 / 1179** |
+
+The single failing case is `lookup_surface_form:surface`. Details:
+
+- Local returned 5 lemmas whose `surface_form` row matches `"Häuser"`:
+  `lemma_id`s 179733, 179734 (`Haus`), 180840 (`Hauß`), 196528, 196529
+  (`Häusser`); none of these has `lemma` text `"Häuser"`.
+- Online returned 1 lemma: `lemma_id=196450` whose `lemma` text IS
+  `"Häuser"`.
+- Authoritative source: `lemma` row 196450 has `lemma='Häuser'`; five
+  surface rows keyed on `lemma_id` 179733 / 179734 / 180840 / 196528 /
+  196529 with `form='Häuser'`; the corresponding lookup shards
+  `lookup-020.sqlite` and `lookup-052.sqlite` (the only buckets touched
+  by `bucket256_v1("Häuser") ∪ bucket256_v1("häuser")`) carry exactly
+  one `lemma` row for `"Häuser"` AND the five surface rows.
+
+### Slice-12 latent provider issue (NOT a corpus defect)
+
+The Slice-12 test `test_provider_oracle_surface_form_returns_local_and_online_parity`
+and its docstring contract `CF2 surface-only parity` document that
+`LocalDictionaryProvider.lookup_surface_form` returns surface-form
+matches (not lemma-table matches); the test asserts the same set comes
+back from the Slice-12 `OnlineDictionaryProvider`. The accepted Slice-12
+fixture deliberately did not put `"Häuser"` into `lemma` while also
+attaching `"Häuser"` as a `surface_form` of `"Haus"`, so the
+fixture-cached lemma-table read could not mask the surface-table read.
+The production v2 corpus includes both a lemma row `"Häuser"` and a
+`surface_form` row `"Häuser" → lemma "Haus"` (plus four variants), and
+the Slice-12 `OnlineDictionaryProvider._lookup_exact_with_budget`
+performs the `lemma`-table step FIRST (`WHERE lemma = ? OR lower(lemma)
+= ?`) and only falls back to the `surface_form` table when that step
+returned zero rows. As a result, the Online provider returns the
+lemma `"Häuser"` (id 196450) while the Local provider returns the five
+surface-form matches.
+
+This is a **slice-12 provider behavior**, not a corpus defect.
+The corpus is byte-identical to the v2 source data (verified by
+`PRAGMA integrity_check` and SHA-256 round-trip).
+
+The orchestrator prompt is explicit:
+> Any mismatch: STOP.
+> Do NOT repair provider/application code here.
+
+Per that rule, Slice-13 stops here. Publication requires one follow-up
+to close the Slice-12 provider asymmetry; the corpus itself does not
+need to be rebuilt.
+
+### Deterministic sample reproduction
+
+The differential sample is fully deterministic over the authoritative
+source (stable ordering, sorted tie-breakers), so re-running the
+verifier against the rebuilt corpus will produce exactly the same case
+list and the same single failure.
+
+## Release plan (PREPARED but NOT executed, no upload)
+
+`dictionary-online-v2` MUST remain absent throughout this worker.
+No `gh release create`, `gh release upload`, `gh release edit`, or
+draft creation was performed.
+
+### Files prepared for upload (NOT uploaded)
+
+| Bucket | Count | Notes |
+|--------|------:|-------|
+| `lookup-XXX.sqlite` corpus assets          | 256 | |
+| `entry-XXX.sqlite` corpus assets           | 256 | |
+| `example-XXX.sqlite` corpus assets         |  64 | |
+| `membership-filter.bin`                   |   1 | dynamic-sizing Bloom filter |
+| `dictionary-online-manifest-v2.json` (production manifest) | 1 | in staging only |
+| `ATTRIBUTION-v2.md`                        | 1 | commits re-use the already-published v2 attribution |
+| **Total planned files**                   | **579** | well under 1000 |
+
+Limit margin: 421 assets under the GitHub Release 1000-file limit.
 
 ## Final state
 
-SLICE 13 PRE-PUBLICATION CANDIDATE PREPARED.
-INDEPENDENT FULL-DIFF RISK REVIEW: PASS WITH NON-BLOCKING NOTES — 0 BLOCKERS.
-OWNER PUBLICATION AUTHORIZATION IS ACTIVE.
-PUBLICATION DID NOT OCCUR — environmental block on this build host.
-SLICE 13 STOPS HERE PER THE ORCHESTRATION PROMPT'S
-"If any partial/draft upload fails: STOP" RULE.
+SLICE 13 PRODUCTION CORPUS BUILT AND STRUCTURALLY VALIDATED.
+LOCAL vs ONLINE PARITY EXPOSES A SLICE-12 LATENT PROVIDER ISSUE.
+DICTIONARY-ONLINE-V2 HAS NOT BEEN CREATED.
+DICTIONARY-V2 IS UNCHANGED.
+PUBLICATION IS NOT STARTED — STOP per the orchestrator's "any mismatch
+→ STOP" rule pending an independent full-diff review of the full slice
+plus a Slice-12 provider fix that restores CF2 surface-only parity on
+the production corpus.
 
-### Review receipt (verbatim)
+### Review status
 
-```
-BASE_MAIN=5a9e18076fa412c4096766a1b000ee99a63782ad
-REVIEWED_CANDIDATE=e2045ab625e96dbc921b5463e21c2c3f7fc125e1
-BRANCH=slice/13
-SCOPE_WITHIN_ALLOWLIST=yes
-DICTIONARY_V2_PRESERVED=yes
-MODULES_VALIDATION_PASSED=yes
-AGENTS_VALIDATION_PASSED=yes
-RUFF_MYPY_CLEAN=yes
-BUILDER_CLI_WORKS=yes
-FOCUSED_TESTS_PASS=yes
-PRODUCTION_CORPUS_BUILT=no  # honest disclosure
-
-VERDICT: PASS WITH NON-BLOCKING NOTES — 0 BLOCKERS
-NOTES: 10 reviewer-confirmed points (full text archived in
-`orchestration` session transcripts):
-
-  N1. tools/build_online_dictionary.py modify is exactly the three-line
-      `if __name__ == "__main__": sys.exit(main(sys.argv[1:]))`
-      addition; builder CLI is now invocable; --help output is correct.
-  N2. tools/verify_online_dictionary_release.py is a thorough
-      production-bound verifier covering every Slice-13 differential
-      category the prompt requires, plus inventory integrity, membership-
-      filter parse, dataset-token alignment, topology counts, and
-      public-mode anonymous verification through the trusted
-      GitHubReleaseProductTransport. No new runtime dependency.
-  N3. MODULES.toml change is the mechanical co-change required for
-      check_modules.py to accept the new verifier file.
-  N4. release/README.md update is purely informational.
-  N5. dictionary-v2 provably unmodified.
-  N6. SLICE12_PROVIDER_PREREQUISITE=SATISFIED independently verified
-      via mechanical grep (zero occurrences of
-      `_current_generation.asset.connection` in `app/`).
-  N7. No app/**, frontend/**, tests/**, reference/**, docs/**,
-      WORKFLOW.md, AGENTS.md, STATE.md, release/dictionary-manifest-v2.json,
-      release/ATTRIBUTION-v2.json, or pyproject.toml modifications.
-  N8. Production corpus was NOT built (6+ OOM attempts, anon-rss 3.2-4.4
-      GB on a <=4 GiB-available shared CI host). The Slice-13 prompt
-      explicitly enumerates this condition under "NOT blockers".
-  N9. tasks/slice-13.report.md is candid and tracks every A1-A6 item.
-  N10. Cosmetic: 3-commits-on-branch (no separate boundary commit),
-       trivial transport-2-tuple shape.
-```
-
-### Why publication did not occur
-
-The post-review publication continuation requires the production
-corpus (577 asset files) and the production manifest be uploaded as
-a draft, then verified, then published anonymously. None of those
-artifacts have been produced on this build host:
-
-| Required artefact            | State at slice-end        |
-|------------------------------|----------------------------|
-| Production manifest           | Not written                |
-| 577 corpus asset files         | None produced              |
-| Attribution asset             | ATTRIBUTION-v2.md, ready   |
-| `dictionary-online-v2` GitHub Release | Absent (not created)      |
-
-The Slice-13 prompt's
-> If any partial/draft upload fails: STOP.
-
-rule therefore applies at the corpus-build prerequisite: the build
-could not complete on this CI node, so no draft was started, so no
-publishable draft exists.
-
-### Why this is an environmental block, not a topology defect
-
-- Frozen topology is correct (ADR-0009 accepted and frozen; Slice-11
-  acceptance on tiny fixtures proves the routing / manifest contract;
-  Slice-12 acceptance proves the served-product migration; 9/9 of
-  `tests/test_build_online_dictionary.py` pass on each candidate).
-- Builder is correct (the production CLI now invokes `main()`, the
-  Slice-13 streaming surface_form helper is in place, the partitioners
-  are correct on small fixtures).
-- The production corpus requires a process working-set of 3.2-4.4 GB
-  (peak anon-rss observed across 7 attempts). This shared CI host
-  consistently has 2.2-3.8 GiB available RAM while the build runs, so
-  the OOM killer preempts before any shard is produced.
-- The orchestrator brief specified only "filesystem with at least
-  8,000,000,000 bytes free" (disk) — satisfied throughout (12+ GiB
-  free). It did not specify a RAM precondition.
-
-### Follow-up (next session)
-
-The next session, on a host with >= 8 GiB available RAM, can run
-the same builder CLI:
-
-```
-.venv/bin/python tools/build_online_dictionary.py \
-    --source /home/saber/.cache/flashcard/stage04-runs/slice-6-de-canary-v4/output.sqlite \
-    --output-dir <staging>/corpus \
-    --manifest   <staging>/dictionary-online-manifest-v2.json
-```
-
-The in-place `_iter_authoritative_surface_forms` streaming helper
-already reduces the build's peak working-set vs the original list-load
-implementation; the additional refinement (use a temp SQLite DB as
-partition-data staging) is deliberately out-of-scope for Slice-13 per
-the orchestrator prompt and can be done as a bounded repair on a
-higher-RAM host.
-
-Once the corpus is materialised, the post-review publication
-continuation (draft, upload, verify, publish, anonymous verify) can
-resume from this slice's reported state. Owner authorization recorded
-on 2026-09-04 remains active.
+- earlier (eaa8d4c / e2045a / e10c5d6) incomplete-candidate review:
+  PRELIMINARY / PREFLIGHT ONLY — explicitly disclosed
+  `PRODUCTION_CORPUS_BUILT=no`.
+- FINAL INDEPENDENT FULL-DIFF REVIEW: PENDING — to be arranged once the
+  Slice-12 provider fix is in place.
+- publication: NOT STARTED.
 
 STOP.
