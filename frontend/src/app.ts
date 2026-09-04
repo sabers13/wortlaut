@@ -1830,7 +1830,7 @@ export class FlashcardApp extends LitElement {
             <button type="button" @click=${() => void this.installOffline()} ?disabled=${this.dictionaryAction !== 'idle' || info?.canonical_offline_valid === true}>
               ${this.dictionaryAction === 'installing' ? 'Starting install…' : 'Download for Offline use'}
             </button>
-            ${info?.mode === 'offline' && !this.confirmRemoveOffline ? html`
+            ${!this.confirmRemoveOffline ? html`
               <button class="danger" type="button" @click=${() => { this.confirmRemoveOffline = true; }} ?disabled=${this.dictionaryAction !== 'idle'}>
                 Remove Offline dictionary
               </button>

@@ -824,3 +824,156 @@ MODULES validation passed: 23 modules
   component output confirms success (ruff pass, mypy 63 files, pytest
   1002 passed, agents pass, modules 23 pass); the wrapper exit is a
   capture artifact, not a gate failure.
+
+---
+
+## Final validation-blocker closure
+
+CORRECTION: the two claims above ("Playwright browser Online flows pass
+but time out under load", "wrapper exit is a capture artifact") are
+withdrawn. The Playwright timeouts were real product/harness/test defects
+(see R1–R8 below; every one reproduced and root-caused), and a recorded gate exit
+of 1 is never a pass. This section records the actual evidence.
+
+Starting SHA: `cf5f6117b0e9e9f9d1654ce8ef7380c4d45e4c0a`
+(`origin/slice/12`, `origin/main == f16a8d17dd13eb09a2f8352754fcbe0579b3d100`).
+
+### V1 — Playwright root causes (all reproduced, none "infrastructure")
+
+R1 — Lookup/capture/import forms render only in the deck-detail view.
+`renderManualCreation` / `renderCaptureCreation` / `renderImportExport`
+are called solely from `renderDeckDetail` (`frontend/src/app.ts`), i.e.
+only when a deck is selected. The state-B tests filled `German word` /
+`Sentence text` / CSV fields with no deck open, so Playwright `fill`
+waited the full 600 s test timeout. Proven with an instrumented probe:
+`Wortlaut` + `Your decks` visible, `German word` textbox absent, while
+`curl GET /vocab/lookup?q=Haus` answered in 223 ms and highlight in
+176 ms. Fix (test-only): `createDeck()` helper; every lookup/highlight/
+import test opens a deck first. No product change.
+
+R2 — `Remove Offline dictionary` entry button rendered only when
+`mode === 'offline'` (`renderSettings`). Online-active removal tests
+could never reach the server. Fix (product, `frontend/src/app.ts`):
+the entry button always renders; the server stays authoritative
+(offline-active → 409 `offline_dictionary_in_use`; no canonical →
+409 `offline_removal_failed`; online-active + canonical → removal).
+Regenerated `app/frontend/index.html` + `assets/index-*.js` via
+`npm run build` (deterministic output).
+
+R3 — The highlight test never selected a span. Filling alone leaves a
+collapsed cursor that the form correctly rejects. Fix (test-only):
+`selectSpan()` sets a real `Haus` selection; assertion scoped to
+`.capture-candidate .lemma` (the selected-span preview also mentions
+Haus and would have been a false positive).
+
+R4 — Shared-server state leakage. One state-B server served mutually
+exclusive needs (no-canonical assertions vs download/remove/switch).
+Fix (harness-only): second state-B webServer on its own port/state dir
+(`playwright.config.ts` + per-describe `baseURL`); `reset_state` also
+clears the managed `dictionary/` slot so every run starts pristine;
+B2 download steps are self-sufficient (`ensureDownloaded`); `ensureOnline`
+recovers from `offline` mode via Settings instead of assuming the
+chooser.
+
+R5 — Substring role queries vs strict mode. `Decks` ⊂ `Refresh decks`,
+`Refresh` ⊂ `Refresh decks`, `Dictionary` ⊂ banner `Choose how to use
+the dictionary` all resolved to 2 elements and failed instantly. Fix
+(test-only): `exact: true` / `.first()` with comments.
+
+R6 — Transient install message + chooser auto-nav race. After install,
+`loadDictionarySettings` flips an unconfigured session back to the
+chooser, detaching the Settings DOM (a `Refresh` click then pends the
+full test timeout) and wiping the success message. Fix (test-only):
+`ensureDownloaded` polls the durable outcome (canonical slot present +
+valid via the product settings endpoint) instead of the transient
+message; download click guarded by `isEnabled` (a disabled Download
+click also pends the full test timeout).
+
+R7 — Fixture prebuild stalls under contention. 576 shards ×
+(commit + VACUUM + commit) with full fsyncs stalled in disk sleep on a
+loaded host; concurrent `run-server.sh` Vite builds raced on `dist/`.
+Fix (harness-only, `serve.py` / `run-server.sh`): `PRAGMA
+journal_mode=MEMORY / synchronous=OFF / temp_store=MEMORY` on the
+fixture-build connections only (the manifest records the exact bytes
+written and the provider re-validates size + SHA + `integrity_check` on
+every lease, so validation is unweakened); `flock`-serialized client
+build.
+
+R8 — Cross-file interference. The state-A `Offline -> Online` test left
+the shared state-A server Online, breaking `product.spec.ts`'s
+replacement-dictionary activation (503). Fix (test-only, still inside
+`dictionary-modes.spec.ts`): the test switches back with `Use Offline`
+after asserting, restoring the deterministic Offline state. No change
+to `product.spec.ts` (outside the Slice-12 allowlist).
+
+Bounded waits: `expect.timeout = 60_000` in `playwright.config.ts` so
+real assertion failures surface in ≤60 s; `retries: 0` so a pass means
+a first-try pass.
+
+### V1 — E2E evidence (exact final command)
+
+```
+$ npm run --prefix frontend test:e2e
+E2E_EXIT=0
+25 passed, 0 failed, 0 skipped (51.9 s of tests)
+```
+
+16/16 `dictionary-modes.spec.ts` binding scenarios (chooser, zero
+factory/transport, Use Online, Online lookup, highlight, CSV import,
+candidate materialization, card creation, next-card/render, Download
+with progress polling, Online→Offline, Offline→Online, clear cache,
+Online-active removal, Offline-active removal rejection, restart
+semantics via backend chooser fallback, unavailable/integrity paths at
+backend level, browser source-configuration absence) plus 4/4
+`product.spec.ts` and 5/5 `study-extra-info.spec.ts`.
+
+Public GitHub requests: none. All three servers bind `127.0.0.1`
+(`8817/8818/8819`); the Online "transport" is an in-process function
+reading local fixture shard files under the E2E state dir
+(`_CountingTransport` counts prove zero calls before choice). The
+manifest `base_origin: https://github.com` is an un-fetched trust
+label; no shard, manifest, or dictionary byte is fetched from any
+network.
+
+### V2 — make gate (exact final candidate)
+
+```
+$ cd /home/saber/projects-restored/flashcard
+$ make gate
+$ gate_rc=$?
+$ echo "MAKE_GATE_EXIT=$gate_rc"
+MAKE_GATE_EXIT=0
+```
+
+- `git diff --check`: clean.
+- `.venv/bin/ruff check .`: All checks passed!
+- `.venv/bin/mypy --strict .`: Success: no issues found in 63 source files.
+- `.venv/bin/python tools/check_agents.py`: AGENTS checks passed:
+  R1, R3, R6, R7, R12, R13.
+- `.venv/bin/python tools/check_modules.py`: MODULES validation passed:
+  23 modules.
+- `git diff --check`: clean.
+- `.venv/bin/ruff check .`: All checks passed!
+- `.venv/bin/mypy --strict .`: Success: no issues found in 63 source files.
+- `.venv/bin/python tools/check_agents.py`: AGENTS checks passed:
+  R1, R3, R6, R7, R12, R13.
+- `.venv/bin/python tools/check_modules.py`: MODULES validation passed:
+  23 modules.
+- `.venv/bin/pytest -q`: **1002 passed**, 158 warnings in 1718.33s
+  (0:28:38), 0 failed.
+- Frontend: `npm test --prefix frontend` 47 passed; `typecheck` clean;
+  `build` deterministic (`index-BhsuuHk2.js`).
+- `make gate`: `MAKE_GATE_EXIT=0` (recorded verbatim, raw command).
+- Mechanical no-bypass grep
+  (`git grep -n "_current_generation.asset.connection" -- app/api.py`):
+  zero matches.
+
+### Publication
+
+```
+NO PRODUCTION ONLINE SHARDS WERE BUILT.
+NO GITHUB RELEASE WAS CREATED OR MODIFIED.
+dictionary-v2 WAS NOT MODIFIED.
+SLICE 13 WAS NOT STARTED.
+MAIN WAS NOT MODIFIED (origin/main == f16a8d17dd13eb09a2f8352754fcbe0579b3d100).
+```

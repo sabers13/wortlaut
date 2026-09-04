@@ -501,11 +501,11 @@
             <button type="button" @click=${()=>void this.installOffline()} ?disabled=${this.dictionaryAction!=="idle"||(t==null?void 0:t.canonical_offline_valid)===!0}>
               ${this.dictionaryAction==="installing"?"Starting install…":"Download for Offline use"}
             </button>
-            ${(t==null?void 0:t.mode)==="offline"&&!this.confirmRemoveOffline?o`
+            ${this.confirmRemoveOffline?u:o`
               <button class="danger" type="button" @click=${()=>{this.confirmRemoveOffline=!0}} ?disabled=${this.dictionaryAction!=="idle"}>
                 Remove Offline dictionary
               </button>
-            `:u}
+            `}
             ${this.confirmRemoveOffline?o`
               <div class="confirm" role="alertdialog">
                 <p>Remove the canonical Offline dictionary while Online is active? Choose another mode (Online for this session) first if Offline is in use.</p>

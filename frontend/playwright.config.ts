@@ -15,18 +15,25 @@ process.env.TMP = e2eTmpDir;
 
 const productPort = Number(process.env.E2E_PORT ?? '8817');
 const onlineModePort = productPort + 1;
-// Expose the state-B port to the test process so the spec does not
-// hardcode it. Playwright test workers inherit process.env.
+const offlineFlowPort = productPort + 2;
+// Expose the state-B ports to the test process so the spec does not
+// hardcode them. Playwright test workers inherit process.env.
 process.env.E2E_ONLINE_PORT = String(onlineModePort);
+process.env.E2E_OFFLINE_FLOW_PORT = String(offlineFlowPort);
 
 export default defineConfig({
   testDir: './tests/e2e',
-  // State-B shard pre-build is I/O-bound (~4-5 min); the per-test
-  // timeout accommodates the slowest fixture-backed interaction.
+  // State-B shard pre-build is I/O-bound; the per-test timeout
+  // accommodates the slowest fixture-backed interaction on a loaded host.
   timeout: 600_000,
+  // Assertion waits are bounded well below the test timeout so a real
+  // failure surfaces fast instead of burning the whole test budget.
+  expect: {
+    timeout: 60_000,
+  },
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 2 : 0,
+  retries: 0,
   workers: 1,
   reporter: 'list',
   outputDir: './test-results',
@@ -66,6 +73,26 @@ export default defineConfig({
       env: {
         E2E_STATE_DIR: path.join(frontendDir, 'test-results', '.e2e-state-b'),
         E2E_PORT: String(onlineModePort),
+        E2E_STATE: 'B',
+        PYTHON_BIN: repoPython,
+        TMPDIR: e2eTmpDir,
+        TEMP: e2eTmpDir,
+        TMP: e2eTmpDir,
+      },
+    },
+    {
+      // Second state-B instance for the download/remove/switch flows.
+      // The first state-B server never sees a download, so its
+      // chooser/zero-transport/no-canonical assertions stay
+      // deterministic; this server owns the mutable canonical slot.
+      command: `bash ./tests/e2e/run-server.sh --port ${offlineFlowPort} --state B`,
+      cwd: frontendDir,
+      url: `http://127.0.0.1:${offlineFlowPort}/`,
+      reuseExistingServer: false,
+      timeout: 600_000,
+      env: {
+        E2E_STATE_DIR: path.join(frontendDir, 'test-results', '.e2e-state-c'),
+        E2E_PORT: String(offlineFlowPort),
         E2E_STATE: 'B',
         PYTHON_BIN: repoPython,
         TMPDIR: e2eTmpDir,

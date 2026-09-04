@@ -78,6 +78,11 @@ def reset_state(state_dir: Path) -> None:
         "user.sqlite",
         "online-cache",
         "online-shards",
+        # The managed canonical-Offline slot. Previous runs (including
+        # killed ones) may have installed the fixture asset here; without
+        # clearing it, a fresh server would start with a validated
+        # canonical file and the download flow would have nothing to do.
+        "dictionary",
     ):
         target = state_dir / filename
         if target.is_dir():
@@ -364,6 +369,17 @@ def _prebuild_online_fixture(state_dir: Path) -> Any:
         tmp = shard_dir / f".{family}-{bucket:03d}.sqlite.tmp"
         conn = sqlite3.connect(tmp)
         conn.row_factory = sqlite3.Row
+        # E2E fixture build only: skip journal/fsync overhead while
+        # assembling the deterministic shards. The manifest below
+        # records the SHA-256/byte-size of the exact bytes written,
+        # and the provider re-validates (size + SHA + integrity_check)
+        # on every lease, so the speedup cannot weaken validation.
+        try:
+            conn.execute("PRAGMA journal_mode=MEMORY")
+            conn.execute("PRAGMA synchronous=OFF")
+            conn.execute("PRAGMA temp_store=MEMORY")
+        except sqlite3.Error:
+            pass
         writer(conn, bucket, *partition_data)
         conn.close()
         os.replace(tmp, canonical)
@@ -554,6 +570,13 @@ def main() -> int:
             cors_origins=(f"http://127.0.0.1:{args.port}", f"http://localhost:{args.port}"),
             service_port=args.port,
             online_provider_factory=online_factory_a,
+            # Point the managed canonical slot at the real state-A asset so
+            # Settings reports its presence honestly and the session can
+            # switch back Offline after an Online excursion. No install
+            # triple exists here, so install/remove stay 409-unconfigured;
+            # only status reporting and use-offline reactivation use it.
+            managed_dictionary_dir=state_dir,
+            manifest_filename="dictionary.sqlite",
         )
     else:
         # Slice 12 state B: no canonical full Offline asset. The chooser
