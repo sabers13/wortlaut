@@ -295,6 +295,18 @@ git diff --check                                          (clean)
 .venv/bin/pytest tests/test_build_online_dictionary.py -q  (9 passed)
 ```
 
+### Final make gate attempt (post-publication-candidate)
+
+A `make gate` was also launched against the final candidate. It reached
+the `pytest` step (passing ruff, mypy, check-agents, check-modules),
+then was killed at ~93 % progress by the same CI disk contention that
+struck the startup gate (`State: D`, `wchan: jbd2_log_wait_commit`,
+load > 14). After ~13 minutes in this state with no log delta and no
+progress, the wrap timed out via the §15 hang-threshold condition and
+the test process was killed. The focused validations above remain the
+authoritative correctness proof for the prepared candidate, which
+modifies only the in-allowlist files.
+
 Final candidate SHA (committed and pushed):
 
 ```
