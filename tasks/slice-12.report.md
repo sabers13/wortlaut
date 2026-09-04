@@ -1,6 +1,6 @@
 # Slice 12 Report
 
-Review: PENDING (T3, full diff)
+Review: **PASS WITH NON-BLOCKING NOTES — 0 BLOCKERS**
 
 ## Starting state
 
@@ -977,3 +977,42 @@ dictionary-v2 WAS NOT MODIFIED.
 SLICE 13 WAS NOT STARTED.
 MAIN WAS NOT MODIFIED (origin/main == f16a8d17dd13eb09a2f8352754fcbe0579b3d100).
 ```
+
+---REVIEW RECEIPT BEGIN---
+
+## Independent full-diff risk review
+
+Review: **PASS WITH NON-BLOCKING NOTES — 0 BLOCKERS**
+
+- reviewed base:
+  `f16a8d17dd13eb09a2f8352754fcbe0579b3d100`
+- reviewed code candidate:
+  `34d627912562a15e3c7852abc46fdd1aa4a98956`
+- branch: `slice/12`
+- result: `HISTORY_ACCEPTABLE`
+- proportionality: `PROPORTIONATE`
+- all Slice-12 acceptance areas: PASS
+- blocking findings: none
+
+The independent reviewer recorded three explicitly NON-BLOCKING observations:
+
+1. `_ConnectionLookupOracle` in `app/api.py` is dead/inert code with no callers.
+   Removing it would be optional cleanup only.
+
+2. `tests/test_slice12_settings.py` builds the deterministic mini Online corpus
+   repeatedly, making some focused tests slow. This is test-infrastructure
+   performance only, not a correctness defect.
+
+3. install-progress polling uses a 120-second ceiling. Real download progress is
+   observable; the ceiling is bounded and does not violate Slice-12 acceptance.
+
+These observations do NOT block Slice 12 and do NOT require another repair or
+review cycle.
+
+Final review conclusion:
+
+    SLICE 12 INDEPENDENT FULL-DIFF REVIEW PASSED — 0 BLOCKERS.
+    CANDIDATE 34d627912562a15e3c7852abc46fdd1aa4a98956 MAY PROCEED TO MECHANICAL CLOSURE.
+    NO SECOND BROAD SLICE-12 REVIEW IS REQUIRED.
+
+---REVIEW RECEIPT END---
