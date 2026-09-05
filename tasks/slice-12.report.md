@@ -1120,8 +1120,17 @@ returns; no other case regressed.
 
 ## Final `make gate` result
 
-Pending — see final report section below; will run as the last
-authoritative validation step before push.
+`make gate` exited 0 on the exact repair tree:
+
+  * `ruff check .`: All checks passed.
+  * `mypy --strict .`: Success: no issues found in 63 source files.
+  * `pytest -q`: 1003 passed, 0 failed (1751.71 s).
+  * `tools/check_agents.py`: AGENTS checks passed (R1, R3, R6, R7,
+    R12, R13).
+  * `tools/check_modules.py`: MODULES validation passed (23 modules).
+
+Final HEAD: `86786adf28156dcf4ae06e169211af2915e1d772` pushed to
+`origin/repair/slice-12-surface-parity`.
 
 ## Scope confirmation
 
