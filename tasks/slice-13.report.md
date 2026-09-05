@@ -470,7 +470,7 @@ the merge introduced no additional content beyond the accepted repair.
   the new state is recorded as a continuation here, not as a
   rewrite of history.
 
-### Publication state
+### Publication state (pre-publication)
 
 - `dictionary-online-v2` created: NO
 - `dictionary-v2` modified: NO
@@ -479,3 +479,122 @@ the merge introduced no additional content beyond the accepted repair.
 
 The complete pre-publication candidate is ready for the one required
 final independent full-diff risk review.
+
+## Post-publication receipt (Slice 13 publication worker, 2026-09-05)
+
+### Review
+
+- final independent review: **PASS WITH NON-BLOCKING NOTES — 0 BLOCKERS**
+- review phase: **CLOSED**; no second broad review performed by this worker
+
+### Pre-publication candidate
+
+- exact reviewed candidate SHA: `aafbd58142dc5c4710010eb650fe7179178233b3`
+- pre-publication worker `HEAD` == `aafbd58142dc5c4710010eb650fe7179178233b3` == `origin/slice/13` at worker startup
+- `origin/main` remained `4c58e8b385c16b8d883d0c805a8d070d9047da4d` throughout (unchanged)
+- working tree clean at every commit boundary
+
+### Release metadata (live)
+
+- tag: `dictionary-online-v2`
+- release id: `383167908`
+- public Release URL: `https://github.com/sabers13/wortlaut/releases/tag/dictionary-online-v2`
+- release target SHA: `aafbd58142dc5c4710010eb650fe7179178233b3`
+- published at: `2026-09-05T07:32:45Z`
+- `draft`: `false`
+- `prerelease`: `false`
+- exact remote asset count: **579** (577 corpus + 1 manifest + 1 attribution)
+- post-publication receipt HEAD: `slice/13` at `aafbd58142dc5c4710010eb650fe7179178233b3`
+
+### Corpus identity
+
+- dataset token / source SHA-256: `1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c`
+- corpus asset count: **577** (256 lookup + 256 entry + 64 example + 1 membership filter)
+- manifest + attribution: **2**
+- corpus total bytes: **2450244752**
+- aggregate SHA over 577 raw asset SHA-256 digests (canonical manifest order): `0577cdb429c6feff25144b173005edc3d07f554c8eccfe228206b224a528092a`
+
+### Public verifier (anonymous, no GH token)
+
+- command:
+  `env -u GH_TOKEN -u GITHUB_TOKEN .venv/bin/python tools/verify_online_dictionary_release.py public --release-tag dictionary-online-v2 --download-dir "$PUBLIC_VERIFY_DIR" --report /tmp/dictionary-online-public-verifier-report-v2.json`
+- exit code: `0`
+- mode: `public`
+- passed: `true`
+- case_count: **585**
+- passed_count: **585**
+- failed: **0**
+- report copied to repository evidence: `release/dictionary-online-public-verifier-report-v2.json`
+
+### Review-note #5 closure (additional read-only checks)
+
+- anonymous manifest byte equality vs committed:
+  `cmp "$PUBLIC_VERIFY_DIR/dictionary-online-manifest-v2.json" release/dictionary-online-manifest-v2.json` → **PASS** (byte-equal)
+- anonymous Bloom parse of `membership-filter.bin` via `app.online_filter.BloomFilter.from_bytes`:
+  - `size_bits` = **14164984**
+  - `hash_count` = **7**
+  - parse: **PASS**
+- anonymous attribution byte equality vs committed:
+  `cmp <anonymous ATTRIBUTION-v2.md> release/ATTRIBUTION-v2.md` → **PASS** (byte-equal)
+- anonymous public Release API query (no credentials) shows 579 assets, `draft=false`, `prerelease=false` → **PASS**
+
+### Final real served-product Online smoke
+
+Launcher: `./wortlaut --dictionary-mode online --data-dir <fresh-online-data-dir> --port 8765 --no-browser`
+Data dir: `/home/saber/.cache/flashcard/online-smoke-20260905` (fresh; hardlink to verified v2 source satisfies launcher's manifest-verify)
+
+- `POST /vocab/settings/dictionary/use-online` (X-Flashcards-Request: 1, Content-Type: application/json) → `200 OK`
+  - body: `{"status":"online","online_info":{"dataset_token":"1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c","asset_token":"1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c","cache_dir":".../online-cache"}}`
+- `GET /vocab/settings/dictionary` → `200 OK`, `mode = "online"`
+- `GET /vocab/lookup?q=Haus` → `200 OK`, 4 candidates including `Haus` NOUN (3 senses, `house, building` and `home (in various phrases)`) and `haus` VERB (imperative/present of hausen)
+- `POST /vocab/highlight` with sentence `"Ich gehe nach Hause und betrete das Haus."`, selected span 14..18, `lesson_label = "smoke-test-lesson"` → `200 OK`, candidates with full sense refs, `asset_token` matches dataset token
+- `POST /vocab/notes` (created from candidate sense) → `200 OK`, `{"note_id":1,"status":"resolved","meaning_languages":["en"],"deck_id":null}`
+- `GET /vocab/cards/next` → `200 OK`, `card_id=1`, front `Haus\nNOUN • [haʊ̯s]`, back with full grammar (`Plural: die Häuser`, `Genitiv: Hauses`), English translations, and example sentences
+- `GET /vocab/export/anki` → `200 OK`, Anki tab-separated export, `#html:true`, HTML `<br>` formatting preserved in fields (R10 invariant)
+
+The shipped server really consumed the newly-public GitHub `dictionary-online-v2` corpus end-to-end (corpus download into `online-cache/verified/`, then lookups, highlights, notes, cards, and export all materialized from the new release).
+
+### Final real served-product Offline smoke
+
+Launcher: `./wortlaut --dictionary-mode offline --data-dir <fresh-offline-data-dir> --dict-path /home/saber/.cache/flashcard/stage04-runs/slice-6-de-canary-v4/output.sqlite --port 8766 --no-browser`
+Data dir: `/home/saber/.cache/flashcard/offline-smoke-20260905` (fresh; explicit Offline CLI path through the verified v2 source — no 945 MB ceremony copy)
+
+- `GET /vocab/settings/dictionary` → `200 OK`, `mode = "offline"`, asset_token matches dataset token
+- `GET /vocab/lookup?q=Haus` → `200 OK`, 4 candidates, same `Haus` NOUN (3 senses) and `haus` VERB matches as the Online smoke
+- `POST /vocab/notes` → `200 OK`, `{"note_id":1,"status":"resolved","meaning_languages":["en"],"deck_id":null}`
+- `GET /vocab/cards/next` → `200 OK`, `card_id=1`, identical front/back content to the Online card
+- `GET /vocab/export/anki` → `200 OK`, identical Anki tab-separated export structure
+
+### Final `dictionary-v2` live metadata (unchanged)
+
+- release id: `381651690`
+- asset id: `541973166`
+- asset name: `dictionary-v2.sqlite`
+- size: `945418240`
+- digest: `sha256:1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c`
+- `draft`: `false`
+- `prerelease`: `false`
+- **DICTIONARY_V2_UNCHANGED: YES** (re-read at Phase 1, Phase 6, and Phase 11 — byte-identical every time)
+
+### Process-level invariants (this publication worker)
+
+- `CORPUS_REBUILT: NO` (the production corpus was NOT rebuilt by this worker; the published corpus is the staging `20260904T213935Z` build, byte-identical to the reviewed candidate)
+- `PRODUCT_CODE_CHANGED: NO` (no `app/**`, `frontend/**`, `tests/**`, `tools/**` (other than `verify_online_dictionary_release.py` already on `slice/13` before this worker), ADR, WORKFLOW, AGENTS, PROMPTS, MODULES, or schema changes by this worker)
+- `MAIN_MODIFIED: NO` (`origin/main` remains `4c58e8b385c16b8d883d0c805a8d070d9047da4d`; this worker pushed only to `origin/slice/13` and the immutable `dictionary-online-v2` tag)
+- `WORKTREE`: clean (verified at every commit boundary; no uncommitted or untracked files at the end of this report)
+- no second broad Slice-13 review was started
+- `STATE.md` not modified by this worker
+- only the three allowed post-publication receipt paths changed:
+  - `release/README.md` (publication state updated; historical evidence preserved)
+  - `release/dictionary-online-public-verifier-report-v2.json` (new)
+  - `tasks/slice-13.report.md` (this section)
+
+### Publication outcome
+
+`dictionary-online-v2` is **PUBLIC** and **ANONYMOUSLY VERIFIED**.
+The release contains exactly 579 approved assets.
+Real end-user Online and Offline served-product smoke both passed.
+`dictionary-v2` is unchanged.
+No second broad Slice-13 review was performed by this worker.
+`slice/13` carries the post-publication receipt.
+`main` was not modified by this publication worker.

@@ -155,3 +155,27 @@ The `dictionary-v2` release is unchanged through every slice commit:
 
 It continues to be the offline install path; no modification was
 attempted at any point in Slice 13.
+
+## Slice 13 publication state (2026-09-05)
+
+The independent final full-diff review of the
+`aafbd58142dc5c4710010eb650fe7179178233b3` candidate returned
+**PASS WITH NON-BLOCKING NOTES — 0 BLOCKERS**.
+
+- `dictionary-online-v2` **published and anonymously verified**
+- final Online smoke **PASS** (real served-product over the new public
+  GitHub corpus, exercised lookup, highlight, note, card, and Anki
+  export)
+- final Offline smoke **PASS** (real served-product over the verified v2
+  source, same exercised paths)
+- `dictionary-v2` **unchanged** (release id 381651690, asset id
+  541973166, 945418240 bytes,
+  `sha256:1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c`)
+
+The new `dictionary-online-v2` release contains exactly 579 approved
+assets (577 corpus + 1 manifest + 1 attribution). The full publication
+receipt is in `tasks/slice-13.report.md`; the anonymous public
+verifier JSON is in
+`release/dictionary-online-public-verifier-report-v2.json`. No product
+code changed, no corpus was rebuilt, and `main` was not modified by
+the publication worker.
