@@ -309,7 +309,10 @@ adrs = ["0009"]
 
 [modules.build_online_dictionary]
 id = "build_online_dictionary"
-owned_paths = ["tools/build_online_dictionary.py"]
+owned_paths = [
+    "tools/build_online_dictionary.py",
+    "tools/verify_online_dictionary_release.py",
+]
 dependencies = [
     "dictionary",
     "online_manifest",

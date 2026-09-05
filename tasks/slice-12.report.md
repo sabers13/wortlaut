@@ -1146,3 +1146,178 @@ Final HEAD: `86786adf28156dcf4ae06e169211af2915e1d772` pushed to
 
 This report addition is historical repair evidence only; the accepted
 Slice-12 review receipt above is preserved verbatim.
+
+## Post-publication explicit-Online startup repair
+
+### Defect observed by the production publication smoke
+
+The final real post-publication smoke exposed two launcher defects in
+`./wortlaut` explicit-Online startup (Slice 12 / ADR-0009 startup
+precedence `--dictionary-mode online` -> trusted Online):
+
+1. With `--dictionary-mode online` and a fresh data directory containing
+   no canonical Offline dictionary, the launcher reached
+   `_verify_canonical_dictionary()` and exited, even though explicit
+   Online must not require a canonical full Offline dictionary.
+2. Even with an Offline dictionary artificially supplied, the
+   explicit-Online launcher branch constructed only
+   `online_provider_factory` and passed no actual `online_provider` /
+   `online_session_info` into `create_app()`. The resulting app started
+   with `app.state.dictionary_mode = "unconfigured"` instead of
+   `"online"`, forcing the user to POST `/use-online` after every
+   explicit-Online launch.
+
+The publication worker worked around both defects by hardlinking the
+945 MB Offline source into its Online test directory and then POSTing
+`/vocab/settings/dictionary/use-online`. That workaround is not the
+product contract and is not accepted.
+
+### Exact root cause
+
+* Defect 1: in `main()`'s canonical-asset verification block, only the
+  `unconfigured` (default-chooser) path skipped
+  `_verify_canonical_dictionary()`; the explicit-Online mode fell into
+  the final `else` branch which requires the canonical Offline asset
+  (exit 1 on a missing file).
+* Defect 2: in the `effective_mode == "online"` app-construction branch,
+  the launcher built `online_factory` but invoked neither it nor passed
+  any provider into `create_app()`, so `create_app()` took its
+  chooser/unconfigured state branch.
+
+### Exact code fix (branch `repair/slice12-explicit-online-startup`, base `4c58e8b`)
+
+* `wortlaut`: added an `elif effective_mode == "online"` branch to the
+  verification block which skips canonical Offline identity verification
+  (with a log line) — explicit Online requires no canonical Offline
+  dictionary, installs nothing, and copies nothing.
+* `wortlaut`: the explicit-Online startup branch now invokes the trusted
+  Online factory once (`online_provider, online_info = online_factory()`),
+  passing `online_provider=online_provider` and
+  `online_session_info=online_info` into `create_app()` in addition to
+  `online_provider_factory=online_factory` (retained for normal session
+  switching). Factory-construction failure exits 2 fail-closed before
+  any server start. No persisted mode was added; the trusted committed
+  Online manifest path, GitHub host/repository restrictions, integrity
+  verification, cache behavior, operation budget, R12 browser guards,
+  and CLI conflict precedence are unchanged.
+* `wortlaut`: fixed 10 pre-existing ruff violations (missing `Any`
+  import, 2 unused imports, 2 unsorted import blocks) introduced
+  post-gate by `cf5f611` on main; they would have failed `make gate`
+  regardless of this repair.
+* `tests/test_launcher.py`: added 4 tests (details below); no existing
+  test was weakened or deleted.
+
+### Focused tests
+
+* `.venv/bin/pytest -q tests/test_launcher.py` -> **37 passed**.
+* `.venv/bin/pytest -q tests/test_slice12_settings.py` -> **25 passed**.
+* `.venv/bin/ruff check wortlaut tests/test_launcher.py` -> All checks
+  passed!
+* `.venv/bin/mypy --strict .` -> Success: no issues found in 63 source
+  files.
+
+New tests:
+
+1. `test_explicit_online_starts_without_canonical_offline_asset` —
+   explicit Online + no canonical Offline file: does not call
+   `_verify_canonical_dictionary` (patched to explode), does not install
+   (installer patched to explode), starts successfully (rc 0), and no
+   Offline dictionary file exists afterwards.
+2. `test_explicit_online_binds_provider_and_session_info` — Online
+   factory invoked exactly once; actual provider + `OnlineSessionInfo`
+   reach `create_app` (asserted via a recording fake uvicorn capturing
+   the app); resulting runtime mode is `online`, not `unconfigured`;
+   session is online; factory retained on `app.state`; no persisted
+   mode/preference file exists in the data dir.
+3. `test_default_chooser_startup_activates_no_online_provider` — default
+   no-DB/no-explicit-mode startup remains `unconfigured`; the Online
+   factory is bound but never invoked (invocation log is empty); no
+   provider/session bound at startup.
+4. `test_cli_online_conflicts_fail_before_online_factory_construction` —
+   all three explicit-Online conflict rows (`--manifest`, `--dict-path`,
+   `--install-dictionary`) exit 2 before the Online factory is even
+   built.
+
+### Real explicit-Online / no-Offline-asset smoke (real public dictionary-online-v2)
+
+Environment note (disclosed verbatim): the smoke was run in a disposable
+`git worktree` at the exact repair base `4c58e8b` containing only two
+uncommitted overlays: (1) the repaired `wortlaut` from this branch, and
+(2) `release/dictionary-online-manifest-v2.json` replaced by the
+authoritative published manifest downloaded anonymously from the
+`dictionary-online-v2` release
+(`sha256 e3565f0f087ced0b16aca3d3f5d93ce73c20166bc998ab61ede88cd6c390dd24`,
+167184 bytes — byte-identical to the manifest committed on
+`origin/slice/13` and to the release asset). The reason: base `main`'s
+committed Online manifest is still the Slice-11 schema-shaped fixture
+(all `byte_size: 0`, `sha256: 0…0`), which the Product trust boundary
+mandates loading; the real production manifest is committed only on
+`origin/slice/13` and published in the release. The repair branch itself
+does not modify `release/**`; the disposable worktree was removed after
+the smoke and the authoritative working tree was never overlaid.
+
+Scenario (fresh data dir `/tmp/opencode/smoke1-data.nBxDPa`, port 8931,
+no `dictionary/dictionary.sqlite` present before launch, no
+hardlink/symlink/copy/install of the 945 MB Offline asset):
+
+* `./wortlaut --dictionary-mode online --data-dir <fresh-dir> --port 8931 --no-browser`
+  -> server ready after 2 s.
+* `GET /vocab/settings/dictionary` **before any `/use-online`** ->
+  HTTP 200, `mode: online`, `canonical_offline_present: false`,
+  `online_active: true`,
+  `dataset_token: 1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c`.
+* `GET /vocab/lookup?q=Haus` -> **HTTP 200**, top-level `asset_token`
+  equals the expected dataset token, 4 valid Haus candidates (NOUN,
+  NOUN, PROPN, ...).
+* After the lookup: `<data-dir>/dictionary/dictionary.sqlite` still
+  absent (confirmed twice). Only Online cache shards were downloaded
+  (111 MB under `online-cache/verified`); the full Offline dictionary
+  never appeared.
+* Server terminated cleanly (SIGTERM, confirmed gone).
+
+### Default chooser regression smoke
+
+Second fresh data dir `/tmp/opencode/smoke2-data.FYl7Jl`, port 8932, no
+`--dictionary-mode` flag, no Offline dictionary:
+
+* `./wortlaut --data-dir <fresh-dir> --port 8932 --no-browser` -> ready
+  after 1 s.
+* `GET /vocab/settings/dictionary` before user choice -> HTTP 200,
+  `mode: unconfigured`, `canonical_offline_present: false`,
+  `online_active: false`, no `online_info`.
+* Zero pre-choice Online activation proven: `online-cache/` exists but
+  contains **0 files** (only the launcher's mkdir; no shard, no filter,
+  no network fetch merely because the server started).
+* `POST /vocab/settings/dictionary/use-online`
+  (`X-Flashcards-Request: 1`, `Content-Type: application/json`) ->
+  HTTP 200 `status: online` with the expected dataset token.
+* `GET /vocab/lookup?q=Haus` -> **HTTP 200**, expected asset token, 4
+  valid Haus candidates.
+* `<data-dir>/dictionary/dictionary.sqlite` still absent. Server
+  terminated cleanly.
+
+The repair did not break the chooser.
+
+### Final `make gate` (exact final candidate)
+
+`make gate` ran ONCE on the final executable/test tree:
+
+* `.venv/bin/ruff check .`: All checks passed!
+* `.venv/bin/mypy --strict .`: Success: no issues found in 63 source files.
+* `.venv/bin/pytest -q`: **1007 passed**, 164 warnings in 1611.21 s.
+* `tools/check_agents.py`: AGENTS checks passed (R1, R3, R6, R7, R12, R13).
+* `tools/check_modules.py`: MODULES validation passed (23 modules).
+* `MAKE_GATE_EXIT=0`.
+
+### Scope confirmation
+
+* `dictionary-online-v2` (release id 383167908) NOT modified.
+* `dictionary-v2` (release id 381651690, asset id 541973166,
+  sha256 `1698b997…67d4c`) NOT modified.
+* `slice/13` NOT modified (`origin/slice/13` remains
+  `6868209dddf9943bda2236c35dd1ab8c679df149`).
+* `main` NOT modified by this worker (`origin/main` remains
+  `4c58e8b385c16b8d883d0c805a8d070d9047da4d`).
+* The production Online corpus was NOT rebuilt.
+* Tracked writes limited to the allowlist (`wortlaut`,
+  `tests/test_launcher.py`, `tasks/slice-12.report.md`).
