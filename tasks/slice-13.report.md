@@ -363,3 +363,119 @@ the production corpus.
 - publication: NOT STARTED.
 
 STOP.
+
+## CF2 repair integrated — final pre-publication validation
+
+The Slice-12 CF2 surface-only parity repair
+(`86786ad fix(dictionary): restore online surface-form parity`,
+`d7efb48 docs(slice-12-report): record final make gate result for
+repair`, tree `d7efb48a23a0820771dc46e4ededdb235ebb43e2`) has been
+mechanically integrated into `main` and carried into `slice/13` via
+two no-content-delta merges. The full Slice-13 pre-publication
+candidate has been re-validated end-to-end against the existing
+production corpus — **no corpus rebuild was required**.
+
+### Commit refs
+
+| Ref                              | SHA                                       |
+|----------------------------------|-------------------------------------------|
+| old main                         | `5a9e18076fa412c4096766a1b000ee99a63782ad`|
+| repair HEAD                      | `d7efb48a23a0820771dc46e4ededdb235ebb43e2`|
+| REPAIRED_MAIN_HEAD               | `4c58e8b385c16b8d883d0c805a8d070d9047da4d`|
+| prior Slice-13 HEAD              | `df89426568205fb098c9b46a5aa4dac2dda20ca9`|
+| SLICE13_REPAIR_MERGE_HEAD        | `29923ca9eb904d85c7ed0301386625809d8c3c37`|
+
+### Tree equality proof
+
+```
+merged tree:   771f50c74b2e1d5d29ad5f95e16e7dd92c3eac3a
+repair tree:   771f50c74b2e1d5d29ad5f95e16e7dd92c3eac3a
+```
+
+The merged `main` tree is byte-equal to the accepted repair tree —
+the merge introduced no additional content beyond the accepted repair.
+
+### Corpus (rebuilt: NO)
+
+- exact staging reused:
+  `/home/saber/.cache/flashcard/builds/20260904T213935Z`
+- source: `/home/saber/.cache/flashcard/stage04-runs/slice-6-de-canary-v4/output.sqlite`
+- source bytes: `945418240`
+- source SHA-256: `1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c`
+- topology: `lookup=256, entry=256, example=64, membership_filter=1`, total 577 assets
+- total corpus bytes: `2 450 244 752`
+- builder historical peak RSS / wall time (recorded at original build):
+  - peak RSS: `969 240 KiB` (~946 MiB)
+  - wall: `46:37.83`
+  - swaps: 0
+  - exit: 0
+- aggregate SHA (577 concatenated asset SHAs in canonical family/bucket order):
+  `0577cdb429c6feff25144b173005edc3d07f554c8eccfe228206b224a528092a`
+
+### Differential
+
+- previous production differential: **1178/1179** (single CF2 surface-only parity failure)
+- repaired production differential: **1179/1179 PASS** (no failed cases)
+- surface collision case (`lookup_surface_form:surface`): now PASS
+- dataset token: `1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c`
+- verifier report: `release/dictionary-online-verifier-report-v2.json`
+  (mode=`local`, `passed=true`, `case_count=1179`,
+  `passed_count=1179`, notes empty)
+
+### Asset structural recheck (all PASS)
+
+- dataset_token equals expected: YES
+- 577 assets present (256 lookup + 256 entry + 64 example + 1 filter): YES
+- every manifest asset exists on disk: YES
+- every byte_size matches manifest: YES
+- every SHA-256 matches manifest: YES
+- every SQLite shard `PRAGMA integrity_check=ok`: YES (576/576)
+- membership-filter.bin parses via `BloomFilter.from_bytes`:
+  YES (`size_bits=14164984`, `hash_count=7`)
+- no `.stage` staging DB remains inside corpus: YES
+- no placeholder hashes or sizes: YES
+- no fixture-only `_schema_note` in production manifest: YES
+
+### Release material asset-count calculation
+
+```
+577 corpus assets
+   1 production manifest (dictionary-online-manifest-v2.json)
+   1 attribution file (ATTRIBUTION-v2.md)
+-----
+579 planned uploaded assets
+```
+
+579 < 1000 (GitHub Release ceiling). Margin: 421 under the limit.
+
+### Release material update
+
+- `release/dictionary-online-manifest-v2.json`:
+  copied byte-identical from staging
+  `/home/saber/.cache/flashcard/builds/20260904T213935Z/dictionary-online-manifest-v2.json`
+  (manifest byte size: 167184; SHA: `e3565f0f087ced0b16aca3d3f5d93ce73c20166bc998ab61ede88cd6c390dd24`).
+- `release/dictionary-online-asset-validation-v2.json`: regenerated
+  to reflect the new 1179/1179 PASS verification
+  (576/576 sqlite_ok, 1154/1154 integrity cases, every SHA and size
+  matches the production manifest, aggregate SHA matches
+  `0577cdb4...092a`).
+- `release/dictionary-online-verifier-report-v2.json`: replaced
+  with the new `local` verifier run (1179/1179 PASS).
+- `release/README.md`: updated to describe the now-validated
+  production manifest/corpus, the Slice-12 CF2 repair integration
+  into main and `slice/13`, and that public release is still pending
+  final review.
+- The historical `1178/1179` failure documented above is preserved
+  verbatim in the *Local vs Online differential results* section —
+  the new state is recorded as a continuation here, not as a
+  rewrite of history.
+
+### Publication state
+
+- `dictionary-online-v2` created: NO
+- `dictionary-v2` modified: NO
+- publication: NOT STARTED
+- final independent review: PENDING
+
+The complete pre-publication candidate is ready for the one required
+final independent full-diff risk review.

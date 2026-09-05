@@ -62,28 +62,32 @@ structurally validated end-to-end:
 | topology | lookup=256, entry=256, example=64, membership_filter=1 |
 | total corpus bytes | 2 450 244 752 |
 | every asset byte_size + sha256 matches manifest | YES |
-| every SQLite shard `PRAGMA integrity_check=ok` | YES |
+| every SQLite shard `PRAGMA integrity_check=ok` | YES (576/576) |
 | membership filter parses via `BloomFilter.from_bytes` | YES |
 | builder peak RSS | ~946 MiB (bounded-memory disk-backed rebuild) |
+| aggregate SHA (577 concatenated asset SHAs) | `0577cdb429c6feff25144b173005edc3d07f554c8eccfe228206b224a528092a` |
 
-As of the Slice-13 pre-publication continuation, the committed
-`dictionary-online-manifest-v2.json` file remains the schema-shaped
-fixture (NOT a production asset manifest). The actual production
-manifest exists only in the slice staging directory
-(`/home/saber/.cache/flashcard/builds/20260904T213935Z/dictionary-online-manifest-v2.json`)
-because the Slice-13 verifier's `Local vs Online parity` differential
-exposes a Slice-12 latent provider issue on the deterministic
-`surface_form` case (when a form is BOTH a `lemma` row AND a
-`surface_form` row of another lemma, the Slice-12 `OnlineDictionaryProvider`
-returns the lemma-table hit while `LocalDictionaryProvider` returns the
-surface-table hits — a CF2 surface-only parity asymmetry the Slice-12
-acceptance fixture did not exercise). The corpus itself is correct
-(byte-identical to the v2 source); the slice-12 provider needs a
-follow-up so the differential closes.
+As of the Slice-13 CF2-repair-integrated pre-publication continuation,
+`release/dictionary-online-manifest-v2.json` is the exact validated
+production manifest (byte-identical to the staging copy at
+`/home/saber/.cache/flashcard/builds/20260904T213935Z/dictionary-online-manifest-v2.json`).
+The Slice-12 CF2 surface-only parity repair has been integrated into
+main (`86786ad fix(dictionary): restore online surface-form parity`,
+`d7efb48 docs(slice-12-report): record final make gate result for
+repair`) and carried into `slice/13` via a no-content-delta merge.
+The repaired Slice-12 `OnlineDictionaryProvider.lookup_surface_form`
+now returns the surface-table matches on the deterministic
+`surface_form` case (where a form is BOTH a `lemma` row AND a
+`surface_form` row of another lemma), restoring CF2 surface-only
+parity against `LocalDictionaryProvider`.
 
 The Slice-13 publication stage is in the **prepared, awaiting
-Slice-12 provider fix + final independent full-diff review** state:
+final independent full-diff review** state:
 
+- the Slice-12 CF2 surface-only parity repair has been merged into
+  `main` and carried into `slice/13`. The merged tree is byte-equal
+  to the accepted repair tree (proved by `git rev-parse
+  REPAIRED_MAIN_HEAD^{tree}` vs the repair HEAD tree);
 - the production-bound differential verifier
   (`tools/verify_online_dictionary_release.py`) is in place and
   type-clean (one bug fix applied: `load_manifest(path)` vs
@@ -96,36 +100,33 @@ Slice-12 provider fix + final independent full-diff review** state:
   implementation on the same verified input (proven by an out-of-repo
   A/B build);
 - the production corpus against the verified v2 dictionary has been
-  built, structurally validated, and locally verifier-tested (1178/1179
-  parity cases pass; the one failure is the CF2 surface-only parity
-  case mentioned above);
+  built, structurally validated, and locally verifier-tested — the
+  Slice-13 verifier now reports **1179/1179 differential cases PASS**
+  on the existing production corpus (no rebuild required after the
+  provider fix);
 - owner publication authorisation for `dictionary-online-v2` is
   recorded on 2026-09-04 and remains ACTIVE;
-- publication of the new release therefore requires:
-  1. a Slice-12 provider fix that restores CF2 surface-only parity on
-     the production corpus (the corpus itself does not need to be
-     rebuilt);
-  2. a re-run of the Slice-13 verifier proving all 1179/1179
-     differential cases pass;
-  3. one independent full-diff risk review against `origin/main`;
-  4. copy of the validated staging manifest into
-     `release/dictionary-online-manifest-v2.json` (exact byte equality);
-  5. upload and publication of the resulting `dictionary-online-v2`
+- publication of the new release therefore requires only:
+  1. one independent full-diff review against `origin/main` of the
+     complete pre-publication candidate (the only remaining gate);
+  2. upload and publication of the resulting `dictionary-online-v2`
      release, anonymous verification of the same, and a final real-user
      Online + Offline smoke test.
 
 The earlier (eaa8d4c / e2045a / e10c5d6) full-diff review was recorded
 against a candidate with `PRODUCTION_CORPUS_BUILT=no`; it is
 documented as PRELIMINARY / PREFLIGHT evidence only. A final
-independent full-diff review of this exact production-built candidate
-is PENDING.
+independent full-diff review of this exact production-built,
+1179/1179 PASS, CF2-repair-integrated candidate is PENDING.
 
-Until that full-diff review completes and `dictionary-online-v2` is
-actually published, the existing v2 full-dictionary release remains
+Until that final full-diff review completes and `dictionary-online-v2`
+is actually published, the existing v2 full-dictionary release remains
 the offline install path and continues to satisfy all offline flows.
-The Online flow is offline-pending the Slice-12 provider fix; the
-rest of the Slice-13 infrastructure (bounded-memory builder, production
-corpus, production verifier with the bug fix) is in place.
+The Online flow is offline-pending publication of `dictionary-online-v2`
+on this exact 1179/1179 PASS candidate. The rest of the Slice-13
+infrastructure (bounded-memory builder, production corpus, production
+verifier with the bug fix, the Slice-12 CF2 parity repair integrated
+into `main` and carried into `slice/13`) is in place.
 
 The lookup shards additionally carry a `sense_route(sense_ref, lemma_ref)`
 table bucket-closed on `bucket256_v1(sense_ref)` for the

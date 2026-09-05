@@ -1,10 +1,10 @@
 {
   "mode": "local",
-  "started_at": "2026-09-04T22:31:44.087261+00:00",
-  "finished_at": "2026-09-04T22:36:40.930525+00:00",
-  "passed": false,
+  "started_at": "2026-09-05T03:41:31.461322+00:00",
+  "finished_at": "2026-09-05T03:50:29.779071+00:00",
+  "passed": true,
   "case_count": 1179,
-  "passed_count": 1178,
+  "passed_count": 1179,
   "cases": [
     {
       "name": "dataset_token",
@@ -9353,10 +9353,10 @@
     {
       "name": "lookup_surface_form:surface",
       "category": "surface",
-      "passed": false,
+      "passed": true,
       "detail": "local_count=1; online_count=1",
       "local_summary": "sref=lemma:v1:422ce86c59a6f587a848cff402a6498aa90417ab966fcae166b4f02cbe6c6436 text='Haus' pos=NOUN gender='das' id=179734; sref=lemma:v1:0b1d59a78010d0f8de177d9a40f3651506753cfad8235c1800f994574dc1c1a5 text='Haus' pos=NOUN gender=None id=179733; sref=lemma:v1:58d3a8aee1d901b177c8b7a07524c528fb022f0377442d32375f0ec52eed2bf5 text='Hauß' pos=NOUN gender=None id=180840; sref=lemma:v1:f621a5a86ce1d9c55c3213bc693cc9b1bfeb3ca73b9e30ca659c42b767b1591c text='Häusser' pos=PROPN gender='der' id=196528; sref=lemma:v1:c6c34b7314e209d7d50d1a7ec19694a6ca80290516d4142538d898422c215087 text='Häusser' pos=PROPN gender='die' id=196529",
-      "online_summary": "sref=lemma:v1:ebf329a73e219a34ad471033aacbd6a2bcd2d9a6654e8def0b53b7afcf362535 text='Häuser' pos=NOUN gender=None id=196450"
+      "online_summary": "sref=lemma:v1:422ce86c59a6f587a848cff402a6498aa90417ab966fcae166b4f02cbe6c6436 text='Haus' pos=NOUN gender='das' id=179734; sref=lemma:v1:0b1d59a78010d0f8de177d9a40f3651506753cfad8235c1800f994574dc1c1a5 text='Haus' pos=NOUN gender=None id=179733; sref=lemma:v1:58d3a8aee1d901b177c8b7a07524c528fb022f0377442d32375f0ec52eed2bf5 text='Hauß' pos=NOUN gender=None id=180840; sref=lemma:v1:f621a5a86ce1d9c55c3213bc693cc9b1bfeb3ca73b9e30ca659c42b767b1591c text='Häusser' pos=PROPN gender='der' id=196528; sref=lemma:v1:c6c34b7314e209d7d50d1a7ec19694a6ca80290516d4142538d898422c215087 text='Häusser' pos=PROPN gender='die' id=196529"
     },
     {
       "name": "lookup_exact:unknown",
