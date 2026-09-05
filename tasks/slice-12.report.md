@@ -1016,3 +1016,133 @@ Final review conclusion:
     NO SECOND BROAD SLICE-12 REVIEW IS REQUIRED.
 
 ---REVIEW RECEIPT END---
+
+
+# ---------------------------------------------------------------------------
+# Post-closure production surface-form parity repair
+# ---------------------------------------------------------------------------
+
+Discovered by Slice-13 production differential (`1178 / 1179 PASS`); the
+single failing case was `lookup_surface_form:surface` against the
+authoritative production corpus.
+
+## Production reproducer
+
+    query = "Häuser"
+
+The production corpus carries simultaneously:
+
+  * `lemma "Häuser"` (id `196450`, NOUN, no gender) — authoritative;
+  * `surface_form "Häuser"` rows pointing at lemma `Haus` (id `179733`,
+    id `179734`), lemma `Hauß` (id `180840`), and lemma `Häusser` (id
+    `196528`, id `196529`).
+
+## Before
+
+Local before:
+
+    sref=lemma:v1:422ce86c59a6f587a848cff402a6498aa90417ab966fcae166b4f02cbe6c6436 text='Haus' pos=NOUN gender='das' id=179734
+    sref=lemma:v1:0b1d59a78010d0f8de177d9a40f3651506753cfad8235c1800f994574dc1c1a5 text='Haus' pos=NOUN gender=None id=179733
+    sref=lemma:v1:58d3a8aee1d901b177c8b7a07524c528fb022f0377442d32375f0ec52eed2bf5 text='Hauß' pos=NOUN gender=None id=180840
+    sref=lemma:v1:f621a5a86ce1d9c55c3213bc693cc9b1bfeb3ca73b9e30ca659c42b767b1591c text='Häusser' pos=PROPN gender='der' id=196528
+    sref=lemma:v1:c6c34b7314e209d7d50d1a7ec19694a6ca80290516d4142538d898422c215087 text='Häusser' pos=PROPN gender='die' id=196529
+
+Online before:
+
+    sref=lemma:v1:ebf329a73e219a34ad471033aacbd6a2bcd2d9a6654e8def0b53b7afcf362535 text='Häuser' pos=NOUN gender=None id=196450
+
+## Root cause
+
+`OnlineDictionaryProvider._lookup_exact_with_budget(query, surface=True)`
+consulted the `lemma` table first and only fell back to the
+`surface_form` table when the lemma query returned no rows. When the
+query string was simultaneously an authoritative lemma row, the lemma
+match suppressed the surface_form fallback, violating CF2 surface-only
+parity with Local.
+
+## Exact fix
+
+Split `_lookup_exact_with_budget` into two explicit branches:
+
+  * `surface=False`: existing lemma-table path, including optional
+    `pos`/`gender` filtering and Bloom pruning, unchanged.
+  * `surface=True`: query the `surface_form` table ONLY (no lemma
+    consult, no lemma miss required, no union of arbitrary exact-lemma
+    rows). The Bloom membership filter is bypassed exactly as before.
+
+Preserved unchanged: `lookup_buckets_from_query(query)` routing closure;
+Bloom bypass for surface-form lookup; per-operation budget behavior;
+shard cache lease/release; deduplication by `lemma_id`; ordering
+semantics; numeric identity cache population; all error behavior.
+
+The `candidate_lookup` exact-first then surface-form ladder is untouched;
+the surface-fallback path now flows through the corrected method.
+
+## Collision regression added
+
+`tests/test_slice12_settings.py::test_surface_form_parity_with_collision_fixture`
+builds a focused fixture with both `lemma "Häuser"` (id=2, NOUN, das)
+and `surface_form "Häuser" -> Haus` (id=1), proves Local and Online
+return identical `semantic_ref` sets on direct surface lookup, asserts
+the lemma row does NOT suppress surface_form matches, asserts direct
+exact lookup is independent and unchanged, and asserts non-collision
+surface-form behavior remains green. Confirmed the regression test
+fails on pre-repair code and passes on post-repair code.
+
+## Focused test counts
+
+  * `tests/test_provider_differential.py`: **42 passed**
+  * `tests/test_slice12_settings.py`: **25 passed** (including the new
+    collision regression)
+  * `tests/test_routing_equivalence.py`: **30 passed**
+  * `tests/test_online_manifest.py` + `tests/test_online_cache.py` +
+    `tests/test_online_transport.py`: **69 passed**
+  * `ruff check .`: **All checks passed**
+  * `mypy --strict .`: **Success: no issues found in 63 source files**
+  * `tools/check_agents.py`: **passed** (R1, R3, R6, R7, R12, R13)
+  * `tools/check_modules.py`: **passed** (23 modules)
+
+## Production verifier result
+
+The Slice-13 verifier (`df89426568205fb098c9b46a5aa4dac2dda20ca9`,
+`tools/verify_online_dictionary_release.py`) was extracted to
+`/tmp/opencode/slice13/verify.py` and run against the existing
+production staging at `/home/saber/.cache/flashcard/builds/20260904T213935Z/`
+with the repaired provider code from this branch, no tracked-file
+modification and no corpus rebuild:
+
+    case_count:   1179
+    passed_count: 1179
+
+Single previously failing case (`lookup_surface_form:surface`) now
+passes with Online returning the same five surface_form rows that Local
+returns; no other case regressed.
+
+## Final `make gate` result
+
+`make gate` exited 0 on the exact repair tree:
+
+  * `ruff check .`: All checks passed.
+  * `mypy --strict .`: Success: no issues found in 63 source files.
+  * `pytest -q`: 1003 passed, 0 failed (1751.71 s).
+  * `tools/check_agents.py`: AGENTS checks passed (R1, R3, R6, R7,
+    R12, R13).
+  * `tools/check_modules.py`: MODULES validation passed (23 modules).
+
+Final HEAD: `86786adf28156dcf4ae06e169211af2915e1d772` pushed to
+`origin/repair/slice-12-surface-parity`.
+
+## Scope confirmation
+
+  * No Slice-13 branch was modified (`origin/slice/13` remains
+    `df89426568205fb098c9b46a5aa4dac2dda20ca9`).
+  * No release asset was modified (`release/dictionary-online-manifest-v2.json`
+    remains the Slice-13 schema-shaped fixture on disk; production manifest
+    exists only in staging).
+  * `dictionary-v2` was not modified (untouched throughout).
+  * Production corpus was NOT rebuilt (existing staging reused as-is).
+  * Tracked writes limited to the allowlist (`app/provider_online.py`,
+    `tests/test_slice12_settings.py`).
+
+This report addition is historical repair evidence only; the accepted
+Slice-12 review receipt above is preserved verbatim.

@@ -590,12 +590,14 @@ class OnlineDictionaryProvider(DictionaryProvider):
     ) -> Sequence[LemmaHit]:
         if not isinstance(query, str) or not query:
             return ()
-        buckets = lookup_buckets_from_query(query)
         # Bloom membership check for lemma-oracle pruning. Surface-form
         # lookup is allowed to bypass the filter because the filter only
         # covers authoritative lemma texts, not surface forms.
         if not surface and not self.filter.contains_query(query):
             return ()
+        buckets = lookup_buckets_from_query(query)
+        primary = query
+        secondary = query.lower()
         results: dict[int, LemmaHit] = {}
         seen_lemma_ids: set[int] = set()
         for bucket in buckets:
@@ -609,28 +611,13 @@ class OnlineDictionaryProvider(DictionaryProvider):
             lease = self._lease_lookup(request, budget)
             try:
                 with self._open_readonly(lease) as conn:
-                    primary = query
-                    secondary = query.lower()
-                    sql = (
-                        "SELECT id, semantic_ref, lemma, pos, gender, freq_rank "
-                        "FROM lemma WHERE (lemma = ? OR lower(lemma) = ?) "
-                    )
-                    params: list[Any] = [primary, secondary]
-                    if not surface:
-                        if pos is not None:
-                            sql += "AND pos = ? "
-                            params.append(pos)
-                        if gender is not None:
-                            sql += "AND gender = ? "
-                            params.append(gender)
-                    sql += (
-                        "ORDER BY freq_rank ASC NULLS LAST, pos ASC, gender ASC NULLS LAST, "
-                        "semantic_ref ASC"
-                    )
-                    rows = conn.execute(sql, params).fetchall()
-                    if surface and not rows:
-                        # Surface-form fallback when the lemma is not found
-                        # directly: probe the surface_form table.
+                    if surface:
+                        # Direct surface-form resolution: query the
+                        # ``surface_form`` table ONLY. The lemma table
+                        # is intentionally NOT consulted, so a query
+                        # string that is BOTH an authoritative lemma
+                        # AND a surface form of another lemma does NOT
+                        # suppress valid surface_form matches (CF2).
                         rows = conn.execute(
                             "SELECT l.id, l.semantic_ref, l.lemma, l.pos, l.gender, "
                             "l.freq_rank FROM surface_form sf "
@@ -640,6 +627,23 @@ class OnlineDictionaryProvider(DictionaryProvider):
                             "l.gender ASC NULLS LAST, l.semantic_ref ASC",
                             [primary, secondary],
                         ).fetchall()
+                    else:
+                        sql = (
+                            "SELECT id, semantic_ref, lemma, pos, gender, freq_rank "
+                            "FROM lemma WHERE (lemma = ? OR lower(lemma) = ?) "
+                        )
+                        params: list[Any] = [primary, secondary]
+                        if pos is not None:
+                            sql += "AND pos = ? "
+                            params.append(pos)
+                        if gender is not None:
+                            sql += "AND gender = ? "
+                            params.append(gender)
+                        sql += (
+                            "ORDER BY freq_rank ASC NULLS LAST, pos ASC, gender ASC NULLS LAST, "
+                            "semantic_ref ASC"
+                        )
+                        rows = conn.execute(sql, params).fetchall()
                     for row in rows:
                         lemma_id = int(row[0])
                         lemma_ref = str(row[1])
