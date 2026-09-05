@@ -33,11 +33,12 @@ import venv
 from contextlib import closing
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
 from app.dict_install import compute_sha256
+from app.dictionary_session import OnlineSessionInfo
 from tools.build_dict import compute_lemma_semantic_ref, compute_sense_semantic_ref
 
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "reference" / "schema.sql"
@@ -1263,3 +1264,249 @@ def test_launcher_rejects_online_cache_dir_flag(tmp_path: Path) -> None:
     )
     assert proc.returncode != 0
     assert "unrecognized arguments" in proc.stderr or "unrecognized argument" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Post-publication explicit-Online startup repair
+# ---------------------------------------------------------------------------
+
+
+class _FakeOnlineProvider:
+    """Minimal Online provider stand-in for launcher startup tests."""
+
+    asset_token = "fake-online-asset-token"
+
+    def close(self) -> None:
+        return None
+
+
+def _recording_uvicorn() -> tuple[types.ModuleType, list[object]]:
+    """A fake ``uvicorn`` module recording the app passed to ``run``."""
+    fake = types.ModuleType("uvicorn")
+    captured: list[object] = []
+
+    def _run(*args: object, **_kwargs: object) -> None:
+        captured.append(args[0] if args else None)
+
+    fake.run = _run  # type: ignore[attr-defined]
+    return fake, captured
+
+
+def _patch_lazy_online_factory(
+    monkeypatch: pytest.MonkeyPatch,
+    module: types.ModuleType,
+    *,
+    provider: object,
+    info: OnlineSessionInfo,
+    factory_calls: list[int],
+) -> None:
+    """Replace the launcher's Online-factory builder with a counting fake.
+
+    The real ``_build_online_factory`` closes over the committed trusted
+    Online manifest and the Product transport. The patched builder returns
+    a factory that records each invocation and hands back the given
+    provider/info pair, so launcher tests never touch the network.
+    """
+
+    def _builder(**_kwargs: object) -> object:
+        def _factory() -> tuple[object, OnlineSessionInfo]:
+            factory_calls.append(1)
+            return provider, info
+
+        return _factory
+
+    monkeypatch.setattr(module, "_build_online_factory", _builder)
+
+
+def _explicit_online_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    data_dir: Path,
+    port: int,
+) -> tuple[types.ModuleType, list[object], list[int], OnlineSessionInfo]:
+    """Run explicit ``--dictionary-mode online`` startup in-process.
+
+    Patches the canonical-identity verification and the Offline installer
+    to explode, swaps in the counting lazy Online factory, and runs
+    ``main`` under the recording fake uvicorn. Returns the launcher
+    module, captured apps, factory invocation log, and session info.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    module = _load_launcher_module()
+    uvicorn_fake, captured = _recording_uvicorn()
+    monkeypatch.setitem(sys.modules, "uvicorn", uvicorn_fake)
+
+    def _verify_boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError(
+            "_verify_canonical_dictionary must not run for explicit online startup"
+        )
+
+    monkeypatch.setattr(module, "_verify_canonical_dictionary", _verify_boom)
+
+    def _install_boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("Offline install must not run for explicit online startup")
+
+    import app.dict_install as dict_install_module
+
+    monkeypatch.setattr(dict_install_module, "install_dictionary", _install_boom)
+
+    provider = _FakeOnlineProvider()
+    info = OnlineSessionInfo(
+        dataset_token="dataset-repair-test",
+        asset_token="fake-online-asset-token",
+        cache_dir=str(data_dir / "online-cache"),
+    )
+    factory_calls: list[int] = []
+    _patch_lazy_online_factory(
+        monkeypatch, module, provider=provider, info=info, factory_calls=factory_calls
+    )
+
+    rc = module.main(
+        [
+            "--data-dir",
+            str(data_dir),
+            "--dictionary-mode",
+            "online",
+            "--port",
+            str(port),
+            "--no-browser",
+        ],
+    )
+    assert rc == 0
+    return module, captured, factory_calls, info
+
+
+def test_explicit_online_starts_without_canonical_offline_asset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit ``--dictionary-mode online`` with a fresh data dir and NO
+    canonical Offline dictionary starts successfully: the canonical
+    identity check is never called, no Offline install/copy happens, and
+    the full Offline asset is never created.
+    """
+    data_dir = tmp_path / "data"
+    canonical = data_dir / "dictionary" / "dictionary.sqlite"
+    assert not canonical.exists()
+
+    _explicit_online_main(tmp_path, monkeypatch, data_dir=data_dir, port=8091)
+
+    assert not canonical.exists()
+    # The Online factory was invoked exactly once (provider constructed).
+    # No Offline asset materialized in any form.
+    assert not canonical.exists()
+    assert not list((data_dir / "dictionary").glob("*"))
+
+
+def test_explicit_online_binds_provider_and_session_info(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit Online startup invokes the Online factory exactly once,
+    the actual provider + OnlineSessionInfo reach ``create_app``, the
+    runtime mode is ``online`` (not ``unconfigured``) before any
+    ``/use-online`` call, the factory is retained for session switching,
+    and no dictionary-mode preference file is persisted.
+    """
+    data_dir = tmp_path / "data"
+    _, captured, factory_calls, info = _explicit_online_main(
+        tmp_path, monkeypatch, data_dir=data_dir, port=8092
+    )
+
+    assert factory_calls == [1]
+    app = cast(Any, captured[0])
+    assert app.state.dictionary_mode == "online"
+    assert app.state.online_provider is not None
+    assert app.state.online_session_info is info
+    assert app.state.online_session_info.dataset_token == "dataset-repair-test"
+    assert app.state.session is not None
+    assert app.state.session.is_online
+    # Factory retained on app.state for normal session switching.
+    assert app.state.online_provider_factory is not None
+    # Session-only mode semantics: no persisted mode/preference file.
+    persisted = [p.name for p in data_dir.rglob("*") if p.is_file()]
+    assert all(name == "flashcards.sqlite" for name in persisted)
+
+
+def test_default_chooser_startup_activates_no_online_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default startup (no explicit mode, no valid canonical Offline) keeps
+    mode ``unconfigured`` and constructs/activates NO Online provider at
+    startup: the factory is bound but never invoked.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    module = _load_launcher_module()
+    uvicorn_fake, captured = _recording_uvicorn()
+    monkeypatch.setitem(sys.modules, "uvicorn", uvicorn_fake)
+
+    provider = _FakeOnlineProvider()
+    info = OnlineSessionInfo(
+        dataset_token="dataset-chooser-test",
+        asset_token="fake-online-asset-token",
+        cache_dir=str(tmp_path / "data" / "online-cache"),
+    )
+    factory_calls: list[int] = []
+    _patch_lazy_online_factory(
+        monkeypatch, module, provider=provider, info=info, factory_calls=factory_calls
+    )
+
+    rc = module.main(
+        [
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--port",
+            str(8093),
+            "--no-browser",
+        ],
+    )
+    assert rc == 0
+    assert factory_calls == []
+    app = cast(Any, captured[0])
+    assert app.state.dictionary_mode == "unconfigured"
+    assert app.state.online_provider is None
+    assert app.state.session is None
+    # Factory is bound for the later user choice but was never invoked.
+    assert app.state.online_provider_factory is not None
+
+
+def test_cli_online_conflicts_fail_before_online_factory_construction(
+    tmp_path: Path, synthetic_dict: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The three explicit-Online CLI conflicts exit 2 before the Online
+    factory is even built (fail-before-side-effects).
+    """
+    monkeypatch.setitem(sys.modules, "uvicorn", _fake_uvicorn())
+    module = _load_launcher_module()
+
+    def _factory_builder_boom(**_kwargs: object) -> object:
+        raise AssertionError(
+            "online factory must not be built on a contradictory CLI row"
+        )
+
+    monkeypatch.setattr(module, "_build_online_factory", _factory_builder_boom)
+
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(
+        manifest_path, filename="dictionary.sqlite", dictionary=synthetic_dict
+    )
+
+    conflict_rows = [
+        ["--manifest", str(manifest_path)],
+        ["--dict-path", str(synthetic_dict)],
+        ["--install-dictionary"],
+    ]
+    for extra in conflict_rows:
+        with pytest.raises(SystemExit) as exc_info:
+            module.main(
+                [
+                    "--data-dir",
+                    str(tmp_path / "data"),
+                    "--dictionary-mode",
+                    "online",
+                    *extra,
+                    "--no-browser",
+                ],
+            )
+        assert exc_info.value.code == 2
