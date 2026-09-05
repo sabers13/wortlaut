@@ -567,6 +567,134 @@ def test_provider_oracle_surface_form_returns_local_and_online_parity(
             pass
 
 
+def _build_collision_local_dict(tmp_path: Path) -> Path:
+    """Build a Local dictionary with a lemma/surface_form collision.
+
+    The fixture carries:
+      * lemma ``Haus`` (id=1, ``das``) whose surface form ``Häuser``
+        also points back to it via the ``surface_form`` table;
+      * lemma ``Häuser`` (id=2, ``das``) so the inflected text is
+        simultaneously authoritative.
+
+    The production differential failed on query ``"Häuser"`` because a
+    direct lemma row suppresses valid surface_form matches under the
+    pre-repair provider. This fixture exercises that collision.
+    """
+    db = tmp_path / "collision.sqlite"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db)
+    conn.executescript(_full_part_a_schema())
+    rows = [
+        ("Haus", "NOUN", "das"),
+        ("Häuser", "NOUN", "das"),
+    ]
+    for ident, (lemma, pos, gender) in enumerate(rows, start=1):
+        lref = compute_lemma_semantic_ref(lemma, pos, gender)
+        sref = compute_sense_semantic_ref(lref, "wiktextract:enwiktionary", f"collision:{ident}")
+        sql = (
+            "INSERT INTO lemma (id, semantic_ref, lemma, pos, gender, "
+            "plural_none, source, license) VALUES (?, ?, ?, ?, ?, 0, "
+            "'fixture', 'CC0')"
+        )
+        conn.execute(sql, (ident, lref, lemma, pos, gender))
+        conn.execute(
+            "INSERT INTO sense (id, lemma_id, semantic_ref, source_namespace, source_ref, ord, "
+            "source, license) VALUES (?, ?, ?, ?, ?, 0, 'fixture', 'CC0')",
+            (ident, ident, sref, "wiktextract:enwiktionary", f"collision:{ident}"),
+        )
+        conn.execute(
+            "INSERT INTO sense_meaning (id, sense_id, language, kind, ord, text, source, license) "
+            "VALUES (?, ?, 'en', 'translation', 0, ?, 'fixture', 'CC0')",
+            (ident, ident, f"gloss-{ident}"),
+        )
+    conn.execute(
+        "INSERT INTO surface_form (form, lemma_id) VALUES (?, ?)",
+        ("Häuser", 1),
+    )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_surface_form_parity_with_collision_fixture(tmp_path: Path) -> None:
+    """CF2 collision regression: a lemma and a surface_form sharing one text.
+
+    Production reproducer: ``query = "Häuser"`` with the authoritative
+    corpus carrying both ``lemma "Häuser"`` and
+    ``surface_form "Häuser" -> Haus``. The pre-repair provider consulted
+    the lemma table first, so the lemma row suppressed valid
+    surface_form matches. The repair makes direct surface lookup query
+    the ``surface_form`` table only.
+
+    Asserts:
+      A. ``local.lookup_surface_form("Häuser")`` returns the
+         surface-form-table matches (``Haus``).
+      B. ``online.lookup_surface_form("Häuser")`` returns the same
+         ``semantic_ref`` set as Local.
+      C. A simultaneously-existing lemma row named ``"Häuser"`` does NOT
+         suppress those surface-form results.
+      D. Direct ``online.lookup_exact("Häuser")`` still returns the
+         exact-lemma result exactly as Local does (unchanged behavior).
+      E. Existing non-collision surface-form behavior remains green.
+    """
+    local_path = _build_collision_local_dict(tmp_path / "collision")
+    local = LocalDictionaryProvider(local_path)
+    online = _build_online_provider_from_local(local_path, output_root=tmp_path / "online-c")
+    try:
+        local_exact = [hit.semantic_ref for hit in local.lookup_exact("Häuser")]
+        assert len(local_exact) == 1, (
+            "fixture premise: exactly one authoritative lemma 'Häuser'"
+        )
+        local_surface = [hit.semantic_ref for hit in local.lookup_surface_form("Häuser")]
+        assert len(local_surface) == 1, (
+            "fixture premise: exactly one surface_form 'Häuser' -> Haus"
+        )
+        haus_ref = compute_lemma_semantic_ref("Haus", "NOUN", "das")
+        hauser_ref = compute_lemma_semantic_ref("Häuser", "NOUN", "das")
+        assert sorted(local_surface) == [haus_ref], (
+            "Local premise: surface_form 'Häuser' resolves to lemma Haus only"
+        )
+        assert local_exact == [hauser_ref], (
+            "Local premise: exact lemma 'Häuser' resolves to itself only"
+        )
+
+        # A. Local direct surface lookup returns the surface_form rows.
+        # (asserted above via local_surface)
+
+        # B + C. Online direct surface lookup returns the SAME
+        # semantic_ref set as Local even though a lemma row sharing the
+        # text exists. Pre-repair this returned the lemma row only.
+        online_surface = [hit.semantic_ref for hit in online.lookup_surface_form("Häuser")]
+        assert sorted(online_surface) == sorted(local_surface), (
+            "Online surface-form parity broken: collision with lemma "
+            f"row suppressed surface_form matches. expected={sorted(local_surface)} "
+            f"got={sorted(online_surface)}"
+        )
+        assert online_surface, "Online must NOT return an empty surface hit set"
+        assert hauser_ref not in online_surface, (
+            "Online must NOT return the lemma 'Häuser' row from a "
+            "surface_form lookup (CF2 surface-only semantics)"
+        )
+        assert online_surface == [haus_ref], (
+            "Online surface-form result must equal the surface_form-table match set"
+        )
+
+        # D. Direct exact lookup is independent and unchanged.
+        online_exact = [hit.semantic_ref for hit in online.lookup_exact("Häuser")]
+        assert sorted(online_exact) == sorted(local_exact)
+        assert online_exact == [hauser_ref]
+
+        # E. Existing non-collision surface-form behavior remains green.
+        online_surface_haus = [hit.semantic_ref for hit in online.lookup_surface_form("Haus")]
+        local_surface_haus = [hit.semantic_ref for hit in local.lookup_surface_form("Haus")]
+        assert online_surface_haus == local_surface_haus
+    finally:
+        try:
+            online.close()
+        except Exception:
+            pass
+
+
 def test_api_highlight_works_with_online_provider(online_client: TestClient) -> None:
     response = online_client.post(
         "/vocab/highlight",
