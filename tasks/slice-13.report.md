@@ -598,3 +598,88 @@ Real end-user Online and Offline served-product smoke both passed.
 No second broad Slice-13 review was performed by this worker.
 `slice/13` carries the post-publication receipt.
 `main` was not modified by this publication worker.
+
+## Post-publication explicit-Online repair integration
+
+Integration of the accepted narrow Slice-12 explicit-Online startup repair into
+`slice/13`, with the exact combined committed tree proven by real public
+smoke with NO overlay.
+
+- `REPAIR_SHA`: `9125b1459227123adf54572e7aa10b3b1a6569f9`
+  (branch `repair/slice12-explicit-online-startup`, base `4c58e8b385c16b8d883d0c805a8d070d9047da4d`)
+- `PRE_INTEGRATION_SLICE13`: `6868209dddf9943bda2236c35dd1ab8c679df149`
+- `MERGE_SHA`: `2c38704c3b5a1a5ce8eb5580def32e607b61ffd0`
+  (`git merge --no-ff origin/repair/slice12-explicit-online-startup` — no conflicts;
+  `git merge-base --is-ancestor 9125b145… HEAD` verified)
+- `PRODUCTION_MANIFEST_SHA256`:
+  `e3565f0f087ced0b16aca3d3f5d93ce73c20166bc998ab61ede88cd6c390dd24`
+  (`release/dictionary-online-manifest-v2.json`, verified before and after the merge;
+  the repair did not alter any release file)
+- Effective changes introduced into `slice/13` by the merge, plus the merge commit itself:
+  `wortlaut`, `tests/test_launcher.py`, `tasks/slice-12.report.md` (verified via
+  `git diff --name-status 6868209…2c38704…`). No rebase, no squash, no rewrite of
+  Slice-13 publication history.
+
+### Focused regression validation (on the integrated tree)
+
+- `tests/test_launcher.py`: 37 passed
+- `tests/test_slice12_settings.py`: 25 passed
+- `ruff check wortlaut tests/test_launcher.py`: exit 0, all checks passed
+- `mypy --strict .`: exit 0, no issues in 64 source files
+- Existing explicit-Offline and CLI-conflict tests remained passing (included in the above)
+
+### Exact integrated-tree explicit-Online smoke (NO overlay)
+
+Launched the actual post-merge `slice/13` worktree:
+`./wortlaut --dictionary-mode online --data-dir <fresh disposable> --port <free> --no-browser`
+with no Offline dictionary present. Worktree verified clean
+(`git status --porcelain --untracked-files=all` empty) before launch.
+
+- `EXPLICIT_ONLINE_SERVER_START`: OK (normal server readiness, no install step)
+- `GET /vocab/settings/dictionary` (WITHOUT any `/use-online` POST):
+  HTTP 200, `mode = online`, `canonical_offline_present = false`,
+  `online_info.asset_token = 1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c`
+- `GET /vocab/lookup?q=Haus`: HTTP 200, 4 valid Haus candidates,
+  `asset_token = 1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c`
+- After lookup: `<data-dir>/dictionary/dictionary.sqlite` did NOT exist.
+  The Online cache contained 70 verified shard files (~115 MB); no file ≥ 100 MB
+  anywhere in the data dir. The 945418240-byte Offline dictionary was NOT
+  created, installed, copied, hardlinked, or symlinked.
+- Server terminated cleanly.
+- `OVERLAY_USED`: NO — no overlay, no temporary replacement manifest, no
+  downloaded manifest substituted into the repo, no hardlink, no symlink, no
+  uncommitted production-code modification. The smoke ran against the exact
+  committed combined tree.
+
+### Default first-run chooser smoke (unmodified lazy path)
+
+Fresh separate data dir, no Offline dictionary,
+`./wortlaut --data-dir <fresh> --port <different free> --no-browser`:
+
+- Pre-choice `GET /vocab/settings/dictionary`: HTTP 200, `mode = unconfigured`,
+  `online_active = false`; `online-cache/` contained 0 files before choice.
+- `POST /vocab/settings/dictionary/use-online` (R12 headers: `X-Flashcards-Request: 1`,
+  matching `Origin`, `Content-Type: application/json`): HTTP 200, `status = online`,
+  expected dataset/asset token.
+- `GET /vocab/lookup?q=Haus`: HTTP 200, 4 valid candidates, expected asset token.
+- Server terminated cleanly.
+
+### Final full gate (integrated candidate)
+
+- `make gate`: exit 0 (single final run, after all executable/test state was final;
+  no executable/test change after it — the receipt below is a docs-only append)
+- pytest: 1007 passed (164 warnings); ruff: all checks passed;
+  mypy: no issues in 64 source files; AGENTS checks passed (R1, R3, R6, R7, R12, R13);
+  MODULES validation passed (23 modules)
+
+### Integrity statements
+
+- Both Releases unchanged (read-only verification only):
+  `dictionary-online-v2` (release id 383167908, 579 assets) and
+  `dictionary-v2` (release id 381651690; `dictionary-v2.sqlite` 945418240 bytes,
+  `sha256:1698b9979099098bf8d6e6fd7f9194134a927d428e3c2b1905a626eb8ee67d4c`).
+- `CORPUS_REBUILT`: NO
+- `MAIN_MODIFIED`: NO (`origin/main` remains `4c58e8b385c16b8d883d0c805a8d070d9047da4d`)
+- `WORKTREE`: clean after the receipt commit
+- No broad review and no independent full-diff review were performed.
+- This report append is the only file edit after the merge.
