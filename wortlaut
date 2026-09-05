@@ -28,7 +28,7 @@ import os
 import sys
 import webbrowser
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from app.dict_install import DictionaryManifest
@@ -285,10 +285,9 @@ def _build_online_factory(
     caller cannot substitute a different manifest, URL, repository, or
     host — that surface is intentionally absent from the Product.
     """
-    from app.dictionary_mode import OfflineInstallTriple  # noqa: PLC0415
+    from app.dictionary_session import OnlineSessionInfo  # noqa: PLC0415
     from app.online_manifest import load_manifest  # noqa: PLC0415
     from app.online_transport import create_product_online_provider  # noqa: PLC0415
-    from app.dictionary_session import OnlineSessionInfo  # noqa: PLC0415
 
     online_manifest_path = (
         REPO_ROOT / "release" / "dictionary-online-manifest-v2.json"
@@ -407,7 +406,6 @@ def main(argv: list[str] | None = None) -> int:
 
     from app.standalone import (  # noqa: PLC0415
         StandaloneError,
-        build_standalone_app,
         ensure_user_db,
         resolve_standalone_paths,
     )
@@ -471,6 +469,16 @@ def main(argv: list[str] | None = None) -> int:
                     "default chooser path: skipping canonical identity "
                     "verification (no offline asset present yet)"
                 )
+            elif effective_mode == "online":
+                # Explicit ``--dictionary-mode online`` (ADR-0009 startup
+                # precedence): the trusted Product Online provider is the
+                # dictionary source for this session, so the full
+                # canonical Offline asset is NOT required. No identity
+                # check, no install, no copy of the Offline asset.
+                _log(
+                    "explicit online: canonical Offline dictionary not "
+                    "required for this session; skipping identity check"
+                )
             else:
                 _verify_canonical_dictionary(
                     dictionary_path=paths.dictionary_path,
@@ -520,6 +528,17 @@ def main(argv: list[str] | None = None) -> int:
             expected_bytes=int(manifest.bytes) if manifest is not None else 0,
             expected_sha=str(manifest.sha256) if manifest is not None else "",
         )
+        # Explicit Online startup: the provider is constructed NOW from
+        # the committed trusted Online manifest and bound into the app,
+        # so the process starts in mode ``online`` without a preceding
+        # ``/use-online`` round trip. The factory is retained on
+        # ``app.state`` for normal session switching; no Offline asset
+        # is installed, copied, or downloaded.
+        try:
+            online_provider, online_info = online_factory()
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"online provider construction failed: {exc}\n")
+            return 2
         try:
             app = _create_app(
                 dict_path=None,
@@ -544,6 +563,8 @@ def main(argv: list[str] | None = None) -> int:
                     manifest.filename if manifest is not None else "dictionary.sqlite"
                 ),
                 offline_install_triple=offline_triple,
+                online_provider=online_provider,
+                online_session_info=online_info,
                 online_provider_factory=online_factory,
             )
         except (DictionaryRuntimeError, StandaloneError) as exc:
@@ -592,8 +613,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         try:
-            from app.deck import DictionaryRuntime  # noqa: PLC0415
             from app.api import create_app  # noqa: PLC0415
+            from app.deck import DictionaryRuntime  # noqa: PLC0415
 
             runtime = DictionaryRuntime(
                 paths.dictionary_path,
